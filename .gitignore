@@ -1,0 +1,7 @@
+# Legacy in-repo host artifacts (install.sh now generates these in ~/.lizard-code/host).
+# Kept ignored so older checkouts don't accidentally commit them.
+src/host/host-config.json
+src/host/launch.sh
+src/host/host.log
+
+.DS_Store

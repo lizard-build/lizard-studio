@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Lizard Studio — UI Polish Tools",
+  "version": "0.1.0",
+  "description": "Rulers, measurements, guides, grids, a design overlay and a local terminal to polish any UI. 100% local.",
+  "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtWZVbUNAdtr6CHfUL1o0hPmvA3bJf4m0xFMLfvtgAyD6XIj57mqDYXis4JHK+3KGXUfrqdMxfI8pXqRtuAMwhcTKeaZlkB6HJAiSKjaDbe1tRsbh6AK4FtPghPdw+wCxOQwLoNzWNBXqQq8B5XgSYkEqLLio6OEt6m+rtQdcEtckn0IlxJbhsFyqzeHb8/XnysGEWVXM3urkNNe8bm1jmQy9AX7RTPboVRuUFqG4nYaenSlIAy9Qe6PQ1LQGJT7t3I657LqT/w9Huyy12E6QF/FMG/ym5WBSkzNIoRBKls0JbDFuAK/Ml6IhiQAy41J7IFlFrHeU4jPUv5KeTHNaIwIDAQAB",
+  "permissions": ["activeTab", "storage", "clipboardWrite", "sidePanel", "nativeMessaging", "declarativeNetRequest", "debugger", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Lizard Studio — toggle toolbar (set a shortcut in chrome://extensions/shortcuts)"
+  },
+  "side_panel": {
+    "default_path": "src/panel/panel.html"
+  },
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "commands": {
+    "toggle-toolbar": {
+      "description": "Toggle the Lizard Studio toolbar"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "run_at": "document_idle",
+      "js": [
+        "src/core.js",
+        "src/tools/inspector.js",
+        "src/tools/rulers.js",
+        "src/tools/inspect.js",
+        "src/tools/guides.js",
+        "src/tools/grid.js",
+        "src/tools/imageoverlay.js",
+        "src/tools/picker.js",
+        "src/tools/responsive.js",
+        "src/toolbar.js",
+        "src/main.js"
+      ]
+    }
+  ]
+}
