@@ -314,10 +314,17 @@ function startClaude({ id, cwd, model, permissionMode, resume }) {
   id = id || "default";
   killSession(id);
 
+  // No silent fallback to $HOME: a session must run in a real, chosen project
+  // directory. If the panel didn't supply one (or it's gone), tell it to ask.
+  if (!cwd || !existsSync(cwd)) {
+    send({ type: "needsFolder", id, message: "Choose a project folder to start a session." });
+    return;
+  }
+
   const s = {
     id,
     child: null,
-    cwd: cwd && existsSync(cwd) ? cwd : homedir(),
+    cwd,
     model: model || null,
     mode: permissionMode || "default",
     sessionId: resume || null,

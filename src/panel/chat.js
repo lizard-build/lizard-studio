@@ -79,6 +79,7 @@
     WebFetch: { icon: "globe", label: "Fetch" },
     WebSearch: { icon: "search", label: "Search" },
     TodoWrite: { icon: "todo", label: "Plan" },
+    ToolSearch: { icon: "search", label: "Search tools" },
   };
 
   const DEFAULT_TITLE = "New chat";
@@ -99,6 +100,9 @@
   let history = [];
   let lastModel = DEFAULT_MODEL;
   let lastMode = "default";
+  // Last folder the user actually picked (never home — see rememberCwd). New
+  // chats default to this so reopening the panel resumes where you left off.
+  let lastCwd = null;
 
   // Slash-command autocomplete (populated from each session's init event).
   const slash = { open: false, items: [], index: 0 };
@@ -118,6 +122,7 @@
         const p = (r && r.rkChatV2) || {};
         if (p.lastModel) lastModel = p.lastModel;
         if (p.lastMode) lastMode = p.lastMode;
+        if (p.lastCwd) lastCwd = p.lastCwd;
         if (Array.isArray(p.history)) history = p.history;
         if (Array.isArray(p.tabs) && p.tabs.length) {
           for (const t of p.tabs) {
@@ -139,8 +144,24 @@
         const c = chats.get(id);
         return { id: c.id, title: c.title, cwd: c.cwd, model: c.model, mode: c.mode, sessionId: c.sessionId };
       });
-      chrome.storage.local.set({ rkChatV2: { tabs, activeId, history: history.slice(0, 40), lastModel, lastMode } });
+      chrome.storage.local.set({ rkChatV2: { tabs, activeId, history: history.slice(0, 40), lastModel, lastMode, lastCwd } });
     } catch (_) {}
+  }
+
+  // Remember a folder the user deliberately selected so new chats can default to
+  // it. Home doesn't count as a "chosen project" — it's the unselected fallback,
+  // so we never persist it (keeps `defaultCwd` from silently locking onto ~).
+  function rememberCwd(p) {
+    if (!p) return;
+    if (home && p.replace(/\/$/, "") === home.replace(/\/$/, "")) return;
+    lastCwd = p;
+  }
+
+  // The folder a brand-new chat should start in: last picked → active tab's
+  // folder → nothing (forces an explicit choice rather than spawning in $HOME).
+  function defaultCwd() {
+    const active = chats.get(activeId);
+    return lastCwd || (active && active.cwd) || null;
   }
 
   // ---- DOM helpers ----------------------------------------------------------
@@ -160,9 +181,12 @@
     const parts = p.replace(/\/$/, "").split("/");
     return parts[parts.length - 1] || p;
   }
-  // Short label for the folder chip: just the final folder name (or ~ for home).
+  // Short label for the folder chip: the final folder name, "~" for home, or a
+  // call-to-action when nothing's been chosen yet (a session can't start without
+  // a folder, so "~" would be misleading here).
   function folderLabel(p) {
-    if (!p || (home && p.replace(/\/$/, "") === home.replace(/\/$/, ""))) return "~";
+    if (!p) return "Select folder";
+    if (home && p.replace(/\/$/, "") === home.replace(/\/$/, "")) return "~";
     return basename(p);
   }
 
@@ -344,7 +368,6 @@
       row.appendChild(ic);
       const meta = el("div", "history-meta");
       meta.appendChild(el("div", "history-title", item.title || DEFAULT_TITLE));
-      meta.appendChild(el("div", "history-sub", shortPath(item.cwd)));
       row.appendChild(meta);
       const del = el("button", "history-del");
       del.innerHTML = ICON("trash", 15);
@@ -586,20 +609,84 @@
   }
 
   function addThinking(chat, body, text) {
-    if (!text || !text.trim()) return;
-    const det = el("details", "thinking");
-    const sum = el("summary");
-    sum.innerHTML = ICON("brain", 13) + "<span>Thought process</span>";
-    det.appendChild(sum);
-    det.appendChild(R.markdown(text));
-    body.appendChild(det);
-    if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+    // Thinking/reasoning blocks are intentionally not rendered in the transcript.
+    // Timing still feeds the "thought for Xs" status metric (see streamEvent).
+    return;
   }
 
   function addText(chat, body, text) {
     body.appendChild(R.markdown(text));
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
   }
+
+  // ---- per-message footer (copy + relative time) ----------------------------
+  function relTime(ts) {
+    const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (s < 60) return "now";
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + "m ago";
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + "h ago";
+    return Math.floor(h / 24) + "d ago";
+  }
+
+  // Visible prose of an assistant message — markdown / live-stream text blocks,
+  // minus tool cards and the footer itself. Read at click time so copy reflects
+  // the finished message regardless of when the footer was attached.
+  function assistantProse(body) {
+    let out = "";
+    for (const child of body.children) {
+      if (!child.classList) continue;
+      if (child.classList.contains("tool-card") || child.classList.contains("msg-footer")) continue;
+      const t = child.innerText || child.textContent || "";
+      if (t) out += (out ? "\n" : "") + t;
+    }
+    return out.trim();
+  }
+
+  function messageFooter(getText, ts) {
+    const footer = el("div", "msg-footer");
+    const copyBtn = el("button", "msg-action");
+    copyBtn.type = "button";
+    copyBtn.title = "Copy";
+    copyBtn.setAttribute("aria-label", "Copy message");
+    copyBtn.innerHTML = ICON("copy", 13);
+    copyBtn.addEventListener("click", () => {
+      const text = getText();
+      if (!text || !navigator.clipboard || !navigator.clipboard.writeText) return;
+      navigator.clipboard.writeText(text).then(() => {
+        copyBtn.classList.add("copied");
+        copyBtn.innerHTML = ICON("check", 13);
+        setTimeout(() => {
+          copyBtn.classList.remove("copied");
+          copyBtn.innerHTML = ICON("copy", 13);
+        }, 1200);
+      }).catch(() => {});
+    });
+    const time = el("span", "msg-time");
+    time.dataset.ts = String(ts);
+    time.textContent = relTime(ts);
+    footer.appendChild(copyBtn);
+    footer.appendChild(time);
+    return footer;
+  }
+
+  // Attach the copy + time footer once an assistant message is complete. No-op
+  // for tool-only messages (no prose to copy) or if a footer is already present.
+  function finalizeAssistant(body, ts) {
+    if (!body || body.dataset.footered) return;
+    if (!assistantProse(body)) return;
+    body.dataset.footered = "1";
+    body.appendChild(messageFooter(() => assistantProse(body), ts || Date.now()));
+  }
+
+  // One shared timer keeps every relative timestamp fresh — no per-node interval.
+  setInterval(() => {
+    document.querySelectorAll(".msg-time").forEach((node) => {
+      const ts = Number(node.dataset.ts);
+      if (ts) node.textContent = relTime(ts);
+    });
+  }, 30000);
 
   // ---- live streaming (--include-partial-messages) --------------------------
   // Coalesce markdown re-renders to one per animation frame so a fast token
@@ -639,16 +726,10 @@
           body.appendChild(node);
           chat.streamBlocks.set(ev.index, { type: "text", el: node, buf: "", raf: 0 });
         } else if (cb.type === "thinking") {
-          const det = el("details", "thinking streaming");
-          det.open = true;
-          const sum = el("summary");
-          sum.innerHTML = ICON("brain", 13) + "<span>Thinking…</span>";
-          const md = el("div", "thinking-stream");
-          det.appendChild(sum);
-          det.appendChild(md);
-          body.appendChild(det);
+          // Reasoning is not shown in the transcript — we only track its timing
+          // so the status pill can report "thought for Xs". No DOM is created.
           chat.thinkStartedAt = Date.now();
-          chat.streamBlocks.set(ev.index, { type: "thinking", el: md, det, sum, buf: "", raf: 0 });
+          chat.streamBlocks.set(ev.index, { type: "thinking", el: null, buf: "", raf: 0 });
         }
         // tool_use blocks are left to the final `assistant` message (it carries
         // the complete tool input; the stream only has partial JSON fragments).
@@ -660,7 +741,6 @@
         if (!blk) break;
         const delta = ev.delta || {};
         if (delta.type === "text_delta" && blk.type === "text") blk.buf += delta.text || "";
-        else if (delta.type === "thinking_delta" && blk.type === "thinking") blk.buf += delta.thinking || "";
         else break;
         flushStreamBlock(chat, blk);
         break;
@@ -669,16 +749,13 @@
         const blk = chat.streamBlocks.get(ev.index);
         if (!blk) break;
         if (blk.raf) { cancelAnimationFrame(blk.raf); blk.raf = 0; }
-        blk.el.replaceChildren(R.markdown(blk.buf));
         if (blk.type === "text") {
+          blk.el.replaceChildren(R.markdown(blk.buf));
           blk.el.classList.remove("streaming");
           if (!blk.buf.trim()) blk.el.remove();
         } else if (blk.type === "thinking") {
-          blk.det.classList.remove("streaming");
-          blk.det.open = false;
-          if (blk.sum) blk.sum.innerHTML = ICON("brain", 13) + "<span>Thought process</span>";
+          // No DOM — just close out the reasoning timer for the status metric.
           if (chat.thinkStartedAt) { chat.thoughtMs += Date.now() - chat.thinkStartedAt; chat.thinkStartedAt = 0; }
-          if (!blk.buf.trim()) blk.det.remove();
         }
         chat.streamBlocks.delete(ev.index);
         break;
@@ -693,23 +770,38 @@
         chat.turnTokens += chat.curMsgTokens;
         chat.curMsgTokens = 0;
         chat.streamMsgId = null;
+        finalizeAssistant(chat.currentAssistantBody, Date.now());
         break;
       }
     }
   }
 
   function toolCard(chat, body, block) {
-    const meta = TOOL_META[block.name] || { icon: "dots-vertical", label: block.name };
-    const card = el("div", "tool-card");
-    const head = el("div", "tool-head");
+    // Known tools get a dedicated icon; MCP tool calls (mcp__server__tool) get the
+    // server mark; anything else falls back to the generic code mark — never the
+    // meaningless dots-vertical.
+    const meta =
+      TOOL_META[block.name] ||
+      (block.name && block.name.startsWith("mcp__")
+        ? { icon: "server", label: block.name }
+        : { icon: "code", label: block.name });
+    // Collapsed by default — the head line (icon · name · summary) is enough at a
+    // glance; the request detail + result stay folded until the head is clicked.
+    const card = el("div", "tool-card collapsed");
+    const head = el("button", "tool-head");
+    head.type = "button";
     const ic = el("span", "tool-icon");
     ic.innerHTML = ICON(meta.icon, 14);
     head.appendChild(ic);
     head.appendChild(el("span", "tool-name", meta.label));
     head.appendChild(el("span", "tool-summary", toolSummary(chat, block.name, block.input)));
-    const spin = el("span", "tool-spin");
-    spin.innerHTML = "•";
-    head.appendChild(spin);
+    // Collapse/expand toggle. It doubles as the status indicator: it pulses
+    // while the tool runs, turns green on success and red on error. Clicking
+    // the head folds away the request detail + result.
+    const toggle = el("span", "tool-toggle running");
+    toggle.innerHTML = ICON("caret-down", 14);
+    head.appendChild(toggle);
+    head.addEventListener("click", () => card.classList.toggle("collapsed"));
     card.appendChild(head);
 
     const detail = toolDetail(block.name, block.input);
@@ -719,7 +811,7 @@
     card.appendChild(resultEl);
 
     body.appendChild(card);
-    chat.toolCards.set(block.id, { card, resultEl, spin, name: block.name });
+    chat.toolCards.set(block.id, { card, resultEl, toggle, name: block.name });
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
   }
 
@@ -781,9 +873,9 @@
   function fillToolResult(chat, toolUseId, content, isError) {
     const entry = chat.toolCards.get(toolUseId);
     if (!entry) return;
-    entry.spin.classList.add("done");
-    entry.spin.innerHTML = ICON(isError ? "x" : "check", 12);
-    entry.spin.classList.toggle("err", !!isError);
+    entry.toggle.classList.remove("running");
+    entry.toggle.classList.add("done");
+    entry.toggle.classList.toggle("err", !!isError);
     const text = normalizeResult(content);
     if (text.trim()) {
       entry.resultEl.classList.remove("hidden");
@@ -824,7 +916,7 @@
           // truth, so never auto-replay the on-disk transcript over it. (For a
           // restored tab, maybeReplay already set this before init arrived.)
           chat.replayed = true;
-          if (d.cwd) chat.cwd = d.cwd;
+          if (d.cwd) { chat.cwd = d.cwd; rememberCwd(d.cwd); }
           if (d.session_id) chat.sessionId = d.session_id;
           if (Array.isArray(d.slash_commands)) chat.slashCommands = d.slash_commands;
           if (d.model) reflectModel(chat, d.model);
@@ -857,6 +949,7 @@
             else if (block.type === "text") addText(chat, body, block.text);
           }
         }
+        if (!streamed) finalizeAssistant(body, Date.now());
         break;
       }
       case "user": {
@@ -1033,7 +1126,7 @@
         break;
       case "started":
         if (chat) {
-          if (msg.cwd) chat.cwd = msg.cwd;
+          if (msg.cwd) { chat.cwd = msg.cwd; rememberCwd(msg.cwd); }
           if (msg.permissionMode) chat.mode = msg.permissionMode;
           if (chat.id === activeId) syncComposer();
           requestBranches(chat);
@@ -1066,7 +1159,9 @@
       case "folder":
         if (chat && msg.path) {
           chat.cwd = msg.path;
-          if (chat.title === DEFAULT_TITLE) chat.title = basename(msg.path);
+          rememberCwd(msg.path);
+          // Title is left as-is — it comes from the first user message, not the
+          // folder name (see startTurn).
           // New folder → unknown git state until the host reports back.
           chat.isRepo = false;
           chat.branch = null;
@@ -1089,6 +1184,17 @@
           if (msg.checkedOut && chat.branch) systemNote(chat, `Switched to branch ${chat.branch}`);
         }
         break;
+      case "needsFolder":
+        // Host refused to start without a valid directory (none given, or the
+        // saved one is gone). Drop the stale path, surface the empty state, and
+        // open the picker so the user can choose.
+        if (chat) {
+          chat.cwd = null;
+          chat.started = false;
+          if (msg.id === activeId) syncComposer();
+          post({ type: "pickFolder", id: chat.id }) || promptForFolder(chat);
+        }
+        break;
       case "error":
         if (chat) systemNote(chat, msg.message || "Host error", "warn");
         break;
@@ -1107,6 +1213,12 @@
 
   // ---- session control ------------------------------------------------------
   function startChatSession(chat, resume) {
+    // Never spawn a session in an unspecified directory — wait for an explicit
+    // folder pick. The empty-state setup chips stay visible so the user knows.
+    if (!chat.cwd) {
+      if (chat.id === activeId) updateSetup();
+      return;
+    }
     chat.started = true;
     post({
       type: "start",
@@ -1164,6 +1276,8 @@
             addText(chat, body, block.text);
           }
         }
+        const ts = ev.timestamp ? (Date.parse(ev.timestamp) || Date.now()) : Date.now();
+        finalizeAssistant(body, ts);
       }
     }
     // Leave currentAssistantId pointing at the last replayed turn so a turn that
@@ -1202,6 +1316,12 @@
     const attachments = Array.isArray(chat.attachments) ? chat.attachments : [];
     const hasAttach = attachments.length > 0;
     if ((!text && !hasContext && !hasAttach) || chat.turnRunning || !connected) return;
+    // Can't run an agent without a working directory — prompt for one instead of
+    // silently falling back to $HOME.
+    if (!chat.cwd) {
+      post({ type: "pickFolder", id: chat.id }) || promptForFolder(chat);
+      return;
+    }
     if (!chat.started) startChatSession(chat);
     // Prepend any attached page/element context as a block, then clear it.
     const ctx = formatContexts(chat);
@@ -1328,10 +1448,13 @@
     for (const m of MODELS) {
       const isCur = chat && chat.model === m.id;
       const row = el("div", "model-item" + (isCur ? " current" : ""));
+      const logo = el("span", "model-item-logo");
+      logo.innerHTML = window.RKClaudeHTML(15);
+      row.appendChild(logo);
+      row.appendChild(el("span", "model-item-label", m.label));
       const ic = el("span", "model-item-ic");
       if (isCur) ic.innerHTML = ICON("check", 13);
       row.appendChild(ic);
-      row.appendChild(el("span", "model-item-label", m.label));
       row.addEventListener("click", () => {
         hideModelMenu();
         const c = chats.get(activeId);
@@ -1358,7 +1481,9 @@
     els.mode.className = "mode-btn " + mode.cls;
     els.mode.title = mode.hint;
     els.folder.querySelector(".folder-label").textContent = folderLabel(chat.cwd);
-    els.folder.title = chat.cwd || "Choose a project folder";
+    els.folder.title = chat.cwd || "Choose a project folder to start";
+    // Highlight the chip until a folder is picked — it's required to start.
+    els.folder.classList.toggle("needs-folder", !chat.cwd);
     const model = MODELS.find((m) => m.id === chat.model) || MODELS[0];
     els.modelBtn.querySelector(".model-label").textContent = model.label;
     setRunningUI(chat.turnRunning);
@@ -1420,9 +1545,12 @@
       const isCur = b === chat.branch;
       const row = el("div", "branch-item" + (isCur ? " current" : ""));
       const ic = el("span", "branch-item-ic");
-      ic.innerHTML = ICON(isCur ? "check" : "git-branch", 13);
+      ic.innerHTML = ICON("git-branch", 13);
       row.appendChild(ic);
       row.appendChild(el("span", "branch-item-name", b));
+      const chk = el("span", "branch-item-check");
+      if (isCur) chk.innerHTML = ICON("check", 13);
+      row.appendChild(chk);
       row.addEventListener("click", () => {
         els.branchMenu.classList.add("hidden");
         if (!isCur) chooseBranch(chat, b);
@@ -1441,7 +1569,8 @@
     const next = window.prompt("Project folder path:", cur);
     if (next && next.trim()) {
       chat.cwd = next.trim();
-      if (chat.title === DEFAULT_TITLE) chat.title = basename(chat.cwd);
+      rememberCwd(chat.cwd);
+      // Title comes from the first user message, not the folder name.
       chat.isRepo = false;
       chat.branch = null;
       chat.branches = [];
@@ -1576,7 +1705,7 @@
 
     els.send.addEventListener("click", sendPrompt);
     els.stop.addEventListener("click", interrupt);
-    els.newChat.addEventListener("click", () => createChat({}));
+    els.newChat.addEventListener("click", () => createChat({ cwd: defaultCwd() }));
     els.historyBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       toggleHistory();
@@ -1700,7 +1829,7 @@
     // Restore tabs (or open a first one), then render.
     loadPrefs(() => {
       if (!order.length) {
-        const first = makeChat({});
+        const first = makeChat({ cwd: lastCwd });
         chats.set(first.id, first);
         order.push(first.id);
         activeId = first.id;
