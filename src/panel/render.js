@@ -236,7 +236,7 @@
     for (const r of rows) {
       const cls = r.t === "+" ? "diff-add" : r.t === "-" ? "diff-del" : "diff-ctx";
       const sign = r.t === " " ? " " : r.t;
-      html += `<span class="${cls}"><span class="diff-gutter">${sign}</span>${escapeHtml(r.text)}</span>\n`;
+      html += `<span class="${cls}"><span class="diff-gutter">${sign}</span>${escapeHtml(r.text)}</span>`;
     }
     pre.innerHTML = html;
     return pre;
