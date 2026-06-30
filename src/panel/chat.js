@@ -1,0 +1,2206 @@
+"use strict";
+// Claude Code chat view — now multi-tab. Each tab is an independent `claude`
+// session (its own cwd / model / mode / transcript), keyed by an `id` the host
+// uses to run one process per tab. A shared native-host port multiplexes every
+// tab; incoming events are routed back to the right tab by id.
+//
+// Exposes window.RKChat = { mount, activate, deactivate, addContext }.
+
+(function () {
+  const HOST_NAME = "com.lizard.code";
+  const RECONNECT_MS = 1200;
+  const R = window.RKRender;
+  const ICON = window.RKIconHTML;
+  const LIZARD = window.RKLizardHTML;
+
+  // Playful "working" verbs cycled in the running-status pill (à la Claude Code).
+  const STATUS_WORDS = [
+    "Accomplishing", "Actioning", "Actualizing", "Architecting", "Baking", "Beaming", "Beboppin'",
+    "Befuddling", "Billowing", "Blanching", "Bloviating", "Boogieing", "Boondoggling", "Booping",
+    "Bootstrapping", "Brewing", "Burrowing", "Calculating", "Canoodling", "Caramelizing", "Cascading",
+    "Catapulting", "Cerebrating", "Channeling", "Channelling", "Choreographing", "Churning", "Clauding",
+    "Coalescing", "Cogitating", "Combobulating", "Composing", "Computing", "Concocting", "Considering",
+    "Contemplating", "Cooking", "Crafting", "Creating", "Crunching", "Crystallizing", "Cultivating",
+    "Deciphering", "Deliberating", "Determining", "Dilly-dallying", "Discombobulating", "Doing",
+    "Doodling", "Drizzling", "Ebbing", "Effecting", "Elucidating", "Embellishing", "Enchanting",
+    "Envisioning", "Evaporating", "Fermenting", "Fiddle-faddling", "Finagling", "Flambeing",
+    "Flibbertigibbeting", "Flowing", "Flummoxing", "Fluttering", "Forging", "Forming", "Frolicking",
+    "Frosting", "Gallivanting", "Galloping", "Garnishing", "Generating", "Germinating", "Gitifying",
+    "Grooving", "Gusting", "Harmonizing", "Hashing", "Hatching", "Herding", "Honking", "Hullaballooing",
+    "Hyperspacing", "Ideating", "Imagining", "Improvising", "Incubating", "Inferring", "Infusing",
+    "Ionizing", "Jitterbugging", "Julienning", "Kneading", "Leavening", "Levitating", "Lollygagging",
+    "Manifesting", "Marinating", "Meandering", "Metamorphosing", "Misting", "Moonwalking", "Moseying",
+    "Mulling", "Mustering", "Musing", "Nebulizing", "Nesting", "Newspapering", "Noodling", "Nucleating",
+    "Orbiting", "Orchestrating", "Osmosing", "Perambulating", "Percolating", "Perusing", "Philosophising",
+    "Photosynthesizing", "Pollinating", "Pondering", "Pontificating", "Pouncing", "Precipitating",
+    "Prestidigitating", "Processing", "Proofing", "Propagating", "Puttering", "Puzzling", "Quantumizing",
+    "Razzle-dazzling", "Razzmatazzing", "Recombobulating", "Reticulating", "Roosting", "Ruminating",
+    "Sauteing", "Scampering", "Schlepping", "Scurrying", "Seasoning", "Shenaniganing", "Shimmying",
+    "Simmering", "Skedaddling", "Sketching", "Slithering", "Smooshing", "Sock-hopping", "Spelunking",
+    "Spinning", "Sprouting", "Stewing", "Sublimating", "Swirling", "Swooping", "Symbioting",
+    "Synthesizing", "Tempering", "Thinking", "Thundering", "Tinkering", "Tomfoolering", "Topsy-turvying",
+    "Transfiguring", "Transmuting", "Twisting", "Undulating", "Unfurling", "Unravelling", "Vibing",
+    "Waddling", "Wandering", "Warping", "Whatchamacalliting", "Whirlpooling", "Whirring", "Whisking",
+    "Wibbling", "Working", "Wrangling", "Zesting", "Zigzagging",
+  ];
+  function randStatusWord() {
+    return STATUS_WORDS[Math.floor(Math.random() * STATUS_WORDS.length)];
+  }
+  let statusTimer = null;
+
+  // Permission modes mirror Claude Code's Shift+Tab cycle and `--permission-mode`
+  // ids: default, acceptEdits, plan, auto, bypassPermissions. Keep this list and
+  // its order in sync with the CLI so the panel pill matches the terminal.
+  const MODES = [
+    { id: "default", label: "Ask", hint: "Prompts via your configured rules; unapproved tools are denied.", cls: "mode-default" },
+    { id: "acceptEdits", label: "Accept edits", hint: "Auto-accepts file edits; still asks for risky commands.", cls: "mode-accept" },
+    { id: "plan", label: "Plan", hint: "Read-only planning — Claude won't run or edit anything.", cls: "mode-plan" },
+    { id: "auto", label: "Auto", hint: "A classifier auto-approves safe tool calls and denies risky ones. Availability depends on the model/provider.", cls: "mode-auto" },
+    { id: "bypassPermissions", label: "Bypass", hint: "Allows everything without asking. Use with care.", cls: "mode-bypass" },
+  ];
+
+  const MODELS = [
+    { id: "claude-opus-4-8", label: "Opus 4.8" },
+    { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
+    { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
+    { id: "claude-fable-5", label: "Fable 5" },
+  ];
+  const DEFAULT_MODEL = "claude-opus-4-8";
+
+  // Friendly tool labels + Phosphor icon names.
+  const TOOL_META = {
+    Bash: { icon: "terminal", label: "Bash" },
+    Read: { icon: "file", label: "Read" },
+    Edit: { icon: "edit", label: "Edit" },
+    Write: { icon: "file-plus", label: "Write" },
+    Glob: { icon: "asterisk", label: "Glob" },
+    Grep: { icon: "search", label: "Grep" },
+    Task: { icon: "robot", label: "Agent" },
+    WebFetch: { icon: "globe", label: "Fetch" },
+    WebSearch: { icon: "search", label: "Search" },
+    TodoWrite: { icon: "todo", label: "Plan" },
+  };
+
+  const DEFAULT_TITLE = "New chat";
+
+  let els = {};
+  let port = null;
+  let connected = false;
+  let hostReady = false;
+  let reconnectTimer = null;
+  let mounted = false;
+  let home = null;
+
+  // Tab model: id -> chat. `order` is the visible tab order; `history` holds
+  // closed conversations you can reopen.
+  const chats = new Map();
+  let order = [];
+  let activeId = null;
+  let history = [];
+  let lastModel = DEFAULT_MODEL;
+  let lastMode = "default";
+
+  // Slash-command autocomplete (populated from each session's init event).
+  const slash = { open: false, items: [], index: 0 };
+
+  function newId() {
+    try {
+      return crypto.randomUUID();
+    } catch (_) {
+      return "c" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    }
+  }
+
+  // ---- persistence ----------------------------------------------------------
+  function loadPrefs(done) {
+    try {
+      chrome.storage.local.get(["rkChatV2"], (r) => {
+        const p = (r && r.rkChatV2) || {};
+        if (p.lastModel) lastModel = p.lastModel;
+        if (p.lastMode) lastMode = p.lastMode;
+        if (Array.isArray(p.history)) history = p.history;
+        if (Array.isArray(p.tabs) && p.tabs.length) {
+          for (const t of p.tabs) {
+            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, model: t.model, mode: t.mode, sessionId: t.sessionId });
+            chats.set(chat.id, chat);
+            order.push(chat.id);
+          }
+          activeId = chats.has(p.activeId) ? p.activeId : order[0];
+        }
+        done && done();
+      });
+    } catch (_) {
+      done && done();
+    }
+  }
+  function savePrefs() {
+    try {
+      const tabs = order.map((id) => {
+        const c = chats.get(id);
+        return { id: c.id, title: c.title, cwd: c.cwd, model: c.model, mode: c.mode, sessionId: c.sessionId };
+      });
+      chrome.storage.local.set({ rkChatV2: { tabs, activeId, history: history.slice(0, 40), lastModel, lastMode } });
+    } catch (_) {}
+  }
+
+  // ---- DOM helpers ----------------------------------------------------------
+  function el(tag, cls, text) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function shortPath(p) {
+    if (!p) return "~";
+    if (home && p.startsWith(home)) return "~" + p.slice(home.length);
+    return p;
+  }
+  function basename(p) {
+    if (!p) return DEFAULT_TITLE;
+    const parts = p.replace(/\/$/, "").split("/");
+    return parts[parts.length - 1] || p;
+  }
+  // Short label for the folder chip: just the final folder name (or ~ for home).
+  function folderLabel(p) {
+    if (!p || (home && p.replace(/\/$/, "") === home.replace(/\/$/, ""))) return "~";
+    return basename(p);
+  }
+
+  function atBottom(chat) {
+    const m = chat.messagesEl;
+    return m.scrollHeight - m.scrollTop - m.clientHeight < 80;
+  }
+  function scrollToBottom(chat) {
+    chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
+  }
+  function append(chat, node) {
+    const stick = atBottom(chat);
+    // The running/summary status pill lives at the very bottom of the stream, so
+    // new content is inserted *before* it to keep it last (see renderTurnStatus).
+    if (chat.statusEl && chat.statusEl.parentNode === chat.messagesEl) {
+      chat.messagesEl.insertBefore(node, chat.statusEl);
+    } else {
+      chat.messagesEl.appendChild(node);
+    }
+    if (stick && chat.id === activeId) scrollToBottom(chat);
+  }
+
+  // ---- chat objects ---------------------------------------------------------
+  function makeChat(opts) {
+    opts = opts || {};
+    const messagesEl = el("div", "chat-messages");
+    return {
+      id: opts.id || newId(),
+      title: opts.title || DEFAULT_TITLE,
+      cwd: opts.cwd || null,
+      model: opts.model || lastModel || DEFAULT_MODEL,
+      mode: opts.mode || lastMode,
+      sessionId: opts.sessionId || null,
+      slashCommands: [],
+      started: false,
+      turnRunning: false,
+      turnStatusText: "",
+      messagesEl,
+      // Status pill node, appended to the end of messagesEl while a turn runs (or
+      // a result summary is showing). Lives in the stream, not a pinned bar.
+      statusEl: null,
+      currentAssistantId: null,
+      currentAssistantBody: null,
+      toolCards: new Map(),
+      emittedToolIds: new Set(),
+      // Live-streaming state (--include-partial-messages). streamBlocks maps a
+      // content-block index to its in-progress DOM node; streamedMsgIds records
+      // which assistant messages were rendered live so the final `assistant`
+      // copy doesn't re-render them.
+      streamMsgId: null,
+      streamBlocks: new Map(),
+      streamedMsgIds: new Set(),
+      // Running-status pill metrics.
+      turnStartedAt: 0,
+      turnTokens: 0,
+      curMsgTokens: 0,
+      thoughtMs: 0,
+      thinkStartedAt: 0,
+      statusWord: "",
+      statusWordAt: 0,
+      // Page elements attached via the Selector tool, sent as context with the
+      // next prompt, then cleared.
+      contexts: [],
+      // Images pasted/dropped into the composer, sent as image blocks with the
+      // next prompt, then cleared. Each: { id, mediaType, base64, dataUrl }.
+      attachments: [],
+      empty: !opts.sessionId,
+      // Whether this tab's on-disk transcript has been requested/replayed yet.
+      // Restored tabs (and history re-opens) carry a sessionId but no messages.
+      replayed: false,
+      // Git state for the cwd (filled in from the host's gitBranches reply).
+      isRepo: false,
+      branch: null,
+      branches: [],
+    };
+  }
+
+  function createChat(opts, { activate = true } = {}) {
+    const chat = makeChat(opts);
+    chats.set(chat.id, chat);
+    order.push(chat.id);
+    els.stack.appendChild(chat.messagesEl);
+    renderTabs();
+    if (activate) setActive(chat.id);
+    savePrefs();
+    return chat;
+  }
+
+  function setActive(id) {
+    if (!chats.has(id)) return;
+    activeId = id;
+    for (const [cid, c] of chats) {
+      c.messagesEl.classList.toggle("hidden", cid !== id);
+    }
+    renderTabs();
+    syncComposer();
+    const chat = chats.get(id);
+    // Lazily spin up the session the first time a tab is shown.
+    if (connected && hostReady && !chat.started) startChatSession(chat);
+    // Re-render a restored/re-opened conversation from its on-disk transcript.
+    maybeReplay(chat);
+    requestAnimationFrame(() => {
+      scrollToBottom(chat);
+      if (els.input) els.input.focus();
+    });
+    savePrefs();
+  }
+
+  function closeChat(id) {
+    const chat = chats.get(id);
+    if (!chat) return;
+    // Remember non-empty conversations so they can be reopened from history.
+    if (!chat.empty || chat.sessionId) {
+      history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, model: chat.model, mode: chat.mode, sessionId: chat.sessionId, ts: Date.now() });
+      history = history.slice(0, 40);
+    }
+    if (chat.started) post({ type: "close", id });
+    chat.messagesEl.remove();
+    chats.delete(id);
+    order = order.filter((x) => x !== id);
+
+    if (!order.length) {
+      const fresh = makeChat({ cwd: chat.cwd });
+      chats.set(fresh.id, fresh);
+      order.push(fresh.id);
+      els.stack.appendChild(fresh.messagesEl);
+      setActive(fresh.id);
+    } else if (activeId === id) {
+      setActive(order[order.length - 1]);
+    } else {
+      renderTabs();
+    }
+    savePrefs();
+  }
+
+  // ---- tab bar --------------------------------------------------------------
+  function renderTabs() {
+    els.tabs.innerHTML = "";
+    for (const id of order) {
+      const chat = chats.get(id);
+      const tab = el("button", "chat-tab" + (id === activeId ? " active" : ""));
+      tab.title = chat.title;
+      tab.appendChild(el("span", "tab-label", chat.title));
+      const close = el("span", "tab-close");
+      close.innerHTML = ICON("x", 12);
+      close.title = "Close chat";
+      close.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeChat(id);
+      });
+      tab.appendChild(close);
+      tab.addEventListener("click", () => setActive(id));
+      els.tabs.appendChild(tab);
+    }
+  }
+
+  // ---- history dropdown -----------------------------------------------------
+  function toggleHistory() {
+    const open = !els.historyMenu.classList.contains("hidden");
+    if (open) {
+      els.historyMenu.classList.add("hidden");
+      return;
+    }
+    renderHistory();
+    els.historyMenu.classList.remove("hidden");
+  }
+  function renderHistory() {
+    els.historyMenu.innerHTML = "";
+    const head = el("div", "history-head", "Recent chats");
+    els.historyMenu.appendChild(head);
+    if (!history.length) {
+      els.historyMenu.appendChild(el("div", "history-empty", "No past chats yet."));
+      return;
+    }
+    for (const item of history) {
+      const row = el("div", "history-item");
+      const ic = el("span", "history-ic");
+      ic.innerHTML = ICON("chat", 15);
+      row.appendChild(ic);
+      const meta = el("div", "history-meta");
+      meta.appendChild(el("div", "history-title", item.title || DEFAULT_TITLE));
+      meta.appendChild(el("div", "history-sub", shortPath(item.cwd)));
+      row.appendChild(meta);
+      const del = el("button", "history-del");
+      del.innerHTML = ICON("trash", 15);
+      del.title = "Remove from history";
+      del.addEventListener("click", (e) => {
+        e.stopPropagation();
+        history = history.filter((h) => h !== item);
+        savePrefs();
+        renderHistory();
+      });
+      row.appendChild(del);
+      row.addEventListener("click", () => {
+        els.historyMenu.classList.add("hidden");
+        reopenFromHistory(item);
+      });
+      els.historyMenu.appendChild(row);
+    }
+  }
+  function reopenFromHistory(item) {
+    history = history.filter((h) => h !== item);
+    createChat({ title: item.title, cwd: item.cwd, model: item.model, mode: item.mode, sessionId: item.sessionId });
+    savePrefs();
+  }
+
+  // ---- message rendering (per chat) -----------------------------------------
+  function userBubble(chat, text, attachments) {
+    const row = el("div", "msg msg-user");
+    const bubble = el("div", "bubble");
+    if (attachments && attachments.length) {
+      const thumbs = el("div", "bubble-thumbs");
+      for (const a of attachments) {
+        const img = el("img", "bubble-thumb");
+        img.src = a.dataUrl;
+        thumbs.appendChild(img);
+      }
+      bubble.appendChild(thumbs);
+    }
+    if (text) bubble.appendChild(R.markdown(text));
+    row.appendChild(bubble);
+    append(chat, row);
+  }
+
+  // ---- page-element context (from the Selector tool) ------------------------
+  // Called from panel.js when the in-page Selector clicks an element. Attaches
+  // it to the active chat as a composer chip; sent with the next prompt.
+  function addContext(element) {
+    if (!element) return;
+    const chat = chats.get(activeId);
+    if (!chat) return;
+    if (!Array.isArray(chat.contexts)) chat.contexts = [];
+    // Skip exact duplicates (same selector clicked twice).
+    if (!chat.contexts.some((c) => c.selector === element.selector && c.tag === element.tag)) {
+      chat.contexts.push(element);
+    }
+    renderContextChips();
+    if (els.input) els.input.focus();
+  }
+
+  function removeContext(idx) {
+    const chat = chats.get(activeId);
+    if (!chat || !Array.isArray(chat.contexts)) return;
+    chat.contexts.splice(idx, 1);
+    renderContextChips();
+  }
+
+  function renderContextChips() {
+    if (!els.contextChips) return;
+    const chat = chats.get(activeId);
+    els.contextChips.replaceChildren();
+    if (!chat || !chat.contexts || !chat.contexts.length) {
+      els.contextChips.classList.add("hidden");
+      return;
+    }
+    els.contextChips.classList.remove("hidden");
+    chat.contexts.forEach((c, i) => {
+      const chip = el("div", "ctx-chip");
+      const ic = el("span", "ctx-chip-ic");
+      let label;
+      if (c.kind === "page") {
+        ic.innerHTML = ICON("globe", 12);
+        label = c.title ? c.title.slice(0, 44) : c.url || "Page";
+        chip.title = c.url || c.title || "Current tab";
+      } else {
+        ic.innerHTML = ICON("selection", 13);
+        label = `<${c.tag}>`;
+        chip.title = c.selector || c.tag;
+      }
+      const x = el("button", "ctx-chip-x");
+      x.innerHTML = ICON("x", 12);
+      x.title = "Remove";
+      x.addEventListener("click", (e) => { e.stopPropagation(); removeContext(i); });
+      // Icon + × share the leading slot — the × reveals on hover (Cursor-style).
+      chip.appendChild(ic);
+      chip.appendChild(x);
+      chip.appendChild(el("span", "ctx-chip-label", label));
+      els.contextChips.appendChild(chip);
+    });
+  }
+
+  // Serialize attached context into a block prepended to the prompt.
+  function formatContexts(chat) {
+    if (!chat.contexts || !chat.contexts.length) return "";
+    const blocks = [];
+
+    // Whole-page contexts (the current tab). Not fenced — page text may contain
+    // backticks that would break a ``` block.
+    for (const c of chat.contexts.filter((c) => c.kind === "page")) {
+      const lines = ["[Attached browser tab — the page the user is currently viewing]"];
+      lines.push(`URL: ${c.url || ""}`);
+      if (c.title) lines.push(`Title: ${c.title}`);
+      if (c.selection) lines.push(`\nText the user has selected on the page:\n${c.selection}`);
+      lines.push(`\nVisible page content:\n${c.text || "(empty)"}${c.truncated ? "\n…[page text truncated]" : ""}`);
+      blocks.push(lines.join("\n"));
+    }
+
+    // Picked-element contexts (from the Selector tool).
+    const elems = chat.contexts.filter((c) => c.kind !== "page");
+    if (elems.length) {
+      const elBlocks = elems.map((c) => {
+        const lines = [c.openTag || `<${c.tag}>`, `selector: ${c.selector}`];
+        if (c.width || c.height) lines.push(`size: ${c.width}×${c.height}`);
+        const s = c.styles || {};
+        const bits = [];
+        if (s.display) bits.push(`display:${s.display}`);
+        if (s.color) bits.push(`color:${s.color}`);
+        if (s.backgroundColor) bits.push(`background:${s.backgroundColor}`);
+        if (s.fontFamily || s.fontSize) bits.push(`font:${[s.fontFamily, s.fontSize && s.lineHeight ? `${s.fontSize}/${s.lineHeight}` : s.fontSize, s.fontWeight].filter(Boolean).join(" ")}`);
+        if (s.textAlign) bits.push(`text-align:${s.textAlign}`);
+        if (s.padding && s.padding !== "0px") bits.push(`padding:${s.padding}`);
+        if (s.margin && s.margin !== "0px") bits.push(`margin:${s.margin}`);
+        if (s.borderRadius && s.borderRadius !== "0px") bits.push(`border-radius:${s.borderRadius}`);
+        if (s.border && s.border !== "none") bits.push(`border:${s.border}`);
+        if (bits.length) lines.push(`styles: ${bits.join("; ")}`);
+        if (c.text) lines.push(`text: "${c.text}"`);
+        return lines.join("\n");
+      });
+      const url = elems[0] && elems[0].url;
+      const head = elems.length === 1 ? "Selected page element" : `${elems.length} selected page elements`;
+      blocks.push("```\n[" + head + (url ? " · " + url : "") + "]\n" + elBlocks.join("\n\n") + "\n```");
+    }
+
+    return blocks.join("\n\n") + "\n\n";
+  }
+
+  // ---- image attachments (paste / drop) ------------------------------------
+  // Anthropic recommends a longest edge ≤ 1568px; downscaling also keeps the
+  // base64 payload well under Chrome's native-messaging limits.
+  const MAX_IMG_EDGE = 1568;
+  function processImageBlob(blob) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const scale = Math.min(1, MAX_IMG_EDGE / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        // Keep small PNGs lossless; otherwise re-encode as JPEG to shrink.
+        const type = blob.type === "image/png" && scale === 1 ? "image/png" : "image/jpeg";
+        const dataUrl = canvas.toDataURL(type, 0.92);
+        resolve({ mediaType: type, base64: dataUrl.split(",")[1] || "", dataUrl });
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("could not decode image"));
+      };
+      img.src = url;
+    });
+  }
+
+  async function addAttachment(blob) {
+    const chat = chats.get(activeId);
+    if (!chat || !blob) return;
+    try {
+      const img = await processImageBlob(blob);
+      chat.attachments.push({ id: newId(), ...img });
+      renderAttachmentThumbs();
+      if (els.input) els.input.focus();
+    } catch (_) {
+      systemNote(chat, "Couldn't read that image.", "warn");
+    }
+  }
+
+  function removeAttachment(id) {
+    const chat = chats.get(activeId);
+    if (!chat) return;
+    chat.attachments = chat.attachments.filter((a) => a.id !== id);
+    renderAttachmentThumbs();
+  }
+
+  function renderAttachmentThumbs() {
+    if (!els.attachThumbs) return;
+    const chat = chats.get(activeId);
+    els.attachThumbs.replaceChildren();
+    if (!chat || !chat.attachments.length) {
+      els.attachThumbs.classList.add("hidden");
+      return;
+    }
+    els.attachThumbs.classList.remove("hidden");
+    for (const a of chat.attachments) {
+      const thumb = el("div", "attach-thumb");
+      const img = el("img", "attach-thumb-img");
+      img.src = a.dataUrl;
+      thumb.appendChild(img);
+      const x = el("button", "attach-thumb-x");
+      x.innerHTML = ICON("x", 11);
+      x.title = "Remove image";
+      x.addEventListener("click", () => removeAttachment(a.id));
+      thumb.appendChild(x);
+      els.attachThumbs.appendChild(thumb);
+    }
+  }
+
+  function systemNote(chat, text, kind) {
+    const note = el("div", "sys-note" + (kind ? " " + kind : ""));
+    if (kind === "warn") {
+      const ic = el("span", "sys-ic");
+      ic.innerHTML = ICON("warning", 13);
+      note.appendChild(ic);
+    }
+    note.appendChild(el("span", null, text));
+    append(chat, note);
+    return note;
+  }
+
+  function ensureAssistantBody(chat, messageId) {
+    if (chat.currentAssistantId === messageId && chat.currentAssistantBody) return chat.currentAssistantBody;
+    chat.currentAssistantId = messageId;
+    const row = el("div", "msg msg-assistant");
+    const body = el("div", "assistant-body");
+    row.appendChild(body);
+    append(chat, row);
+    chat.currentAssistantBody = body;
+    return body;
+  }
+
+  function addThinking(chat, body, text) {
+    if (!text || !text.trim()) return;
+    const det = el("details", "thinking");
+    const sum = el("summary");
+    sum.innerHTML = ICON("brain", 13) + "<span>Thought process</span>";
+    det.appendChild(sum);
+    det.appendChild(R.markdown(text));
+    body.appendChild(det);
+    if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+  }
+
+  function addText(chat, body, text) {
+    body.appendChild(R.markdown(text));
+    if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+  }
+
+  // ---- live streaming (--include-partial-messages) --------------------------
+  // Coalesce markdown re-renders to one per animation frame so a fast token
+  // stream doesn't re-parse the whole buffer on every delta.
+  function flushStreamBlock(chat, blk) {
+    if (blk.raf) return;
+    blk.raf = requestAnimationFrame(() => {
+      blk.raf = 0;
+      blk.el.replaceChildren(R.markdown(blk.buf));
+      if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+    });
+  }
+
+  function handleStreamEvent(chat, ev) {
+    if (!ev || !ev.type) return;
+    switch (ev.type) {
+      case "message_start": {
+        const id = ev.message && ev.message.id;
+        chat.streamMsgId = id || null;
+        // Mark this message as streamed up front. Current Claude Code emits a
+        // per-block `assistant` event the instant each content block finishes —
+        // and those arrive *before* `message_stop`. If we only recorded the id at
+        // message_stop, the final text/thinking blocks would re-render on top of
+        // the live stream nodes (duplicate reply). Recording here keeps the live
+        // render canonical and makes the later `assistant` copy a no-op.
+        if (id) chat.streamedMsgIds.add(id);
+        chat.streamBlocks.clear();
+        chat.curMsgTokens = 0;
+        ensureAssistantBody(chat, id);
+        break;
+      }
+      case "content_block_start": {
+        const body = ensureAssistantBody(chat, chat.streamMsgId);
+        const cb = ev.content_block || {};
+        if (cb.type === "text") {
+          const node = el("div", "assistant-stream streaming");
+          body.appendChild(node);
+          chat.streamBlocks.set(ev.index, { type: "text", el: node, buf: "", raf: 0 });
+        } else if (cb.type === "thinking") {
+          const det = el("details", "thinking streaming");
+          det.open = true;
+          const sum = el("summary");
+          sum.innerHTML = ICON("brain", 13) + "<span>Thinking…</span>";
+          const md = el("div", "thinking-stream");
+          det.appendChild(sum);
+          det.appendChild(md);
+          body.appendChild(det);
+          chat.thinkStartedAt = Date.now();
+          chat.streamBlocks.set(ev.index, { type: "thinking", el: md, det, sum, buf: "", raf: 0 });
+        }
+        // tool_use blocks are left to the final `assistant` message (it carries
+        // the complete tool input; the stream only has partial JSON fragments).
+        if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+        break;
+      }
+      case "content_block_delta": {
+        const blk = chat.streamBlocks.get(ev.index);
+        if (!blk) break;
+        const delta = ev.delta || {};
+        if (delta.type === "text_delta" && blk.type === "text") blk.buf += delta.text || "";
+        else if (delta.type === "thinking_delta" && blk.type === "thinking") blk.buf += delta.thinking || "";
+        else break;
+        flushStreamBlock(chat, blk);
+        break;
+      }
+      case "content_block_stop": {
+        const blk = chat.streamBlocks.get(ev.index);
+        if (!blk) break;
+        if (blk.raf) { cancelAnimationFrame(blk.raf); blk.raf = 0; }
+        blk.el.replaceChildren(R.markdown(blk.buf));
+        if (blk.type === "text") {
+          blk.el.classList.remove("streaming");
+          if (!blk.buf.trim()) blk.el.remove();
+        } else if (blk.type === "thinking") {
+          blk.det.classList.remove("streaming");
+          blk.det.open = false;
+          if (blk.sum) blk.sum.innerHTML = ICON("brain", 13) + "<span>Thought process</span>";
+          if (chat.thinkStartedAt) { chat.thoughtMs += Date.now() - chat.thinkStartedAt; chat.thinkStartedAt = 0; }
+          if (!blk.buf.trim()) blk.det.remove();
+        }
+        chat.streamBlocks.delete(ev.index);
+        break;
+      }
+      case "message_delta": {
+        const u = ev.usage || {};
+        if (typeof u.output_tokens === "number") chat.curMsgTokens = u.output_tokens;
+        break;
+      }
+      case "message_stop": {
+        if (chat.streamMsgId) chat.streamedMsgIds.add(chat.streamMsgId);
+        chat.turnTokens += chat.curMsgTokens;
+        chat.curMsgTokens = 0;
+        chat.streamMsgId = null;
+        break;
+      }
+    }
+  }
+
+  function toolCard(chat, body, block) {
+    const meta = TOOL_META[block.name] || { icon: "dots-vertical", label: block.name };
+    const card = el("div", "tool-card");
+    const head = el("div", "tool-head");
+    const ic = el("span", "tool-icon");
+    ic.innerHTML = ICON(meta.icon, 14);
+    head.appendChild(ic);
+    head.appendChild(el("span", "tool-name", meta.label));
+    head.appendChild(el("span", "tool-summary", toolSummary(chat, block.name, block.input)));
+    const spin = el("span", "tool-spin");
+    spin.innerHTML = "•";
+    head.appendChild(spin);
+    card.appendChild(head);
+
+    const detail = toolDetail(block.name, block.input);
+    if (detail) card.appendChild(detail);
+
+    const resultEl = el("div", "tool-result hidden");
+    card.appendChild(resultEl);
+
+    body.appendChild(card);
+    chat.toolCards.set(block.id, { card, resultEl, spin, name: block.name });
+    if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+  }
+
+  function toolSummary(chat, name, input) {
+    input = input || {};
+    switch (name) {
+      case "Bash":
+        return input.command ? input.command.split("\n")[0].slice(0, 120) : "";
+      case "Read":
+      case "Edit":
+      case "Write":
+        return shortPathFor(chat, input.file_path || "");
+      case "Glob":
+        return input.pattern || "";
+      case "Grep":
+        return input.pattern || "";
+      case "WebFetch":
+      case "WebSearch":
+        return input.url || input.query || "";
+      case "Task":
+        return input.description || "";
+      default: {
+        const s = JSON.stringify(input);
+        return s.length > 100 ? s.slice(0, 100) + "…" : s;
+      }
+    }
+  }
+  function shortPathFor(chat, p) {
+    if (!p) return "—";
+    if (chat.cwd && p.startsWith(chat.cwd)) return "." + p.slice(chat.cwd.length);
+    return shortPath(p);
+  }
+
+  function toolDetail(name, input) {
+    input = input || {};
+    if (name === "Bash" && input.command) {
+      return R.codeBlock(input.command, "bash");
+    }
+    if (name === "Write" && input.content != null) {
+      const d = el("div", "tool-detail");
+      d.appendChild(R.codeBlock(input.content, langFromPath(input.file_path)));
+      return d;
+    }
+    if (name === "Edit" && input.old_string != null) {
+      const d = el("div", "tool-detail");
+      d.appendChild(R.lineDiff(input.old_string, input.new_string));
+      return d;
+    }
+    return null;
+  }
+
+  function langFromPath(p) {
+    if (!p) return "";
+    const ext = p.split(".").pop().toLowerCase();
+    const map = { js: "js", mjs: "js", ts: "ts", tsx: "ts", jsx: "js", py: "py", rs: "rust", go: "go", json: "json", sh: "bash", css: "css", html: "html", md: "md" };
+    return map[ext] || "";
+  }
+
+  function fillToolResult(chat, toolUseId, content, isError) {
+    const entry = chat.toolCards.get(toolUseId);
+    if (!entry) return;
+    entry.spin.classList.add("done");
+    entry.spin.innerHTML = ICON(isError ? "x" : "check", 12);
+    entry.spin.classList.toggle("err", !!isError);
+    const text = normalizeResult(content);
+    if (text.trim()) {
+      entry.resultEl.classList.remove("hidden");
+      entry.resultEl.classList.toggle("err", !!isError);
+      const lines = text.split("\n");
+      if (lines.length > 16 || text.length > 1400) {
+        const det = el("details", "result-fold");
+        const sum = el("summary", null, `Output · ${lines.length} lines`);
+        det.appendChild(sum);
+        det.appendChild(R.codeBlock(text, ""));
+        entry.resultEl.appendChild(det);
+      } else {
+        entry.resultEl.appendChild(R.codeBlock(text, ""));
+      }
+    }
+    if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+  }
+
+  function normalizeResult(content) {
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content
+        .map((c) => (typeof c === "string" ? c : c && c.type === "text" ? c.text : c && c.text ? c.text : ""))
+        .join("\n");
+    }
+    if (content && content.text) return content.text;
+    return content == null ? "" : String(content);
+  }
+
+  // ---- event handling (routed per chat) -------------------------------------
+  function onClaudeEvent(chat, d) {
+    if (!d || !d.type) return;
+    switch (d.type) {
+      case "system":
+        if (d.subtype === "init") {
+          chat.started = true;
+          // This session is now live in the panel — its DOM is the source of
+          // truth, so never auto-replay the on-disk transcript over it. (For a
+          // restored tab, maybeReplay already set this before init arrived.)
+          chat.replayed = true;
+          if (d.cwd) chat.cwd = d.cwd;
+          if (d.session_id) chat.sessionId = d.session_id;
+          if (Array.isArray(d.slash_commands)) chat.slashCommands = d.slash_commands;
+          if (d.model) reflectModel(chat, d.model);
+          if (d.permissionMode) chat.mode = d.permissionMode;
+          if (chat.id === activeId) syncComposer();
+          requestBranches(chat);
+          savePrefs();
+        }
+        break;
+      // Incremental tokens from --include-partial-messages: render assistant
+      // text and thinking live, block by block.
+      case "stream_event":
+        handleStreamEvent(chat, d.event);
+        break;
+      case "assistant": {
+        const msgId = d.message && d.message.id;
+        const body = ensureAssistantBody(chat, msgId);
+        const streamed = msgId && chat.streamedMsgIds.has(msgId);
+        const content = (d.message && d.message.content) || [];
+        for (const block of content) {
+          if (block.type === "tool_use") {
+            if (chat.emittedToolIds.has(block.id)) continue;
+            chat.emittedToolIds.add(block.id);
+            toolCard(chat, body, block);
+          } else if (!streamed) {
+            // No live stream for this message (older claude / flag off) — render
+            // the finished block directly. When it was streamed, the live nodes
+            // already are the canonical render, so we skip to avoid duplicates.
+            if (block.type === "thinking") addThinking(chat, body, block.thinking);
+            else if (block.type === "text") addText(chat, body, block.text);
+          }
+        }
+        break;
+      }
+      case "user": {
+        const content = (d.message && d.message.content) || [];
+        for (const block of content) {
+          if (block.type === "tool_result") {
+            fillToolResult(chat, block.tool_use_id, block.content, block.is_error);
+          }
+        }
+        break;
+      }
+      case "result":
+        endTurn(chat, d);
+        break;
+      case "rate_limit_event":
+        if (d.rate_limit_info && d.rate_limit_info.status !== "allowed") {
+          systemNote(chat, `Rate limit: ${d.rate_limit_info.status}`, "warn");
+        }
+        break;
+    }
+  }
+
+  function endTurn(chat, result) {
+    chat.turnRunning = false;
+    chat.currentAssistantId = null;
+    chat.currentAssistantBody = null;
+    // Finalize any dangling live blocks (e.g. an interrupted turn).
+    for (const blk of chat.streamBlocks.values()) {
+      if (blk.raf) { cancelAnimationFrame(blk.raf); blk.raf = 0; }
+      if (blk.el) blk.el.classList && blk.el.classList.remove("streaming");
+      if (blk.det) blk.det.classList.remove("streaming");
+    }
+    chat.streamBlocks.clear();
+    chat.streamMsgId = null;
+    if (chat.thinkStartedAt) { chat.thoughtMs += Date.now() - chat.thinkStartedAt; chat.thinkStartedAt = 0; }
+    if (result) {
+      if (Array.isArray(result.permission_denials) && result.permission_denials.length) {
+        const names = result.permission_denials.map((p) => p.tool_name || p.tool || "tool").join(", ");
+        systemNote(chat, `Denied by permission mode: ${names}. Switch mode to allow.`, "warn");
+      }
+      chat.turnStatusText = "";
+    }
+    if (chat.id === activeId) {
+      setRunningUI(chat.turnRunning);
+      renderTurnStatus(chat);
+    }
+  }
+
+  // ---- running-status pill --------------------------------------------------
+  // While a turn runs, show a spinning Lizard mark, a cycling verb, and live
+  // metrics (elapsed · output tokens · thinking time). When idle, fall back to
+  // the final summary (cost · duration · steps) from the result event. The pill
+  // lives at the bottom of the message stream (not a pinned bar), so it scrolls
+  // with the conversation and sits just under the latest text.
+  function ensureStatusEl(chat) {
+    if (!chat.statusEl) chat.statusEl = el("div", "turn-status");
+    // Keep it as the last child of the stream.
+    if (chat.messagesEl.lastChild !== chat.statusEl) chat.messagesEl.appendChild(chat.statusEl);
+    return chat.statusEl;
+  }
+
+  function renderTurnStatus(chat) {
+    if (!chat) return;
+    const summary = chat.turnStatusText || "";
+    // Nothing to show — drop the node so it leaves no empty gap in the stream.
+    if (!chat.turnRunning && !summary) {
+      if (chat.statusEl && chat.statusEl.parentNode) chat.statusEl.remove();
+      return;
+    }
+    const node = ensureStatusEl(chat);
+    if (chat.turnRunning) {
+      const secs = chat.turnStartedAt ? Math.max(0, Math.round((Date.now() - chat.turnStartedAt) / 1000)) : 0;
+      const tokens = chat.turnTokens + chat.curMsgTokens;
+      const meta = [`${secs}s`];
+      if (tokens > 0) meta.push(`↓ ${tokens.toLocaleString()} tokens`);
+      if (chat.thoughtMs > 500) meta.push(`thought for ${Math.max(1, Math.round(chat.thoughtMs / 1000))}s`);
+      node.classList.add("running");
+      // Build the spark once and only update the text parts on later ticks —
+      // rewriting innerHTML every tick would recreate the lizard element and
+      // restart its CSS pulse from 0%, making it look jittery and too fast.
+      let word = node.querySelector(".ts-word");
+      let metaEl = node.querySelector(".ts-meta");
+      if (!word || !metaEl) {
+        node.innerHTML =
+          `<span class="ts-spark">${LIZARD ? LIZARD(15) : ""}</span>` +
+          `<span class="ts-word"></span>` +
+          `<span class="ts-meta"></span>`;
+        word = node.querySelector(".ts-word");
+        metaEl = node.querySelector(".ts-meta");
+      }
+      word.textContent = `${chat.statusWord || "Working"}…`;
+      metaEl.textContent = `(${meta.join(" · ")})`;
+    } else {
+      node.classList.remove("running");
+      node.textContent = summary;
+    }
+    if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+  }
+
+  function tickStatus() {
+    const chat = chats.get(activeId);
+    if (chat && chat.turnRunning) {
+      const now = Date.now();
+      if (!chat.statusWord || now - chat.statusWordAt > 1800) {
+        chat.statusWord = randStatusWord();
+        chat.statusWordAt = now;
+      }
+    }
+    if (chat) renderTurnStatus(chat);
+    let anyRunning = false;
+    for (const c of chats.values()) if (c.turnRunning) { anyRunning = true; break; }
+    if (!anyRunning) stopStatusTicker();
+  }
+  function startStatusTicker() {
+    if (statusTimer) return;
+    statusTimer = setInterval(tickStatus, 250);
+  }
+  function stopStatusTicker() {
+    if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+  }
+
+  // ---- host transport -------------------------------------------------------
+  function connect() {
+    clearTimeout(reconnectTimer);
+    try {
+      port = chrome.runtime.connectNative(HOST_NAME);
+    } catch (err) {
+      showOnboarding();
+      scheduleReconnect();
+      return;
+    }
+    port.onMessage.addListener(onHostMessage);
+    port.onDisconnect.addListener(() => {
+      const lastErr = chrome.runtime.lastError;
+      port = null;
+      connected = false;
+      hostReady = false;
+      for (const c of chats.values()) {
+        c.started = false;
+        if (c.turnRunning) {
+          systemNote(c, "Host disconnected mid-turn.", "warn");
+          endTurn(c, null);
+        }
+      }
+      showOnboarding(lastErr && lastErr.message);
+      scheduleReconnect();
+    });
+  }
+  function scheduleReconnect() {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, RECONNECT_MS);
+  }
+
+  function onHostMessage(msg) {
+    if (!msg) return;
+    connected = true;
+    // Route id-tagged messages to their chat.
+    const chat = msg.id ? chats.get(msg.id) : null;
+    switch (msg.type) {
+      case "ready":
+        hostReady = true;
+        home = msg.home || home;
+        hideOnboarding();
+        if (!msg.ok) {
+          const a = chats.get(activeId);
+          if (a) systemNote(a, "Host is up but couldn't find the `claude` CLI. Install it: npm i -g @anthropic-ai/claude-code", "warn");
+        }
+        // Start whichever tab is in front; others start when first shown.
+        {
+          const a = chats.get(activeId);
+          if (a && !a.started) startChatSession(a);
+          maybeReplay(a);
+        }
+        break;
+      case "started":
+        if (chat) {
+          if (msg.cwd) chat.cwd = msg.cwd;
+          if (msg.permissionMode) chat.mode = msg.permissionMode;
+          if (chat.id === activeId) syncComposer();
+          requestBranches(chat);
+        }
+        break;
+      case "event":
+        if (chat) onClaudeEvent(chat, msg.data);
+        break;
+      case "transcript":
+        if (chat) replayTranscript(chat, msg.events);
+        break;
+      case "browser":
+        // Not chat-scoped — claude is inspecting the live browser tab.
+        handleBrowserOp(msg);
+        break;
+      case "commands":
+        if (chat && Array.isArray(msg.list)) {
+          chat.slashCommands = msg.list;
+          // If the user is mid-"/" in this tab, populate the menu now.
+          if (chat.id === activeId && /^\/[^\s]*$/.test(els.input.value)) updateSlash();
+        }
+        break;
+      case "exit":
+        if (chat) {
+          chat.started = false;
+          if (chat.turnRunning) endTurn(chat, null);
+          systemNote(chat, `Claude session ended (code ${msg.code}).`, "warn");
+        }
+        break;
+      case "folder":
+        if (chat && msg.path) {
+          chat.cwd = msg.path;
+          if (chat.title === DEFAULT_TITLE) chat.title = basename(msg.path);
+          // New folder → unknown git state until the host reports back.
+          chat.isRepo = false;
+          chat.branch = null;
+          chat.branches = [];
+          savePrefs();
+          if (chat.id === activeId) syncComposer();
+          resetChatSession(chat);
+          requestBranches(chat);
+          renderTabs();
+        } else if (chat && msg.manual) {
+          promptForFolder(chat);
+        }
+        break;
+      case "gitBranches":
+        if (chat) {
+          chat.isRepo = !!msg.isRepo;
+          chat.branch = msg.current || null;
+          chat.branches = Array.isArray(msg.branches) ? msg.branches : [];
+          if (chat.id === activeId) syncComposer();
+          if (msg.checkedOut && chat.branch) systemNote(chat, `Switched to branch ${chat.branch}`);
+        }
+        break;
+      case "error":
+        if (chat) systemNote(chat, msg.message || "Host error", "warn");
+        break;
+    }
+  }
+
+  function post(obj) {
+    if (port) {
+      try {
+        port.postMessage(obj);
+        return true;
+      } catch (_) {}
+    }
+    return false;
+  }
+
+  // ---- session control ------------------------------------------------------
+  function startChatSession(chat, resume) {
+    chat.started = true;
+    post({
+      type: "start",
+      id: chat.id,
+      cwd: chat.cwd,
+      model: chat.model,
+      permissionMode: chat.mode,
+      resume: resume || chat.sessionId || undefined,
+    });
+  }
+
+  // ---- transcript replay ----------------------------------------------------
+  // A restored or re-opened tab knows its sessionId but lost its rendered
+  // messages (they only ever lived in the DOM). Ask the host to read the session's
+  // on-disk JSONL and replay it, once, the first time we have a live host.
+  function maybeReplay(chat) {
+    if (!chat || chat.replayed || !chat.sessionId) return;
+    if (!connected || !hostReady) return;
+    chat.replayed = true;
+    post({ type: "loadTranscript", id: chat.id, sessionId: chat.sessionId, cwd: chat.cwd });
+  }
+
+  // Render a chunk of past messages (the host streams them in order across one or
+  // more `transcript` events). Reuses the live renderers so history looks
+  // identical to a fresh turn — user bubbles, assistant text/thinking, tool cards
+  // and their results.
+  function replayTranscript(chat, events) {
+    if (!chat || !Array.isArray(events)) return;
+    for (const ev of events) {
+      if (!ev || !ev.message) continue;
+      if (ev.type === "user") {
+        const content = ev.message.content;
+        if (typeof content === "string") {
+          if (content.trim()) userBubble(chat, content, null);
+        } else if (Array.isArray(content)) {
+          const texts = [];
+          for (const b of content) {
+            if (!b) continue;
+            if (b.type === "tool_result") fillToolResult(chat, b.tool_use_id, b.content, b.is_error);
+            else if (b.type === "text" && b.text) texts.push(b.text);
+          }
+          if (texts.length) userBubble(chat, texts.join("\n\n"), null);
+        }
+      } else if (ev.type === "assistant") {
+        const body = ensureAssistantBody(chat, ev.message.id);
+        for (const block of ev.message.content || []) {
+          if (!block) continue;
+          if (block.type === "tool_use") {
+            if (chat.emittedToolIds.has(block.id)) continue;
+            chat.emittedToolIds.add(block.id);
+            toolCard(chat, body, block);
+          } else if (block.type === "thinking") {
+            addThinking(chat, body, block.thinking);
+          } else if (block.type === "text") {
+            addText(chat, body, block.text);
+          }
+        }
+      }
+    }
+    // Leave currentAssistantId pointing at the last replayed turn so a turn that
+    // straddles a chunk boundary stays in one body; the next live turn arrives
+    // with a fresh message id and naturally opens its own body.
+    if (chat.id === activeId) requestAnimationFrame(() => scrollToBottom(chat));
+  }
+
+  // Wipe a tab's transcript and start a fresh session (used on folder change).
+  function resetChatSession(chat) {
+    chat.messagesEl.innerHTML = "";
+    chat.statusEl = null; // wiped with the stream; recreated on next render
+    chat.toolCards.clear();
+    chat.emittedToolIds.clear();
+    chat.currentAssistantId = null;
+    chat.currentAssistantBody = null;
+    chat.sessionId = null;
+    chat.empty = true;
+    chat.turnStatusText = "";
+    chat.streamBlocks.clear();
+    chat.streamedMsgIds.clear();
+    chat.streamMsgId = null;
+    if (chat.id === activeId) {
+      renderTurnStatus(chat);
+      updateSetup();
+    }
+    chat.started = false;
+    startChatSession(chat);
+  }
+
+  function sendPrompt() {
+    const chat = chats.get(activeId);
+    if (!chat) return;
+    const text = els.input.value.trim();
+    const hasContext = Array.isArray(chat.contexts) && chat.contexts.length > 0;
+    const attachments = Array.isArray(chat.attachments) ? chat.attachments : [];
+    const hasAttach = attachments.length > 0;
+    if ((!text && !hasContext && !hasAttach) || chat.turnRunning || !connected) return;
+    if (!chat.started) startChatSession(chat);
+    // Prepend any attached page/element context as a block, then clear it.
+    const ctx = formatContexts(chat);
+    const hasPage = hasContext && chat.contexts.some((c) => c.kind === "page");
+    const fallback = hasContext ? (hasPage ? "What's on this page?" : "What can you tell me about this element?") : "";
+    const bubbleHint = hasPage ? "_(attached current tab)_" : "_(selected page element)_";
+    const sentText = ctx + (text || fallback);
+    const images = attachments.map((a) => ({ mediaType: a.mediaType, data: a.base64 }));
+    userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments);
+    post({ type: "prompt", id: chat.id, text: sentText, images });
+    chat.contexts = [];
+    chat.attachments = [];
+    renderContextChips();
+    renderAttachmentThumbs();
+    els.input.value = "";
+    autosize();
+    chat.empty = false;
+    chat.turnRunning = true;
+    chat.turnStatusText = "";
+    // Reset the running-status metrics for this turn.
+    chat.turnStartedAt = Date.now();
+    chat.turnTokens = 0;
+    chat.curMsgTokens = 0;
+    chat.thoughtMs = 0;
+    chat.thinkStartedAt = 0;
+    chat.statusWord = randStatusWord();
+    chat.statusWordAt = Date.now();
+    chat.streamedMsgIds.clear();
+    chat.streamBlocks.clear();
+    chat.streamMsgId = null;
+    // First message becomes the tab title.
+    if (chat.title === DEFAULT_TITLE) {
+      chat.title = (text || "New chat").replace(/\s+/g, " ").slice(0, 40);
+      renderTabs();
+    }
+    setRunningUI(true);
+    renderTurnStatus(chat);
+    startStatusTicker();
+    updateSetup();
+    savePrefs();
+  }
+
+  function setRunningUI(on) {
+    els.send.classList.toggle("hidden", on);
+    els.stop.classList.toggle("hidden", !on);
+    els.root.classList.toggle("running", on);
+  }
+
+  function interrupt() {
+    const chat = chats.get(activeId);
+    if (!chat) return;
+    post({ type: "interrupt", id: chat.id });
+    systemNote(chat, "Interrupting…");
+  }
+
+  // ---- composer / header controls -------------------------------------------
+  function applyMode(chat, modeId) {
+    const m = MODES.find((x) => x.id === modeId) || MODES[0];
+    chat.mode = m.id;
+    lastMode = m.id;
+    savePrefs();
+    syncComposer();
+    if (chat.started) post({ type: "setMode", id: chat.id, permissionMode: chat.mode });
+    // The composer pill already reflects the active mode — no transcript note.
+  }
+
+  // Shift+Tab still cycles, mirroring the CLI.
+  function cycleMode() {
+    const chat = chats.get(activeId);
+    if (!chat) return;
+    const idx = MODES.findIndex((m) => m.id === chat.mode);
+    applyMode(chat, MODES[(idx + 1) % MODES.length].id);
+  }
+
+  // Click opens a dropdown (upward) to pick a mode directly.
+  function toggleModeMenu() {
+    if (!els.modeMenu.classList.contains("hidden")) return hideModeMenu();
+    renderModeMenu();
+    els.modeMenu.classList.remove("hidden");
+  }
+  function renderModeMenu() {
+    const chat = chats.get(activeId);
+    els.modeMenu.innerHTML = "";
+    els.modeMenu.appendChild(el("div", "mode-head", "Permission mode"));
+    for (const m of MODES) {
+      const row = el("div", "mode-item " + m.cls + (chat && chat.mode === m.id ? " current" : ""));
+      row.appendChild(el("span", "mode-dot"));
+      const meta = el("div", "mode-meta");
+      meta.appendChild(el("div", "mode-item-label", m.label));
+      meta.appendChild(el("div", "mode-item-hint", m.hint));
+      row.appendChild(meta);
+      row.addEventListener("click", () => {
+        hideModeMenu();
+        const c = chats.get(activeId);
+        if (c) applyMode(c, m.id);
+      });
+      els.modeMenu.appendChild(row);
+    }
+  }
+  function hideModeMenu() {
+    els.modeMenu.classList.add("hidden");
+  }
+
+  // ---- model picker (custom dropdown, opens upward) -------------------------
+  function applyModel(chat, modelId) {
+    const m = MODELS.find((x) => x.id === modelId) || MODELS[0];
+    chat.model = m.id;
+    lastModel = m.id;
+    savePrefs();
+    syncComposer();
+    if (chat.started) post({ type: "setModel", id: chat.id, model: chat.model });
+    // The composer pill already reflects the active model — no transcript note.
+  }
+
+  function toggleModelMenu() {
+    if (!els.modelMenu.classList.contains("hidden")) return hideModelMenu();
+    renderModelMenu();
+    els.modelMenu.classList.remove("hidden");
+  }
+  function renderModelMenu() {
+    const chat = chats.get(activeId);
+    els.modelMenu.innerHTML = "";
+    els.modelMenu.appendChild(el("div", "model-head", "Model"));
+    for (const m of MODELS) {
+      const isCur = chat && chat.model === m.id;
+      const row = el("div", "model-item" + (isCur ? " current" : ""));
+      const ic = el("span", "model-item-ic");
+      if (isCur) ic.innerHTML = ICON("check", 13);
+      row.appendChild(ic);
+      row.appendChild(el("span", "model-item-label", m.label));
+      row.addEventListener("click", () => {
+        hideModelMenu();
+        const c = chats.get(activeId);
+        if (c) applyModel(c, m.id);
+      });
+      els.modelMenu.appendChild(row);
+    }
+  }
+  function hideModelMenu() {
+    els.modelMenu.classList.add("hidden");
+  }
+
+  function reflectModel(chat, modelId) {
+    const known = MODELS.find((m) => m.id === modelId);
+    if (known) chat.model = known.id;
+  }
+
+  function syncComposer() {
+    if (!mounted) return;
+    const chat = chats.get(activeId);
+    if (!chat) return;
+    const mode = MODES.find((m) => m.id === chat.mode) || MODES[0];
+    els.mode.textContent = mode.label;
+    els.mode.className = "mode-btn " + mode.cls;
+    els.mode.title = mode.hint;
+    els.folder.querySelector(".folder-label").textContent = folderLabel(chat.cwd);
+    els.folder.title = chat.cwd || "Choose a project folder";
+    const model = MODELS.find((m) => m.id === chat.model) || MODELS[0];
+    els.modelBtn.querySelector(".model-label").textContent = model.label;
+    setRunningUI(chat.turnRunning);
+    renderTurnStatus(chat);
+    if (chat.turnRunning) startStatusTicker();
+    syncBranch(chat);
+    renderContextChips();
+    renderAttachmentThumbs();
+    updateSetup();
+  }
+
+  // Reflect the active chat's git branch into the branch chip (hidden when the
+  // cwd isn't a git repo).
+  function syncBranch(chat) {
+    if (!els.branch) return;
+    if (chat.isRepo && chat.branch) {
+      els.branch.classList.remove("hidden");
+      els.branch.querySelector(".branch-label").textContent = chat.branch;
+      els.branch.title = `On branch ${chat.branch} — click to switch`;
+    } else {
+      els.branch.classList.add("hidden");
+      if (els.branchMenu) els.branchMenu.classList.add("hidden");
+    }
+  }
+
+  // The setup chips (folder/branch) only make sense before a conversation
+  // begins — once the active chat has any messages, fold them away.
+  function updateSetup() {
+    if (!els.setup) return;
+    const chat = chats.get(activeId);
+    els.setup.classList.toggle("hidden", !(chat && chat.empty));
+  }
+
+  // ---- git branch chip ------------------------------------------------------
+  // Ask the host for the branch list + current branch of a chat's working dir.
+  function requestBranches(chat) {
+    if (chat && chat.cwd) post({ type: "gitBranches", id: chat.id, cwd: chat.cwd });
+  }
+
+  function toggleBranchMenu() {
+    if (!els.branchMenu) return;
+    if (!els.branchMenu.classList.contains("hidden")) {
+      els.branchMenu.classList.add("hidden");
+      return;
+    }
+    renderBranchMenu();
+    els.branchMenu.classList.remove("hidden");
+  }
+
+  function renderBranchMenu() {
+    const chat = chats.get(activeId);
+    els.branchMenu.innerHTML = "";
+    els.branchMenu.appendChild(el("div", "branch-head", "Switch branch"));
+    if (!chat || !chat.branches.length) {
+      els.branchMenu.appendChild(el("div", "branch-empty", "No other branches."));
+      return;
+    }
+    for (const b of chat.branches) {
+      const isCur = b === chat.branch;
+      const row = el("div", "branch-item" + (isCur ? " current" : ""));
+      const ic = el("span", "branch-item-ic");
+      ic.innerHTML = ICON(isCur ? "check" : "git-branch", 13);
+      row.appendChild(ic);
+      row.appendChild(el("span", "branch-item-name", b));
+      row.addEventListener("click", () => {
+        els.branchMenu.classList.add("hidden");
+        if (!isCur) chooseBranch(chat, b);
+      });
+      els.branchMenu.appendChild(row);
+    }
+  }
+
+  function chooseBranch(chat, branch) {
+    if (!chat.cwd) return;
+    post({ type: "checkoutBranch", id: chat.id, cwd: chat.cwd, branch });
+  }
+
+  function promptForFolder(chat) {
+    const cur = chat.cwd || home || "";
+    const next = window.prompt("Project folder path:", cur);
+    if (next && next.trim()) {
+      chat.cwd = next.trim();
+      if (chat.title === DEFAULT_TITLE) chat.title = basename(chat.cwd);
+      chat.isRepo = false;
+      chat.branch = null;
+      chat.branches = [];
+      savePrefs();
+      syncComposer();
+      resetChatSession(chat);
+      requestBranches(chat);
+      renderTabs();
+    }
+  }
+
+  function autosize() {
+    els.input.style.height = "auto";
+    els.input.style.height = Math.min(els.input.scrollHeight, 200) + "px";
+  }
+
+  // ---- slash-command menu ---------------------------------------------------
+  // Shown while the input is a single "/token" with no space yet. The command
+  // list comes from the active session's init event (slash_commands).
+  function updateSlash() {
+    const chat = chats.get(activeId);
+    const m = /^\/([^\s]*)$/.exec(els.input.value);
+    if (!chat || !m) return hideSlash();
+    const q = m[1].toLowerCase();
+    const items = (chat.slashCommands || []).filter((c) => c.toLowerCase().includes(q));
+    if (!items.length) return hideSlash();
+    // Prefix matches first, then substring matches.
+    items.sort((a, b) => {
+      const ap = a.toLowerCase().startsWith(q) ? 0 : 1;
+      const bp = b.toLowerCase().startsWith(q) ? 0 : 1;
+      return ap - bp || a.localeCompare(b);
+    });
+    slash.items = items.slice(0, 60);
+    slash.index = 0;
+    slash.open = true;
+    renderSlash();
+    els.slashMenu.classList.remove("hidden");
+  }
+
+  function renderSlash() {
+    els.slashMenu.innerHTML = "";
+    slash.items.forEach((c, i) => {
+      const row = el("div", "slash-item" + (i === slash.index ? " active" : ""));
+      row.appendChild(el("span", "slash-cmd", "/" + c));
+      row.addEventListener("mouseenter", () => {
+        slash.index = i;
+        highlightSlash();
+      });
+      row.addEventListener("mousedown", (e) => {
+        e.preventDefault(); // keep focus in the textarea
+        acceptSlash(i);
+      });
+      els.slashMenu.appendChild(row);
+    });
+  }
+
+  function highlightSlash() {
+    const rows = els.slashMenu.children;
+    for (let i = 0; i < rows.length; i++) rows[i].classList.toggle("active", i === slash.index);
+    const active = rows[slash.index];
+    if (active) active.scrollIntoView({ block: "nearest" });
+  }
+
+  function moveSlash(delta) {
+    if (!slash.items.length) return;
+    slash.index = (slash.index + delta + slash.items.length) % slash.items.length;
+    highlightSlash();
+  }
+
+  function acceptSlash(i) {
+    const c = slash.items[i];
+    if (c == null) return;
+    els.input.value = "/" + c + " ";
+    hideSlash();
+    els.input.focus();
+    autosize();
+  }
+
+  function hideSlash() {
+    slash.open = false;
+    slash.items = [];
+    els.slashMenu.classList.add("hidden");
+  }
+
+  // ---- onboarding overlay ---------------------------------------------------
+  function showOnboarding(detail) {
+    if (!mounted) return;
+    els.onboarding.classList.remove("hidden");
+    if (detail) els.onboardingStatus.textContent = detail;
+  }
+  function hideOnboarding() {
+    if (!mounted) return;
+    els.onboarding.classList.add("hidden");
+  }
+
+  // ---- mount / lifecycle ----------------------------------------------------
+  function mount(root) {
+    els.root = root;
+    root.innerHTML = TEMPLATE;
+    els.tabs = root.querySelector("#chat-tabs");
+    els.setup = root.querySelector("#chat-setup");
+    els.stack = root.querySelector("#chat-stack");
+    els.input = root.querySelector("#composer-input");
+    els.contextChips = root.querySelector("#context-chips");
+    els.attachThumbs = root.querySelector("#attach-thumbs");
+    els.composerBox = root.querySelector(".composer-box");
+    els.send = root.querySelector("#send-btn");
+    els.stop = root.querySelector("#stop-btn");
+    els.folder = root.querySelector("#folder-btn");
+    els.branch = root.querySelector("#branch-btn");
+    els.branchMenu = root.querySelector("#branch-menu");
+    els.modelBtn = root.querySelector("#model-btn");
+    els.modelMenu = root.querySelector("#model-menu");
+    els.mode = root.querySelector("#mode-btn");
+    els.modeMenu = root.querySelector("#mode-menu");
+    els.newChat = root.querySelector("#new-chat-btn");
+    els.historyBtn = root.querySelector("#history-btn");
+    els.historyMenu = root.querySelector("#history-menu");
+    els.slashMenu = root.querySelector("#slash-menu");
+    els.onboarding = root.querySelector("#chat-onboarding");
+    els.onboardingStatus = root.querySelector("#chat-onboarding-status");
+    els.copyInstall = root.querySelector("#chat-copy-install");
+
+    // Static icons.
+    root.querySelector("#new-chat-btn").innerHTML = ICON("plus", 17);
+    root.querySelector("#history-btn").innerHTML = ICON("history", 17);
+    root.querySelector("#folder-ic").innerHTML = ICON("folder", 14);
+    root.querySelector("#branch-ic").innerHTML = ICON("git-branch", 13);
+    root.querySelector("#model-caret").innerHTML = ICON("caret-down", 12);
+    els.send.innerHTML = ICON("send", 16);
+    els.stop.innerHTML = ICON("stop", 14);
+
+    els.send.addEventListener("click", sendPrompt);
+    els.stop.addEventListener("click", interrupt);
+    els.newChat.addEventListener("click", () => createChat({}));
+    els.historyBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleHistory();
+    });
+    document.addEventListener("click", (e) => {
+      if (!els.historyMenu.contains(e.target) && e.target !== els.historyBtn) {
+        els.historyMenu.classList.add("hidden");
+      }
+    });
+    els.folder.addEventListener("click", () => {
+      const chat = chats.get(activeId);
+      if (chat) post({ type: "pickFolder", id: chat.id }) || promptForFolder(chat);
+    });
+    els.branch.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleBranchMenu();
+    });
+    document.addEventListener("click", (e) => {
+      if (els.branchMenu && !els.branchMenu.contains(e.target) && e.target !== els.branch && !els.branch.contains(e.target)) {
+        els.branchMenu.classList.add("hidden");
+      }
+    });
+    els.mode.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleModeMenu();
+    });
+    document.addEventListener("click", (e) => {
+      if (els.modeMenu && !els.modeMenu.contains(e.target) && e.target !== els.mode && !els.mode.contains(e.target)) {
+        els.modeMenu.classList.add("hidden");
+      }
+    });
+    els.modelBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleModelMenu();
+    });
+    document.addEventListener("click", (e) => {
+      if (els.modelMenu && !els.modelMenu.contains(e.target) && !els.modelBtn.contains(e.target)) {
+        els.modelMenu.classList.add("hidden");
+      }
+    });
+    els.input.addEventListener("input", () => {
+      autosize();
+      updateSlash();
+    });
+    // Paste an image from the clipboard → attach as a thumbnail.
+    els.input.addEventListener("paste", (e) => {
+      const items = (e.clipboardData && e.clipboardData.items) || [];
+      let took = false;
+      for (const it of items) {
+        if (it.kind === "file" && it.type.startsWith("image/")) {
+          const blob = it.getAsFile();
+          if (blob) {
+            addAttachment(blob);
+            took = true;
+          }
+        }
+      }
+      if (took) e.preventDefault(); // don't also paste the image's text/url
+    });
+    // Drag & drop image files onto the composer.
+    if (els.composerBox) {
+      els.composerBox.addEventListener("dragover", (e) => {
+        if (e.dataTransfer && Array.from(e.dataTransfer.items || []).some((i) => i.type.startsWith("image/"))) {
+          e.preventDefault();
+          els.composerBox.classList.add("drag-over");
+        }
+      });
+      els.composerBox.addEventListener("dragleave", (e) => {
+        if (e.target === els.composerBox) els.composerBox.classList.remove("drag-over");
+      });
+      els.composerBox.addEventListener("drop", (e) => {
+        els.composerBox.classList.remove("drag-over");
+        const files = (e.dataTransfer && e.dataTransfer.files) || [];
+        const imgs = Array.from(files).filter((f) => f.type.startsWith("image/"));
+        if (imgs.length) {
+          e.preventDefault();
+          imgs.forEach(addAttachment);
+        }
+      });
+    }
+    els.input.addEventListener("blur", () => setTimeout(hideSlash, 120));
+    els.input.addEventListener("keydown", (e) => {
+      // Slash menu captures navigation keys while open.
+      if (slash.open) {
+        if (e.key === "ArrowDown") { e.preventDefault(); moveSlash(1); return; }
+        if (e.key === "ArrowUp") { e.preventDefault(); moveSlash(-1); return; }
+        if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); acceptSlash(slash.index); return; }
+        if (e.key === "Escape") { e.preventDefault(); hideSlash(); return; }
+      }
+      // Backspace at the very start of an empty-to-the-left caret erases the
+      // last attached context chip — like deleting an inline token in Cursor.
+      if (e.key === "Backspace" && els.input.selectionStart === 0 && els.input.selectionEnd === 0) {
+        const chat = chats.get(activeId);
+        if (chat && Array.isArray(chat.contexts) && chat.contexts.length) {
+          e.preventDefault();
+          removeContext(chat.contexts.length - 1);
+          return;
+        }
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendPrompt();
+      }
+      if (e.key === "Tab" && e.shiftKey) {
+        e.preventDefault();
+        cycleMode();
+      }
+    });
+    if (els.copyInstall) {
+      els.copyInstall.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(els.copyInstall.dataset.cmd);
+          els.copyInstall.textContent = "Copied!";
+          setTimeout(() => (els.copyInstall.textContent = "Copy"), 1500);
+        } catch (_) {}
+      });
+    }
+
+    mounted = true;
+
+    // Restore tabs (or open a first one), then render.
+    loadPrefs(() => {
+      if (!order.length) {
+        const first = makeChat({});
+        chats.set(first.id, first);
+        order.push(first.id);
+        activeId = first.id;
+      }
+      for (const id of order) els.stack.appendChild(chats.get(id).messagesEl);
+      renderTabs();
+      setActive(activeId);
+    });
+  }
+
+  let started = false;
+  function activate() {
+    if (!started) {
+      started = true;
+      connect();
+    }
+    if (els.input) setTimeout(() => els.input.focus(), 50);
+  }
+  function deactivate() {
+    // Keep the host connection + sessions alive in the background.
+  }
+
+  const TEMPLATE = `
+    <div class="chat-subbar">
+      <div id="chat-tabs" class="chat-tabs"></div>
+      <div class="subbar-actions">
+        <button id="new-chat-btn" class="icon-btn" title="New chat"></button>
+        <button id="history-btn" class="icon-btn" title="Chat history"></button>
+      </div>
+    </div>
+    <div id="chat-stack" class="chat-stack"></div>
+    <div class="composer">
+      <div id="slash-menu" class="slash-menu hidden"></div>
+      <div id="mode-menu" class="mode-menu hidden"></div>
+      <!-- Pre-chat setup chips: folder + git branch. Shown only while the
+           active chat is empty; hidden once the conversation starts. -->
+      <div id="chat-setup" class="chat-setup">
+        <button id="folder-btn" class="folder-btn" title="Choose project folder">
+          <span id="folder-ic" class="folder-ic"></span>
+          <span class="folder-label">~</span>
+        </button>
+        <button id="branch-btn" class="branch-btn hidden" title="Switch git branch">
+          <span id="branch-ic" class="branch-ic"></span>
+          <span class="branch-label">main</span>
+        </button>
+        <div id="branch-menu" class="branch-menu hidden"></div>
+      </div>
+      <div class="composer-box">
+        <div id="context-chips" class="context-chips hidden"></div>
+        <div id="attach-thumbs" class="attach-thumbs hidden"></div>
+        <textarea id="composer-input" class="composer-input" rows="1"
+          placeholder="Plan, build, ask anything — / for skills"></textarea>
+        <div class="composer-toolbar">
+          <button id="mode-btn" class="mode-btn mode-default" title="Permission mode (Shift+Tab)">Ask</button>
+          <div class="model-picker">
+            <button id="model-btn" class="model-btn" title="Model">
+              <span class="model-label">Opus 4.8</span>
+              <span id="model-caret" class="model-caret"></span>
+            </button>
+            <div id="model-menu" class="model-menu hidden"></div>
+          </div>
+          <span class="composer-spacer"></span>
+          <button id="send-btn" class="send-btn" title="Send"></button>
+          <button id="stop-btn" class="stop-btn hidden" title="Interrupt"></button>
+        </div>
+      </div>
+    </div>
+
+    <div id="history-menu" class="history-menu hidden"></div>
+
+    <div id="chat-onboarding" class="chat-onboarding hidden">
+      <div class="onboarding-card">
+        <h2>Connect the Claude Code host</h2>
+        <p>The chat drives the real <code>claude</code> CLI through a tiny local helper. Install it once:</p>
+        <div class="cmd-row">
+          <code>bash src/host/install.sh</code>
+          <button id="chat-copy-install" data-cmd="bash src/host/install.sh">Copy</button>
+        </div>
+        <p class="hint">Run it from the extension folder, then reload the extension. This panel connects automatically.</p>
+        <div class="status"><span class="dot"></span><span id="chat-onboarding-status">Waiting for the helper…</span></div>
+      </div>
+    </div>
+  `;
+
+  // ===========================================================================
+  // Live-tab inspection — driven by Claude through the host's browser_* MCP tools.
+  // DOM/text comes from the content script (silent). Console / network / eval use
+  // the DevTools Protocol via chrome.debugger, attached on demand and auto-detached
+  // when idle (so the "being debugged" banner only shows while in use).
+  // ===========================================================================
+  const CDP_VERSION = "1.3";
+  const CDP_IDLE_MS = 3 * 60 * 1000;
+  const cdp = { tabId: null, console: [], network: [], netMap: new Map(), refs: new Map(), waiters: [], idleTimer: null, listening: false };
+
+  function activeTab() {
+    return new Promise((resolve) => {
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+        const t = tabs && tabs[0];
+        if (t && t.id != null) return resolve(t);
+        chrome.tabs.query({ active: true, currentWindow: true }, (t2) => resolve((t2 && t2[0]) || null));
+      });
+    });
+  }
+  function sendToTab(tabId, payload) {
+    return new Promise((resolve) => {
+      chrome.tabs.sendMessage(tabId, payload, (resp) => {
+        if (chrome.runtime.lastError) return resolve({ ok: false, error: chrome.runtime.lastError.message });
+        resolve(resp || { ok: false, error: "no response" });
+      });
+    });
+  }
+  function captureTab(windowId) {
+    return new Promise((resolve) => {
+      chrome.tabs.captureVisibleTab(windowId, { format: "png" }, (dataUrl) => {
+        resolve(chrome.runtime.lastError || !dataUrl ? null : dataUrl);
+      });
+    });
+  }
+  function dbgSend(tabId, method, params) {
+    return new Promise((resolve, reject) => {
+      chrome.debugger.sendCommand({ tabId }, method, params || {}, (res) => {
+        const e = chrome.runtime.lastError;
+        if (e) reject(new Error(e.message));
+        else resolve(res);
+      });
+    });
+  }
+  function cdpArgToStr(a) {
+    if (a == null) return String(a);
+    if (a.value !== undefined) return typeof a.value === "string" ? a.value : JSON.stringify(a.value);
+    if (a.unserializableValue) return String(a.unserializableValue);
+    if (a.description) return a.description;
+    return a.type || "";
+  }
+  function capBuf(arr, n) {
+    if (arr.length > (n || 600)) arr.splice(0, arr.length - (n || 600));
+  }
+  function resetCdp() {
+    cdp.tabId = null;
+    cdp.console = [];
+    cdp.network = [];
+    cdp.netMap.clear();
+    cdp.refs.clear();
+    cdp.waiters = [];
+    if (cdp.idleTimer) {
+      clearTimeout(cdp.idleTimer);
+      cdp.idleTimer = null;
+    }
+  }
+  function bumpIdle() {
+    if (cdp.idleTimer) clearTimeout(cdp.idleTimer);
+    cdp.idleTimer = setTimeout(detachCdp, CDP_IDLE_MS);
+  }
+  function detachCdp() {
+    if (cdp.tabId == null) return;
+    const t = cdp.tabId;
+    try {
+      chrome.debugger.detach({ tabId: t }, () => void chrome.runtime.lastError);
+    } catch (_) {}
+    resetCdp();
+  }
+  function ensureCdpListeners() {
+    if (cdp.listening) return;
+    cdp.listening = true;
+    chrome.debugger.onEvent.addListener((source, method, params) => {
+      if (cdp.tabId == null || source.tabId !== cdp.tabId) return;
+      if (method === "Runtime.consoleAPICalled") {
+        cdp.console.push({ level: params.type, text: (params.args || []).map(cdpArgToStr).join(" ") });
+        capBuf(cdp.console);
+      } else if (method === "Log.entryAdded") {
+        const e = params.entry || {};
+        cdp.console.push({ level: e.level, text: e.text, url: e.url });
+        capBuf(cdp.console);
+      } else if (method === "Runtime.exceptionThrown") {
+        const d = params.exceptionDetails || {};
+        cdp.console.push({ level: "error", text: (d.exception && (d.exception.description || d.exception.value)) || d.text || "uncaught exception" });
+        capBuf(cdp.console);
+      } else if (method === "Network.requestWillBeSent") {
+        const r = { id: params.requestId, url: params.request.url, method: params.request.method, type: params.type, status: null, mimeType: null, failed: null };
+        cdp.netMap.set(params.requestId, r);
+        cdp.network.push(r);
+        capBuf(cdp.network);
+      } else if (method === "Network.responseReceived") {
+        const r = cdp.netMap.get(params.requestId);
+        if (r) {
+          r.status = params.response.status;
+          r.mimeType = params.response.mimeType;
+        }
+      } else if (method === "Network.loadingFailed") {
+        const r = cdp.netMap.get(params.requestId);
+        if (r) r.failed = params.errorText;
+      }
+      // Wake anyone waiting on this CDP event (e.g. navigation load).
+      if (cdp.waiters.length) {
+        const still = [];
+        for (const w of cdp.waiters) {
+          if (w.method === method) w.resolve(params);
+          else still.push(w);
+        }
+        cdp.waiters = still;
+      }
+    });
+    chrome.debugger.onDetach.addListener((source) => {
+      if (cdp.tabId != null && source.tabId === cdp.tabId) resetCdp();
+    });
+  }
+  function waitForCdpEvent(method, timeoutMs) {
+    return new Promise((resolve) => {
+      const w = { method, resolve: (p) => { clearTimeout(t); resolve(p); } };
+      const t = setTimeout(() => {
+        cdp.waiters = cdp.waiters.filter((x) => x !== w);
+        resolve(null);
+      }, timeoutMs || 15000);
+      cdp.waiters.push(w);
+    });
+  }
+  function ensureAttached(tabId) {
+    return new Promise((resolve, reject) => {
+      ensureCdpListeners();
+      if (cdp.tabId === tabId) {
+        bumpIdle();
+        return resolve();
+      }
+      const attach = () => {
+        chrome.debugger.attach({ tabId }, CDP_VERSION, async () => {
+          const e = chrome.runtime.lastError;
+          if (e) return reject(new Error(e.message));
+          cdp.tabId = tabId;
+          cdp.console = [];
+          cdp.network = [];
+          cdp.netMap.clear();
+          try {
+            await dbgSend(tabId, "Runtime.enable");
+            await dbgSend(tabId, "Log.enable");
+            await dbgSend(tabId, "Network.enable");
+            await dbgSend(tabId, "Page.enable");
+            await dbgSend(tabId, "DOM.enable");
+          } catch (_) {}
+          bumpIdle();
+          resolve();
+        });
+      };
+      if (cdp.tabId != null && cdp.tabId !== tabId) {
+        const old = cdp.tabId;
+        chrome.debugger.detach({ tabId: old }, () => {
+          void chrome.runtime.lastError;
+          resetCdp();
+          attach();
+        });
+      } else {
+        attach();
+      }
+    });
+  }
+
+  async function handleBrowserOp(msg) {
+    const op = msg.op;
+    const args = msg.args || {};
+    const done = (ok, data, error) => post({ type: "browserResult", bid: msg.bid, ok, data, error });
+    try {
+      if (!(chrome.tabs && chrome.tabs.query)) return done(false, null, "Browser tab access unavailable.");
+      const tab = await activeTab();
+      if (!tab || tab.id == null) return done(false, null, "No active browser tab.");
+
+      if (op === "info" || op === "dom") {
+        const format = op === "info" ? "info" : args.format === "html" ? "html" : "text";
+        const resp = await sendToTab(tab.id, { type: "RK_PAGE_CONTEXT", format, selector: args.selector });
+        if (!resp || !resp.ok) {
+          return done(false, null, (resp && resp.error) || "Couldn't read this tab — open a normal web page (chrome:// and the Web Store are off-limits) and reload it so the helper is present.");
+        }
+        if (op === "info") return done(true, { url: resp.url, title: resp.title, selection: resp.selection || "" });
+        return done(true, { url: resp.url, title: resp.title, format, content: format === "html" ? resp.html : resp.text, truncated: !!resp.truncated });
+      }
+
+      if (op === "screenshot") {
+        const dataUrl = await captureTab(tab.windowId);
+        if (!dataUrl) return done(false, null, "Screenshot failed (tab not capturable).");
+        return done(true, { dataUrl });
+      }
+
+      // console / network / eval need the DevTools Protocol.
+      await ensureAttached(tab.id);
+      bumpIdle();
+
+      if (op === "eval") {
+        const r = await dbgSend(tab.id, "Runtime.evaluate", {
+          expression: String(args.expression || ""),
+          returnByValue: true,
+          awaitPromise: true,
+          userGesture: true,
+          timeout: 5000,
+        });
+        if (r && r.exceptionDetails) {
+          const d = r.exceptionDetails;
+          return done(true, { error: (d.exception && (d.exception.description || d.exception.value)) || d.text || "evaluation error" });
+        }
+        const val = r && r.result ? (r.result.value !== undefined ? r.result.value : r.result.description) : null;
+        return done(true, { result: val });
+      }
+
+      if (op === "console") {
+        const limit = Math.max(1, Math.min(args.limit || 100, 500));
+        return done(true, {
+          note: cdp.console.length ? undefined : "No console output captured yet — capture began when the tools attached. Reload the page or re-run the code, then call again.",
+          entries: cdp.console.slice(-limit),
+        });
+      }
+
+      if (op === "network") {
+        const limit = Math.max(1, Math.min(args.limit || 80, 300));
+        return done(true, {
+          note: cdp.network.length ? undefined : "No requests captured yet — capture began when the tools attached. Reload the page or re-trigger the request, then call again.",
+          requests: cdp.network.slice(-limit).map((r) => ({ url: r.url, method: r.method, status: r.status, type: r.type, mimeType: r.mimeType, failed: r.failed || undefined })),
+        });
+      }
+
+      if (op === "snapshot") {
+        const snap = await axSnapshot(tab.id, args.interactiveOnly !== false);
+        return done(true, snap);
+      }
+
+      if (op === "navigate") {
+        const url = String(args.url || "");
+        if (!/^https?:\/\//i.test(url)) return done(false, null, "Provide an absolute http(s) URL.");
+        const loaded = waitForCdpEvent("Page.loadEventFired", 20000);
+        await dbgSend(tab.id, "Page.navigate", { url });
+        await loaded;
+        const info = await dbgSend(tab.id, "Runtime.evaluate", { expression: "({url:location.href,title:document.title})", returnByValue: true });
+        cdp.refs.clear();
+        return done(true, info && info.result ? info.result.value : { url });
+      }
+
+      if (op === "click") {
+        const pt = await targetCenter(tab.id, args);
+        if (!pt) return done(false, null, "Target not found (ref/selector didn't resolve or is off-screen).");
+        await mouseClick(tab.id, pt.x, pt.y, !!args.double);
+        return done(true, { clicked: true, x: Math.round(pt.x), y: Math.round(pt.y) });
+      }
+
+      if (op === "type") {
+        if (args.ref || args.selector) {
+          const ok = await focusTarget(tab.id, args);
+          if (!ok) return done(false, null, "Target not found to type into.");
+        }
+        await dbgSend(tab.id, "Input.insertText", { text: String(args.text || "") });
+        if (args.submit) await pressKey(tab.id, "Enter");
+        return done(true, { typed: String(args.text || "").length });
+      }
+
+      if (op === "fill") {
+        const r = await setValue(tab.id, args, String(args.value || ""));
+        if (!r) return done(false, null, "Target not found to fill.");
+        return done(true, { filled: true });
+      }
+
+      if (op === "key") {
+        await pressKey(tab.id, String(args.key || ""));
+        return done(true, { pressed: args.key });
+      }
+
+      return done(false, null, "Unknown browser op: " + op);
+    } catch (e) {
+      done(false, null, String((e && e.message) || e));
+    }
+  }
+
+  // ---- CDP action helpers ----------------------------------------------------
+  // Resolve a {ref|selector|x,y} target to viewport-center coordinates, scrolling
+  // it into view first. Returns {x,y} or null.
+  async function targetCenter(tabId, args) {
+    if (typeof args.x === "number" && typeof args.y === "number") return { x: args.x, y: args.y };
+    const fn =
+      "function(){ this.scrollIntoView({block:'center',inline:'center'}); const b=this.getBoundingClientRect(); if(!b.width&&!b.height) return null; return {x:b.left+b.width/2, y:b.top+b.height/2}; }";
+    if (args.ref) {
+      const objectId = await refToObject(tabId, args.ref);
+      if (!objectId) return null;
+      const r = await dbgSend(tabId, "Runtime.callFunctionOn", { objectId, functionDeclaration: fn, returnByValue: true });
+      return r && r.result ? r.result.value : null;
+    }
+    if (args.selector) {
+      const expr = "(function(){var el=document.querySelector(" + JSON.stringify(args.selector) + "); if(!el) return null; el.scrollIntoView({block:'center',inline:'center'}); var b=el.getBoundingClientRect(); if(!b.width&&!b.height) return null; return {x:b.left+b.width/2,y:b.top+b.height/2};})()";
+      const r = await dbgSend(tabId, "Runtime.evaluate", { expression: expr, returnByValue: true });
+      return r && r.result ? r.result.value : null;
+    }
+    return null;
+  }
+  async function focusTarget(tabId, args) {
+    if (args.ref) {
+      const objectId = await refToObject(tabId, args.ref);
+      if (!objectId) return false;
+      await dbgSend(tabId, "Runtime.callFunctionOn", { objectId, functionDeclaration: "function(){ this.focus(); }" });
+      return true;
+    }
+    if (args.selector) {
+      const expr = "(function(){var el=document.querySelector(" + JSON.stringify(args.selector) + "); if(!el) return false; el.focus(); return true;})()";
+      const r = await dbgSend(tabId, "Runtime.evaluate", { expression: expr, returnByValue: true });
+      return !!(r && r.result && r.result.value);
+    }
+    return false;
+  }
+  async function setValue(tabId, args, value) {
+    const body =
+      "this.focus(); var proto=Object.getPrototypeOf(this); var d=Object.getOwnPropertyDescriptor(proto,'value'); if(d&&d.set){d.set.call(this,V);}else{this.value=V;} this.dispatchEvent(new Event('input',{bubbles:true})); this.dispatchEvent(new Event('change',{bubbles:true})); return true;";
+    const fn = "function(V){ " + body + " }";
+    if (args.ref) {
+      const objectId = await refToObject(tabId, args.ref);
+      if (!objectId) return false;
+      const r = await dbgSend(tabId, "Runtime.callFunctionOn", { objectId, functionDeclaration: fn, arguments: [{ value }], returnByValue: true });
+      return !!(r && r.result && r.result.value);
+    }
+    if (args.selector) {
+      const expr = "(function(V){var el=document.querySelector(" + JSON.stringify(args.selector) + "); if(!el) return false; " + body.replace(/this/g, "el") + "})(" + JSON.stringify(value) + ")";
+      const r = await dbgSend(tabId, "Runtime.evaluate", { expression: expr, returnByValue: true });
+      return !!(r && r.result && r.result.value);
+    }
+    return false;
+  }
+  async function mouseClick(tabId, x, y, dbl) {
+    await dbgSend(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+    const press = { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: dbl ? 2 : 1 };
+    const release = { type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: dbl ? 2 : 1 };
+    await dbgSend(tabId, "Input.dispatchMouseEvent", press);
+    await dbgSend(tabId, "Input.dispatchMouseEvent", release);
+  }
+  // Map a ref (@eN) from the last snapshot to a live Runtime object.
+  async function refToObject(tabId, ref) {
+    const backendNodeId = cdp.refs.get(ref);
+    if (!backendNodeId) return null;
+    try {
+      const r = await dbgSend(tabId, "DOM.resolveNode", { backendNodeId });
+      return r && r.object ? r.object.objectId : null;
+    } catch (_) {
+      return null;
+    }
+  }
+  const KEY_INFO = {
+    Enter: { keyCode: 13, code: "Enter", text: "\r" },
+    Tab: { keyCode: 9, code: "Tab" },
+    Escape: { keyCode: 27, code: "Escape" },
+    Backspace: { keyCode: 8, code: "Backspace" },
+    Delete: { keyCode: 46, code: "Delete" },
+    ArrowUp: { keyCode: 38, code: "ArrowUp" },
+    ArrowDown: { keyCode: 40, code: "ArrowDown" },
+    ArrowLeft: { keyCode: 37, code: "ArrowLeft" },
+    ArrowRight: { keyCode: 39, code: "ArrowRight" },
+    Home: { keyCode: 36, code: "Home" },
+    End: { keyCode: 35, code: "End" },
+    PageUp: { keyCode: 33, code: "PageUp" },
+    PageDown: { keyCode: 34, code: "PageDown" },
+  };
+  const MOD_BITS = { Alt: 1, Control: 2, Ctrl: 2, Meta: 8, Cmd: 8, Command: 8, Shift: 4 };
+  async function pressKey(tabId, combo) {
+    const parts = String(combo).split("+");
+    const main = parts.pop();
+    let modifiers = 0;
+    for (const p of parts) modifiers |= MOD_BITS[p] || 0;
+    const info = KEY_INFO[main] || { keyCode: main.length === 1 ? main.toUpperCase().charCodeAt(0) : 0, code: main.length === 1 ? "Key" + main.toUpperCase() : main };
+    const base = { modifiers, key: main, code: info.code, windowsVirtualKeyCode: info.keyCode, nativeVirtualKeyCode: info.keyCode };
+    await dbgSend(tabId, "Input.dispatchKeyEvent", { type: "keyDown", ...base, text: info.text || (main.length === 1 && !modifiers ? main : undefined) });
+    await dbgSend(tabId, "Input.dispatchKeyEvent", { type: "keyUp", ...base });
+  }
+
+  // Compact accessibility-tree snapshot with stable @refs (rebuilds cdp.refs).
+  async function axSnapshot(tabId, interactiveOnly) {
+    try {
+      await dbgSend(tabId, "Accessibility.enable");
+    } catch (_) {}
+    const res = await dbgSend(tabId, "Accessibility.getFullAXTree", {});
+    cdp.refs.clear();
+    const nodes = (res && res.nodes) || [];
+    const lines = [];
+    let n = 0;
+    const SKIP = new Set(["none", "presentation", "generic", "InlineTextBox", "StaticText", "LineBreak", "paragraph", ""]);
+    const INTERESTING = new Set(["button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox", "menuitem", "tab", "switch", "slider", "option", "listbox", "textarea", "spinbutton"]);
+    for (const node of nodes) {
+      if (node.ignored) continue;
+      const role = node.role && node.role.value;
+      const name = node.name && node.name.value ? String(node.name.value).trim() : "";
+      if (!role || SKIP.has(role)) continue;
+      if (interactiveOnly && !INTERESTING.has(role)) continue;
+      if (!name && interactiveOnly) continue;
+      if (node.backendDOMNodeId == null) continue;
+      n++;
+      const ref = "@e" + n;
+      cdp.refs.set(ref, node.backendDOMNodeId);
+      let line = ref + " " + role;
+      if (name) line += ' "' + name.slice(0, 120) + '"';
+      const val = node.value && node.value.value;
+      if (val != null && String(val).trim()) line += " = " + JSON.stringify(String(val).slice(0, 80));
+      lines.push(line);
+      if (n >= 400) break;
+    }
+    return {
+      note: lines.length ? "Use these @refs with browser_click / browser_type / browser_fill." : "No labelled interactive elements found; try interactiveOnly:false or browser_dom.",
+      elements: lines.join("\n"),
+    };
+  }
+
+  // Drop the debugger when the panel goes away so the banner never lingers.
+  window.addEventListener("beforeunload", detachCdp);
+
+  window.RKChat = { mount, activate, deactivate, addContext };
+})();
