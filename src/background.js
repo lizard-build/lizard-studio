@@ -66,13 +66,18 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 // Show the Lizard Studio toolbar on the tab the user is currently looking at.
-// Used when the side panel opens (its port connects). The content script only
-// shows the bar if it isn't already visible, so this is safe to call on every
-// connect, including transient service-worker reconnects.
+// Used when the side panel opens (its port connects).
+//
+// We broadcast to every tab rather than resolving the active tab in the worker:
+// opening the side panel steals focus, so a lastFocusedWindow query right after
+// the panel connects is unreliable. Each content script decides for itself — it
+// only raises the bar if its tab is the visible (foreground) one and the bar
+// isn't already up, so exactly the tab the user is looking at responds. Safe to
+// call on every connect, including transient service-worker reconnects.
 function showToolbarOnActiveTab() {
-  chrome.tabs.query({ active: true, lastFocusedWindow: true }, ([tab]) => {
-    if (tab && tab.id != null) {
-      chrome.tabs.sendMessage(tab.id, { type: "RK_SHOW_TOOLBAR" }).catch(() => {});
+  chrome.tabs.query({}, (tabs) => {
+    for (const t of tabs) {
+      if (t.id != null) chrome.tabs.sendMessage(t.id, { type: "RK_SHOW_TOOLBAR" }).catch(() => {});
     }
   });
 }
