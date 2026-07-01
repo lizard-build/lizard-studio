@@ -13,6 +13,7 @@
     order: [],          // tool ids in toolbar order
     state: {
       visible: false,   // toolbar shown
+      minimized: false, // toolbar collapsed to its bottom handle (persisted)
       active: {},       // id -> bool
       settings: {},     // id -> arbitrary settings object
       toolbarPos: null, // {x,y}
@@ -86,8 +87,10 @@
     } catch (e) { resolve(null); }
   });
 
-  // Toolbar shell visibility + position survive a reload (the page itself starts
-  // clean otherwise — tools are not re-activated). main.js restores this on load.
+  // Toolbar shell visibility + position + collapsed state survive a reload (the
+  // page itself starts clean otherwise — tools are not re-activated). The
+  // minimized state is a user preference too, so it's remembered across pages and
+  // across the extension being closed and reopened. main.js restores this on load.
   const UI_KEY = "rk.ui";
   let uiWrite = null;
   RK.persistUI = () => {
@@ -95,7 +98,11 @@
     uiWrite = setTimeout(() => {
       try {
         chrome.storage && chrome.storage.local.set({
-          [UI_KEY]: { visible: !!RK.state.visible, pos: RK.state.toolbarPos || null },
+          [UI_KEY]: {
+            visible: !!RK.state.visible,
+            minimized: !!RK.state.minimized,
+            pos: RK.state.toolbarPos || null,
+          },
         });
       } catch (e) {}
     }, 200);

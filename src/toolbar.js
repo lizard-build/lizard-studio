@@ -239,15 +239,19 @@
   }
   function minimize() {
     minimized = true;
+    RK.state.minimized = true;
     closePop();
     hideTip();
     root.style.display = "none";
     ensureHandle().style.display = "flex";
+    RK.persistUI();
   }
   function restore() {
     minimized = false;
+    RK.state.minimized = false;
     if (handleEl) handleEl.style.display = "none";
     root.style.display = "flex";
+    RK.persistUI();
   }
 
   // ---- popover plumbing (settings panels + accent picker) ----------------
@@ -495,7 +499,12 @@
       // Orphaned content script (extension was reloaded) — do nothing rather than
       // build a bar wired to a dead context. A page reload injects a fresh script.
       if (!RK.alive()) return;
-      RK.ensureOverlay(); if (!root) build(); restore(); RK.state.visible = true; RK.persistUI();
+      RK.ensureOverlay(); if (!root) build();
+      RK.state.visible = true;
+      // Come back in whatever collapsed/expanded state the user last left it —
+      // remembered across pages and across the extension closing and reopening.
+      if (RK.state.minimized) minimize(); else restore();
+      RK.persistUI();
     },
     // Closing the toolbar also turns off every tool — nothing lingers on the page.
     hide() {
@@ -507,6 +516,22 @@
       RK.persistUI();
     },
     toggle() { (RK.state.visible ? RK.toolbar.hide : RK.toolbar.show)(); },
+    // Temporarily hide the bar without touching tool state, so a full-width tool
+    // UI (e.g. the annotate bar) can take its place. reveal() brings it back.
+    conceal() {
+      if (root) root.style.display = "none";
+      if (handleEl) handleEl.style.display = "none";
+    },
+    reveal() {
+      if (!RK.state.visible) return;
+      if (minimized) { if (handleEl) handleEl.style.display = "flex"; }
+      else if (root) root.style.display = "flex";
+    },
+    // Where the bar currently sits, so a replacement UI can dock in the same spot.
+    // null while minimized/hidden — caller should fall back to its default dock.
+    barRect() {
+      return root && RK.state.visible && !minimized ? root.getBoundingClientRect() : null;
+    },
     render,
   };
 })();

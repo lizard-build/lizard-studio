@@ -13,9 +13,14 @@
   // is remembered, so reloading the page doesn't make the bar vanish. Tools are
   // NOT re-activated — only the empty bar comes back, ready to use.
   RK.loadUI().then((ui) => {
-    if (!ui || !ui.visible) return;
+    if (!ui) return;
+    // Restore the collapsed state even when the bar isn't currently shown, so a
+    // later open (e.g. the side panel connecting) brings it back the way the user
+    // left it. Position and the minimized preference persist across pages and
+    // across the extension closing and reopening.
+    RK.state.minimized = !!ui.minimized;
     if (ui.pos) RK.state.toolbarPos = ui.pos;
-    RK.toolbar.show();
+    if (ui.visible) RK.toolbar.show();
   });
 
   chrome.runtime.onMessage.addListener((msg) => {
