@@ -13,16 +13,24 @@
     .rk-bar, .rk-bar * { box-sizing: border-box; }
     .rk-bar {
       position: fixed; left: 50%; bottom: 24px;
-      transform: translateX(-50%) scale(var(--rk-z, 1)); transform-origin: bottom center;
+      --rk-pos: translateX(-50%) scale(var(--rk-z, 1));
+      --rk-mm: scale(1);
+      transform: var(--rk-pos) var(--rk-mm); transform-origin: bottom center;
       display: flex; align-items: center; gap: 4px;
       padding: 7px 9px; max-width: calc(100vw - 24px);
       background: var(--bg-secondary); color: var(--text-primary);
       border: 1px solid var(--border-primary);
-      border-radius: 18px; box-shadow: 0 18px 50px rgba(0,0,0,.6);
+      border-radius: 18px;
       font: 500 12px/1.5 var(--rk-font);
       user-select: none; z-index: 100; cursor: grab;
+      opacity: 1; pointer-events: auto;
+      transition: opacity .18s ease, transform .22s cubic-bezier(.3,.7,.4,1);
     }
     .rk-bar.dragging { cursor: grabbing; }
+    .rk-bar.dragging, .rk-bar.rk-instant { transition: none; }
+    /* Collapsed for either "minimized to handle" or "toolbar hidden" — faded
+       and shrunk toward the bottom-center dock, non-interactive while hidden. */
+    .rk-bar.rk-collapsed { --rk-mm: scale(.001); opacity: 0; pointer-events: none; }
     /* A draggable surface, but the controls inside stay clickable. */
     .rk-bar > * { cursor: default; }
 
@@ -46,13 +54,18 @@
     /* Minimized handle — a tab poking up from the very bottom edge of the screen
        (flush bottom, rounded top corners) that restores the bar when clicked. */
     .rk-handle { position:fixed; left:50%; bottom:0;
-      transform:translateX(-50%) scale(var(--rk-z, 1)); transform-origin:bottom center;
+      transform:translateX(-50%) scale(.001); transform-origin:bottom center;
       display:flex; align-items:center; justify-content:center;
       width:62px; height:20px; cursor:pointer; z-index:100;
       background:var(--bg-secondary); color:var(--text-secondary);
       border:1px solid var(--border-primary); border-bottom:0;
       border-radius:16px 16px 0 0;
-      box-shadow:0 -6px 24px rgba(0,0,0,.5); transition:color .15s, background .15s; }
+      box-shadow:0 -6px 24px rgba(0,0,0,.5);
+      opacity: 0; pointer-events: none;
+      transition:color .15s, background .15s, opacity .18s ease,
+        transform .22s cubic-bezier(.3,.7,.4,1); }
+    .rk-handle.rk-instant { transition: none; }
+    .rk-handle.rk-visible { transform:translateX(-50%) scale(var(--rk-z, 1)); opacity: 1; pointer-events: auto; }
     .rk-handle:hover { color:var(--text-primary); background:var(--control-secondary); }
     .rk-handle svg { width:16px; height:16px; display:block; }
 
@@ -197,7 +210,7 @@
     const p = RK.state.toolbarPos;
     if (p) {
       root.style.left = p.x + "px"; root.style.top = p.y + "px"; root.style.bottom = "auto";
-      root.style.transformOrigin = "top left"; root.style.transform = "scale(var(--rk-z, 1))";
+      root.style.transformOrigin = "top left"; root.style.setProperty("--rk-pos", "scale(var(--rk-z, 1))");
     }
   }
 
@@ -237,20 +250,37 @@
     RK.overlay.ui.appendChild(handleEl);
     return handleEl;
   }
-  function minimize() {
+  // Fades/scales the bar and its bottom handle between states instead of
+  // snapping with display:none, so minimize/restore reads as one continuous
+  // motion. `instant` skips the transition (used by conceal/reveal, which
+  // swap in another full-width tool UI and shouldn't visibly animate).
+  function setBarCollapsed(collapsed, instant) {
+    if (!root) return;
+    if (instant) root.classList.add("rk-instant");
+    root.classList.toggle("rk-collapsed", collapsed);
+    if (instant) requestAnimationFrame(() => root.classList.remove("rk-instant"));
+  }
+  function setHandleVisible(visible, instant) {
+    const h = visible ? ensureHandle() : handleEl;
+    if (!h) return;
+    if (instant) h.classList.add("rk-instant");
+    h.classList.toggle("rk-visible", visible);
+    if (instant) requestAnimationFrame(() => h.classList.remove("rk-instant"));
+  }
+  function minimize(instant) {
     minimized = true;
     RK.state.minimized = true;
     closePop();
     hideTip();
-    root.style.display = "none";
-    ensureHandle().style.display = "flex";
+    setBarCollapsed(true, instant);
+    setHandleVisible(true, instant);
     RK.persistUI();
   }
-  function restore() {
+  function restore(instant) {
     minimized = false;
     RK.state.minimized = false;
-    if (handleEl) handleEl.style.display = "none";
-    root.style.display = "flex";
+    setHandleVisible(false, instant);
+    setBarCollapsed(false, instant);
     RK.persistUI();
   }
 
@@ -480,7 +510,7 @@
       const y = RK.clamp(d.oy + (e.clientY - d.sy), 0, window.innerHeight - root.offsetHeight);
       root.style.left = x + "px"; root.style.top = y + "px";
       root.style.bottom = "auto";
-      root.style.transformOrigin = "top left"; root.style.transform = "scale(var(--rk-z, 1))";
+      root.style.transformOrigin = "top left"; root.style.setProperty("--rk-pos", "scale(var(--rk-z, 1))");
     });
     window.addEventListener("mouseup", () => {
       if (!d) return;
@@ -499,19 +529,23 @@
       // Orphaned content script (extension was reloaded) — do nothing rather than
       // build a bar wired to a dead context. A page reload injects a fresh script.
       if (!RK.alive()) return;
-      RK.ensureOverlay(); if (!root) build();
+      RK.ensureOverlay();
+      const justBuilt = !root;
+      if (justBuilt) build();
       RK.state.visible = true;
       // Come back in whatever collapsed/expanded state the user last left it —
       // remembered across pages and across the extension closing and reopening.
-      if (RK.state.minimized) minimize(); else restore();
+      // On first build there's nothing on screen yet to animate from, so snap
+      // straight to the right state instead of playing an unwanted intro.
+      if (RK.state.minimized) minimize(justBuilt); else restore(justBuilt);
       RK.persistUI();
     },
     // Closing the toolbar also turns off every tool — nothing lingers on the page.
     hide() {
       clearAll(); closePop();
       minimized = false;
-      if (handleEl) handleEl.style.display = "none";
-      if (root) root.style.display = "none";
+      setHandleVisible(false);
+      setBarCollapsed(true);
       RK.state.visible = false;
       RK.persistUI();
     },
@@ -519,13 +553,13 @@
     // Temporarily hide the bar without touching tool state, so a full-width tool
     // UI (e.g. the annotate bar) can take its place. reveal() brings it back.
     conceal() {
-      if (root) root.style.display = "none";
-      if (handleEl) handleEl.style.display = "none";
+      if (root) setBarCollapsed(true, true);
+      setHandleVisible(false, true);
     },
     reveal() {
       if (!RK.state.visible) return;
-      if (minimized) { if (handleEl) handleEl.style.display = "flex"; }
-      else if (root) root.style.display = "flex";
+      if (minimized) setHandleVisible(true, true);
+      else setBarCollapsed(false, true);
     },
     // Where the bar currently sits, so a replacement UI can dock in the same spot.
     // null while minimized/hidden — caller should fall back to its default dock.

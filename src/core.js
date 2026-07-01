@@ -236,7 +236,7 @@
     if (RK.overlay) return RK.overlay;
 
     const host = document.createElement("div");
-    host.id = "rulerkit-host";
+    host.id = "lizard-studio-host";
     Object.assign(host.style, {
       position: "fixed", inset: "0", zIndex: String(Z),
       pointerEvents: "none", margin: "0", padding: "0", border: "0",

@@ -55,7 +55,7 @@ panel. Requires the Claude Code CLI (`npm i -g @anthropic-ai/claude-code`). The 
 
 1. Open `chrome://extensions`.
 2. Enable **Developer mode** (top-right).
-3. Click **Load unpacked** and select this folder (`ruler/`).
+3. Click **Load unpacked** and select this folder (`lizard-studio/`).
 4. Pin the extension. Click its icon — or press the toggle shortcut — to show/hide the toolbar:
    - **macOS:** `⌃ Control + ⇧ Shift + R`
    - **Windows / Linux:** `Alt + Shift + R`

@@ -4,7 +4,7 @@
 // uses to run one process per tab. A shared native-host port multiplexes every
 // tab; incoming events are routed back to the right tab by id.
 //
-// Exposes window.RKChat = { mount, activate, deactivate, addContext }.
+// Exposes window.RKChat = { mount, activate, deactivate, addContext, addImage }.
 
 (function () {
   const HOST_NAME = "com.lizard.code";
@@ -555,6 +555,19 @@
     }
   }
 
+  // Attach an image from a data URL (e.g. an annotated screenshot relayed from
+  // the in-page Annotate tool). Routed through the same pipeline as a paste.
+  async function addImage(dataUrl) {
+    if (!dataUrl || typeof dataUrl !== "string") return;
+    try {
+      const blob = await (await fetch(dataUrl)).blob();
+      await addAttachment(blob);
+    } catch (_) {
+      const chat = chats.get(activeId);
+      if (chat) systemNote(chat, "Couldn't attach the screenshot.", "warn");
+    }
+  }
+
   function removeAttachment(id) {
     const chat = chats.get(activeId);
     if (!chat) return;
@@ -615,7 +628,9 @@
   }
 
   function addText(chat, body, text) {
-    body.appendChild(R.markdown(text));
+    // `/usage` returns a plain-text summary — render it as a card when it matches.
+    const usage = R.usageCard && R.usageCard(text);
+    body.appendChild(usage || R.markdown(text));
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
   }
 
@@ -677,7 +692,18 @@
     if (!body || body.dataset.footered) return;
     if (!assistantProse(body)) return;
     body.dataset.footered = "1";
-    body.appendChild(messageFooter(() => assistantProse(body), ts || Date.now()));
+    const footer = messageFooter(() => assistantProse(body), ts || Date.now());
+    body.appendChild(footer);
+    // The footer is hidden until the message is hovered — recompute the relative
+    // time on mouseenter so it's never stale the moment it appears.
+    const row = body.parentElement;
+    const timeNode = footer.querySelector(".msg-time");
+    if (row && timeNode) {
+      row.addEventListener("mouseenter", () => {
+        const t = Number(timeNode.dataset.ts);
+        if (t) timeNode.textContent = relTime(t);
+      });
+    }
   }
 
   // One shared timer keeps every relative timestamp fresh — no per-node interval.
@@ -686,7 +712,7 @@
       const ts = Number(node.dataset.ts);
       if (ts) node.textContent = relTime(ts);
     });
-  }, 30000);
+  }, 20000);
 
   // ---- live streaming (--include-partial-messages) --------------------------
   // Coalesce markdown re-renders to one per animation frame so a fast token
@@ -848,7 +874,12 @@
   function toolDetail(name, input) {
     input = input || {};
     if (name === "Bash" && input.command) {
-      return R.codeBlock(input.command, "bash");
+      // Wrap in .tool-detail so it collapses with the card — without the wrapper
+      // the bare .code-block isn't matched by the collapsed-hide rule and the
+      // command would stay visible under the head.
+      const d = el("div", "tool-detail");
+      d.appendChild(R.codeBlock(input.command, "bash"));
+      return d;
     }
     if (name === "Write" && input.content != null) {
       const d = el("div", "tool-detail");
@@ -918,7 +949,11 @@
           chat.replayed = true;
           if (d.cwd) { chat.cwd = d.cwd; rememberCwd(d.cwd); }
           if (d.session_id) chat.sessionId = d.session_id;
-          if (Array.isArray(d.slash_commands)) chat.slashCommands = d.slash_commands;
+          // `/login` is handled by the panel (the headless CLI doesn't list it),
+          // so make sure it's offered in the autocomplete menu.
+          if (Array.isArray(d.slash_commands)) {
+            chat.slashCommands = d.slash_commands.includes("login") ? d.slash_commands : ["login", ...d.slash_commands];
+          }
           if (d.model) reflectModel(chat, d.model);
           if (d.permissionMode) chat.mode = d.permissionMode;
           if (chat.id === activeId) syncComposer();
@@ -1144,7 +1179,9 @@
         break;
       case "commands":
         if (chat && Array.isArray(msg.list)) {
-          chat.slashCommands = msg.list;
+          // `/login` is handled by the panel (the headless CLI doesn't list it),
+          // so make sure it's offered in the autocomplete menu.
+          chat.slashCommands = msg.list.includes("login") ? msg.list : ["login", ...msg.list];
           // If the user is mid-"/" in this tab, populate the menu now.
           if (chat.id === activeId && /^\/[^\s]*$/.test(els.input.value)) updateSlash();
         }
@@ -1194,6 +1231,12 @@
           if (msg.id === activeId) syncComposer();
           post({ type: "pickFolder", id: chat.id }) || promptForFolder(chat);
         }
+        break;
+      case "authUrl":
+        if (chat) loginShowUrl(chat, msg.url);
+        break;
+      case "authDone":
+        if (chat) loginDone(chat, msg.ok, msg.message);
         break;
       case "error":
         if (chat) systemNote(chat, msg.message || "Host error", "warn");
@@ -1289,6 +1332,7 @@
   // Wipe a tab's transcript and start a fresh session (used on folder change).
   function resetChatSession(chat) {
     chat.messagesEl.innerHTML = "";
+    chat.loginCard = null; // detached from the DOM above; drop the stale reference
     chat.statusEl = null; // wiped with the stream; recreated on next render
     chat.toolCards.clear();
     chat.emittedToolIds.clear();
@@ -1312,6 +1356,27 @@
     const chat = chats.get(activeId);
     if (!chat) return;
     const text = els.input.value.trim();
+    // `/clear` wipes the conversation and starts a fresh session. It's handled
+    // here rather than passed to the headless CLI, which treats it as plain text.
+    if (/^\/clear\s*$/.test(text)) {
+      els.input.value = "";
+      chat.contexts = [];
+      chat.attachments = [];
+      renderContextChips();
+      renderAttachmentThumbs();
+      autosize();
+      chat.turnRunning = false;
+      // resetChatSession restarts the session, which kills any in-flight turn.
+      resetChatSession(chat);
+      return;
+    }
+    // `/login` can't run in the headless CLI, so drive its OAuth flow from here.
+    if (/^\/login\s*$/.test(text)) {
+      els.input.value = "";
+      autosize();
+      startLogin(chat);
+      return;
+    }
     const hasContext = Array.isArray(chat.contexts) && chat.contexts.length > 0;
     const attachments = Array.isArray(chat.attachments) ? chat.attachments : [];
     const hasAttach = attachments.length > 0;
@@ -1375,6 +1440,75 @@
     if (!chat) return;
     post({ type: "interrupt", id: chat.id });
     systemNote(chat, "Interrupting…");
+  }
+
+  // ---- interactive login ----------------------------------------------------
+  // Kicks off the host's `claude auth login` flow and shows a card that walks
+  // the user through the browser OAuth + code paste. The host replies with
+  // `authUrl` (the sign-in link) and finally `authDone`.
+  function startLogin(chat) {
+    if (chat.loginCard) { chat.loginCard.remove(); chat.loginCard = null; }
+    const card = el("div", "login-card");
+    card.appendChild(el("div", "login-title", "Sign in to Claude"));
+    const status = el("div", "login-status", "Starting sign-in…");
+    card.appendChild(status);
+    card._status = status;
+    chat.loginCard = card;
+    append(chat, card);
+    if (!post({ type: "authLogin", id: chat.id })) {
+      status.textContent = "Can't reach the host — is the native helper running?";
+      card.classList.add("error");
+    }
+  }
+
+  function loginShowUrl(chat, url) {
+    const card = chat.loginCard;
+    if (!card) return;
+    card._status.textContent = "Authorize in your browser, then paste the code below.";
+    const openTab = () => {
+      try { chrome.tabs.create({ url }); }
+      catch (_) { window.open(url, "_blank"); }
+    };
+    openTab(); // open the sign-in page right away
+    const open = el("button", "login-open", "Open sign-in page");
+    open.type = "button";
+    open.addEventListener("click", openTab);
+    const row = el("div", "login-row");
+    const input = el("input", "login-input");
+    input.type = "text";
+    input.placeholder = "Paste authorization code";
+    input.spellcheck = false;
+    input.autocapitalize = "off";
+    const submit = el("button", "login-submit", "Sign in");
+    submit.type = "button";
+    const doSubmit = () => {
+      const code = input.value.trim();
+      if (!code) { input.focus(); return; }
+      post({ type: "authCode", id: chat.id, code });
+      card._status.textContent = "Signing in…";
+      input.disabled = true;
+      submit.disabled = true;
+    };
+    submit.addEventListener("click", doSubmit);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); doSubmit(); }
+    });
+    row.appendChild(input);
+    row.appendChild(submit);
+    card.appendChild(open);
+    card.appendChild(row);
+    input.focus();
+  }
+
+  function loginDone(chat, ok, message) {
+    if (chat.loginCard) { chat.loginCard.remove(); chat.loginCard = null; }
+    if (ok) {
+      // resetChatSession wipes the message view, so add the note afterwards.
+      resetChatSession(chat);
+      systemNote(chat, "Signed in. You're all set.");
+    } else {
+      systemNote(chat, "Sign-in failed: " + (message || "unknown error") + ". Type /login to try again.", "warn");
+    }
   }
 
   // ---- composer / header controls -------------------------------------------
@@ -1621,7 +1755,7 @@
       });
       row.addEventListener("mousedown", (e) => {
         e.preventDefault(); // keep focus in the textarea
-        acceptSlash(i);
+        acceptSlash(i, true); // a click runs the command immediately
       });
       els.slashMenu.appendChild(row);
     });
@@ -1640,11 +1774,16 @@
     highlightSlash();
   }
 
-  function acceptSlash(i) {
+  function acceptSlash(i, run) {
     const c = slash.items[i];
     if (c == null) return;
-    els.input.value = "/" + c + " ";
+    els.input.value = "/" + c + (run ? "" : " ");
     hideSlash();
+    if (run) {
+      // Clicking a command fires it right away.
+      sendPrompt();
+      return;
+    }
     els.input.focus();
     autosize();
   }
@@ -2331,5 +2470,5 @@
   // Drop the debugger when the panel goes away so the banner never lingers.
   window.addEventListener("beforeunload", detachCdp);
 
-  window.RKChat = { mount, activate, deactivate, addContext };
+  window.RKChat = { mount, activate, deactivate, addContext, addImage };
 })();

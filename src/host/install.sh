@@ -14,7 +14,7 @@
 # living under those folders without an explicit per-folder grant — the host just
 # fails to start and the panel shows "Native host has exited", with nothing in the
 # log (the process never runs). Running it from Terminal works, which makes this
-# baffling. We sidestep it entirely by running the host from ~/.lizard-code, which
+# baffling. We sidestep it entirely by running the host from ~/.lizard-studio, which
 # no browser is ever blocked from. (Bonus: the repo can move freely afterwards.)
 #
 # Uninstall:  bash src/host/install.sh --uninstall
@@ -30,7 +30,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Stable, non-TCC-protected home for the running host. Never put this under
 # Desktop/Documents/Downloads — that's the whole bug this avoids.
-RUNTIME_DIR="$HOME/.lizard-code/host"
+RUNTIME_DIR="$HOME/.lizard-studio/host"
 
 # macOS + Linux native-messaging host directories, per browser.
 host_dirs() {

@@ -558,6 +558,73 @@ function interrupt(id) {
   writeToChild(id, { type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } });
 }
 
+// ---- interactive login ------------------------------------------------------
+// The headless `-p` sessions can't run `/login`, so the panel drives the CLI's
+// own OAuth flow instead: `claude auth login` prints a sign-in URL, then blocks
+// reading the authorization code from stdin. We forward the URL to the panel,
+// the user pastes the code back, and we write it to the child's stdin. Fresh
+// credentials land in the OS keychain, shared by every session. Only one login
+// runs at a time (auth is account-wide, not per-tab).
+let authProc = null;
+let authProcId = null;
+function authLogin(id) {
+  // A different tab's sign-in is in progress — tell it before taking over, so
+  // its card doesn't hang forever on "Starting sign-in…".
+  if (authProc && authProcId != null && authProcId !== id) {
+    send({ type: "authDone", id: authProcId, ok: false, message: "Sign-in was started in another tab." });
+  }
+  authCancel();
+  authProcId = id;
+  let proc;
+  try {
+    proc = spawn(CLAUDE, ["auth", "login", "--claudeai"], {
+      cwd: homedir(),
+      env: CHILD_ENV,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch (err) {
+    send({ type: "authDone", id, ok: false, message: `Failed to start login: ${err.message}` });
+    return;
+  }
+  authProc = proc;
+  let buf = "";
+  let urlSent = false;
+  const scan = (chunk) => {
+    buf += chunk.toString("utf8");
+    if (!urlSent) {
+      const m = /(https?:\/\/[^\s]*oauth[^\s]*)/i.exec(buf);
+      if (m) {
+        urlSent = true;
+        send({ type: "authUrl", id, url: m[1] });
+      }
+    }
+  };
+  proc.stdout.on("data", scan);
+  proc.stderr.on("data", scan);
+  proc.on("exit", (code) => {
+    if (authProc === proc) { authProc = null; authProcId = null; }
+    const ok = code === 0;
+    send({ type: "authDone", id, ok, message: ok ? "" : buf.trim().slice(-300) || `login exited with code ${code}` });
+  });
+  proc.on("error", (err) => {
+    if (authProc === proc) { authProc = null; authProcId = null; }
+    send({ type: "authDone", id, ok: false, message: err.message });
+  });
+}
+function authCode(id, code) {
+  if (!authProc || !authProc.stdin.writable) {
+    send({ type: "authDone", id, ok: false, message: "No sign-in is in progress." });
+    return;
+  }
+  authProc.stdin.write(String(code == null ? "" : code).trim() + "\n");
+}
+function authCancel() {
+  if (authProc) {
+    try { authProc.kill("SIGKILL"); } catch {}
+    authProc = null;
+  }
+}
+
 // ---- native folder chooser --------------------------------------------------
 // The response carries the requesting tab's id so the panel routes it correctly.
 function pickFolder(id) {
@@ -685,7 +752,9 @@ function loadTranscript(id, sessionId, cwd) {
     // sub-agent sidechains and injected meta (system reminders, hooks).
     if (o.isSidechain || o.isMeta) continue;
     if ((o.type !== "user" && o.type !== "assistant") || !o.message) continue;
-    const ev = { type: o.type, message: o.message };
+    // Carry the JSONL line's `timestamp` so the panel can show a real "Xm ago"
+    // on replay instead of resetting every message to "now" on each panel open.
+    const ev = { type: o.type, message: o.message, timestamp: o.timestamp };
     const s = JSON.stringify(ev).length;
     if (size + s > 700000) flush(false);
     batch.push(ev);
@@ -737,6 +806,15 @@ function handle(msg) {
       break;
     case "browserResult":
       resolveBrowser(msg);
+      break;
+    case "authLogin":
+      authLogin(id);
+      break;
+    case "authCode":
+      authCode(id, msg.code);
+      break;
+    case "authCancel":
+      authCancel();
       break;
     default:
       // Unknown type — most likely a newer panel talking to an older host. Log

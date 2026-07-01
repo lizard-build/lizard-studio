@@ -121,6 +121,21 @@
       }
     };
 
+    // Split a GFM table row into trimmed cells, tolerating optional leading and
+    // trailing pipes.
+    const splitRow = (s) => {
+      const t = s.trim().replace(/^\|/, "").replace(/\|$/, "");
+      return t.split("|").map((c) => c.trim());
+    };
+    // A delimiter row is all-dashes cells (e.g. |---|:--:|---:|) — what marks the
+    // line after the header as the start of a table.
+    const isDelimRow = (s) =>
+      s.indexOf("-") !== -1 &&
+      (() => {
+        const cells = splitRow(s);
+        return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+      })();
+
     while (i < lines.length) {
       const line = lines[i];
 
@@ -166,6 +181,46 @@
         item.innerHTML = inlineMarkdown(li[3]);
         list.appendChild(item);
         i++;
+        continue;
+      }
+
+      // GFM table: a header row immediately followed by a delimiter row.
+      if (line.indexOf("|") !== -1 && i + 1 < lines.length && isDelimRow(lines[i + 1])) {
+        flushList();
+        const headers = splitRow(line);
+        const aligns = splitRow(lines[i + 1]).map((c) => {
+          const l = c.startsWith(":");
+          const r = c.endsWith(":");
+          return l && r ? "center" : r ? "right" : l ? "left" : "";
+        });
+        i += 2;
+        const table = document.createElement("table");
+        table.className = "md-table";
+        const thead = document.createElement("thead");
+        const htr = document.createElement("tr");
+        headers.forEach((cell, idx) => {
+          const th = document.createElement("th");
+          th.innerHTML = inlineMarkdown(cell);
+          if (aligns[idx]) th.style.textAlign = aligns[idx];
+          htr.appendChild(th);
+        });
+        thead.appendChild(htr);
+        table.appendChild(thead);
+        const tbody = document.createElement("tbody");
+        while (i < lines.length && lines[i].trim() && lines[i].indexOf("|") !== -1) {
+          const cells = splitRow(lines[i]);
+          const tr = document.createElement("tr");
+          for (let c = 0; c < headers.length; c++) {
+            const td = document.createElement("td");
+            td.innerHTML = inlineMarkdown(cells[c] != null ? cells[c] : "");
+            if (aligns[c]) td.style.textAlign = aligns[c];
+            tr.appendChild(td);
+          }
+          tbody.appendChild(tr);
+          i++;
+        }
+        table.appendChild(tbody);
+        root.appendChild(table);
         continue;
       }
 
@@ -242,5 +297,85 @@
     return pre;
   }
 
-  window.RKRender = { escapeHtml, markdown, codeBlock, lineDiff, inlineMarkdown };
+  // ---- /usage card ----------------------------------------------------------
+  // The `/usage` slash command returns a synthetic assistant message whose text
+  // is a short plain-text summary, e.g.:
+  //   You are currently using your subscription to power your Claude Code usage
+  //   Current session: 25% used · resets Jul 1 at 3:20am (Asia/Dubai)
+  //   Current week (all models): 3% used · resets Jul 7 at 8pm (Asia/Dubai)
+  // Returns a styled card element, or null when the text isn't a usage summary
+  // (so the caller can fall back to plain markdown).
+  function usageCard(text) {
+    if (typeof text !== "string") return null;
+    const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) return null;
+    // First line is the intro ("You are currently using your … Claude Code usage").
+    const intro = /currently using/i.test(lines[0]) ? lines[0] : null;
+    // Each metric line: "<label>: <pct>% used · resets <when>".
+    const metricRe = /^(.+?):\s*(\d+)\s*%\s*used\s*[·•]\s*resets\s+(.+)$/i;
+    const metrics = [];
+    for (const line of lines) {
+      const m = metricRe.exec(line);
+      if (m) metrics.push({ label: m[1].trim(), pct: Math.min(100, +m[2]), resets: m[3].trim() });
+    }
+    if (!metrics.length || !intro) return null;
+
+    const card = document.createElement("div");
+    card.className = "usage-card";
+
+    const head = document.createElement("div");
+    head.className = "usage-head";
+    const title = document.createElement("span");
+    title.className = "usage-title";
+    title.textContent = "Usage";
+    // Plan/source taken from the intro line: "… your subscription to power …".
+    const planMatch = /using your\s+(.+?)\s+to power/i.exec(intro);
+    head.appendChild(title);
+    if (planMatch) {
+      const sub = document.createElement("span");
+      sub.className = "usage-plan";
+      sub.textContent = planMatch[1];
+      head.appendChild(sub);
+    }
+    card.appendChild(head);
+
+    for (const mt of metrics) {
+      // "Current session" → "Session"; keeps any parenthetical like "(all models)".
+      const label = mt.label.replace(/^current\s+/i, "").replace(/^./, (c) => c.toUpperCase());
+      const tone = mt.pct >= 90 ? "crit" : mt.pct >= 75 ? "warn" : "ok";
+
+      const row = document.createElement("div");
+      row.className = "usage-row";
+
+      const top = document.createElement("div");
+      top.className = "usage-row-top";
+      const name = document.createElement("span");
+      name.className = "usage-label";
+      name.textContent = label;
+      const pct = document.createElement("span");
+      pct.className = "usage-pct tone-" + tone;
+      pct.textContent = mt.pct + "%";
+      top.appendChild(name);
+      top.appendChild(pct);
+      row.appendChild(top);
+
+      const track = document.createElement("div");
+      track.className = "usage-track";
+      const fill = document.createElement("div");
+      fill.className = "usage-fill tone-" + tone;
+      fill.style.width = mt.pct + "%";
+      track.appendChild(fill);
+      row.appendChild(track);
+
+      const reset = document.createElement("div");
+      reset.className = "usage-reset";
+      reset.textContent = "Resets " + mt.resets;
+      row.appendChild(reset);
+
+      card.appendChild(row);
+    }
+    return card;
+  }
+
+  window.RKRender = { escapeHtml, markdown, codeBlock, lineDiff, inlineMarkdown, usageCard };
 })();

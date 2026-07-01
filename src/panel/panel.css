@@ -113,7 +113,15 @@ body {
 .chat-tab:hover { color: var(--text-secondary); background: rgba(255, 255, 255, 0.03); }
 .chat-tab.active {
   color: var(--text-primary);
-  background: var(--bg-secondary);
+  background: var(--bg-primary);
+  /* Hairline only where the dark tab meets the lighter strip — top + sides. The
+     bottom stays open: the tab's bottom row is flush with the strip's bottom
+     hairline and its opaque background paints over that segment, so the outline
+     detours around the tab instead of the line cutting across it. */
+  box-shadow:
+    inset 0 1px 0 var(--border-primary),
+    inset 1px 0 0 var(--border-primary),
+    inset -1px 0 0 var(--border-primary);
 }
 .chat-tab .tab-ic { display: inline-flex; color: var(--text-tertiary); }
 .chat-tab.active .tab-ic { color: var(--control-primary); }
@@ -145,7 +153,14 @@ body {
   align-items: flex-end;
   gap: 6px;
   padding: 4px 6px 0;
-  border-bottom: 1px solid var(--border-primary);
+  /* Strip sits one step above the chat: the active tab drops back to the chat
+     colour so it reads as a continuation of the content below. The hairline (an
+     inset shadow along the strip's bottom edge) marks where the lighter strip
+     meets the chat. It's an inset shadow rather than a border because the tabs
+     row clips overflow — the active tab's own opaque background, flush with this
+     row, paints over the hairline and so breaks it right under the tab. */
+  background: var(--bg-secondary);
+  box-shadow: inset 0 -1px 0 var(--border-primary);
   flex: 0 0 auto;
 }
 
@@ -540,12 +555,24 @@ body {
 }
 
 /* Per-message footer: copy button + relative timestamp, at the bottom of an
-   assistant reply. Muted by default, the copy button lights up on hover. */
+   assistant reply. The row always reserves its space (so the cursor can land
+   directly on the copy button), but stays invisible and non-interactive until
+   the message is hovered — no dead zone where the button isn't there yet.
+   Negative margin-left cancels the copy button's internal centering so its icon
+   sits flush with the text's left edge. */
 .msg-footer {
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-top: 6px;
+  margin-top: 2px;
+  margin-left: -6px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+.msg-assistant:hover .msg-footer {
+  opacity: 1;
+  pointer-events: auto;
 }
 .msg-action {
   appearance: none;
@@ -601,6 +628,30 @@ body {
 .md-list li { margin: 2px 0; }
 .md a { color: var(--control-primary); text-decoration: none; }
 .md a:hover { text-decoration: underline; }
+
+/* GFM tables */
+.md-table {
+  width: 100%;
+  margin: 8px 0;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  display: block;
+  overflow-x: auto;
+}
+.md-table th,
+.md-table td {
+  border: 1px solid var(--border-primary);
+  padding: 5px 9px;
+  text-align: left;
+  vertical-align: top;
+}
+.md-table th {
+  font-weight: 600;
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+}
+.md-table td { color: var(--text-secondary); }
+.md-table tr:nth-child(even) td { background: rgba(255, 255, 255, 0.02); }
 code.inline {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -626,6 +677,143 @@ code.inline {
 .code-block code { font-family: inherit; white-space: pre; }
 .code-block::-webkit-scrollbar { height: 8px; }
 .code-block::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 4px; }
+
+/* /usage card */
+.usage-card {
+  margin: 2px 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 12px;
+  padding: 14px 16px 16px;
+}
+.usage-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.usage-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+}
+.usage-plan {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  text-transform: capitalize;
+}
+.usage-row { margin-top: 12px; }
+.usage-row:first-of-type { margin-top: 0; }
+.usage-row-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.usage-label { font-size: 12.5px; color: var(--text-secondary); }
+.usage-pct {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.usage-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+.usage-fill {
+  height: 100%;
+  border-radius: 999px;
+  min-width: 2px;
+  transition: width 0.5s ease;
+}
+.usage-pct.tone-ok { color: var(--control-primary); }
+.usage-pct.tone-warn { color: var(--other-yellow); }
+.usage-pct.tone-crit { color: var(--other-red); }
+.usage-fill.tone-ok { background: var(--control-primary); }
+.usage-fill.tone-warn { background: var(--other-yellow); }
+.usage-fill.tone-crit { background: var(--other-red); }
+.usage-reset {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* /login card */
+.login-card {
+  margin: 4px 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 12px;
+  padding: 14px 16px 16px;
+  max-width: 90%;
+}
+.login-card.error { border-color: rgba(239, 68, 68, 0.4); }
+.login-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+.login-status {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+.login-open {
+  margin-top: 12px;
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-family);
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--control-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.login-open:hover { background: var(--control-secondary-hover); }
+.login-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.login-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  padding: 7px 10px;
+  outline: none;
+}
+.login-input:focus { border-color: var(--control-primary); }
+.login-input:disabled { opacity: 0.5; }
+.login-submit {
+  flex: 0 0 auto;
+  font-family: var(--font-family);
+  font-size: 12px;
+  font-weight: 500;
+  color: #04120c;
+  background: var(--control-primary);
+  border: 0;
+  border-radius: 8px;
+  padding: 7px 14px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.login-submit:hover { background: var(--control-primary-hover); }
+.login-submit:disabled { opacity: 0.5; cursor: default; }
 
 .tok-kw { color: #c792ea; }
 .tok-string { color: #c3e88d; }
@@ -829,7 +1017,7 @@ code.inline {
   font-size: 12.5px;
   color: var(--text-primary);
 }
-.slash-item.active .slash-cmd { color: var(--control-primary); }
+.slash-item.active .slash-cmd { color: var(--text-primary); }
 .composer-box {
   background: var(--bg-secondary);
   border: 1px solid var(--border-primary);

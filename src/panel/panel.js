@@ -26,6 +26,9 @@
       else if (m.cmd === "pickElement" && window.RKChat && window.RKChat.addContext) {
         window.RKChat.addContext(m.element);
       }
+      else if (m.cmd === "addImage" && window.RKChat && window.RKChat.addImage) {
+        window.RKChat.addImage(m.dataUrl);
+      }
     });
     bg.onDisconnect.addListener(() => setTimeout(connectBg, 500));
   }
