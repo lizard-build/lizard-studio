@@ -2055,13 +2055,16 @@
 
   // ===========================================================================
   // Live-tab inspection — driven by Claude through the host's browser_* MCP tools.
-  // DOM/text comes from the content script (silent). Console / network / eval use
-  // the DevTools Protocol via chrome.debugger, attached on demand and auto-detached
-  // when idle (so the "being debugged" banner only shows while in use).
+  // Ops target the active tab by default, or any tab via args.tabId. DOM/text
+  // comes from the content script (silent). Console / network / eval use the
+  // DevTools Protocol via chrome.debugger — one session per tab (so several tabs
+  // can be inspected in parallel), attached on demand and auto-detached when idle
+  // (so the "being debugged" banner only shows while in use).
   // ===========================================================================
   const CDP_VERSION = "1.3";
   const CDP_IDLE_MS = 3 * 60 * 1000;
-  const cdp = { tabId: null, console: [], network: [], netMap: new Map(), refs: new Map(), waiters: [], idleTimer: null, listening: false };
+  const cdpSessions = new Map(); // tabId -> { console, network, netMap, refs, waiters, idleTimer }
+  let cdpListening = false;
 
   function activeTab() {
     return new Promise((resolve) => {
@@ -2070,6 +2073,23 @@
         if (t && t.id != null) return resolve(t);
         chrome.tabs.query({ active: true, currentWindow: true }, (t2) => resolve((t2 && t2[0]) || null));
       });
+    });
+  }
+  function getTab(tabId) {
+    return new Promise((resolve) => {
+      try {
+        chrome.tabs.get(tabId, (tab) => {
+          if (chrome.runtime.lastError) return resolve(null);
+          resolve(tab || null);
+        });
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  }
+  function listTabs() {
+    return new Promise((resolve) => {
+      chrome.tabs.query({}, (tabs) => resolve(tabs || []));
     });
   }
   function sendToTab(tabId, payload) {
@@ -2106,121 +2126,107 @@
   function capBuf(arr, n) {
     if (arr.length > (n || 600)) arr.splice(0, arr.length - (n || 600));
   }
-  function resetCdp() {
-    cdp.tabId = null;
-    cdp.console = [];
-    cdp.network = [];
-    cdp.netMap.clear();
-    cdp.refs.clear();
-    cdp.waiters = [];
-    if (cdp.idleTimer) {
-      clearTimeout(cdp.idleTimer);
-      cdp.idleTimer = null;
-    }
+  function resetCdp(tabId) {
+    const s = cdpSessions.get(tabId);
+    if (!s) return;
+    if (s.idleTimer) clearTimeout(s.idleTimer);
+    cdpSessions.delete(tabId);
   }
-  function bumpIdle() {
-    if (cdp.idleTimer) clearTimeout(cdp.idleTimer);
-    cdp.idleTimer = setTimeout(detachCdp, CDP_IDLE_MS);
+  function bumpIdle(tabId) {
+    const s = cdpSessions.get(tabId);
+    if (!s) return;
+    if (s.idleTimer) clearTimeout(s.idleTimer);
+    s.idleTimer = setTimeout(() => detachCdp(tabId), CDP_IDLE_MS);
   }
-  function detachCdp() {
-    if (cdp.tabId == null) return;
-    const t = cdp.tabId;
+  function detachCdp(tabId) {
+    if (!cdpSessions.has(tabId)) return;
     try {
-      chrome.debugger.detach({ tabId: t }, () => void chrome.runtime.lastError);
+      chrome.debugger.detach({ tabId }, () => void chrome.runtime.lastError);
     } catch (_) {}
-    resetCdp();
+    resetCdp(tabId);
+  }
+  function detachAllCdp() {
+    for (const tabId of Array.from(cdpSessions.keys())) detachCdp(tabId);
   }
   function ensureCdpListeners() {
-    if (cdp.listening) return;
-    cdp.listening = true;
+    if (cdpListening) return;
+    cdpListening = true;
     chrome.debugger.onEvent.addListener((source, method, params) => {
-      if (cdp.tabId == null || source.tabId !== cdp.tabId) return;
+      const s = cdpSessions.get(source.tabId);
+      if (!s) return;
       if (method === "Runtime.consoleAPICalled") {
-        cdp.console.push({ level: params.type, text: (params.args || []).map(cdpArgToStr).join(" ") });
-        capBuf(cdp.console);
+        s.console.push({ level: params.type, text: (params.args || []).map(cdpArgToStr).join(" ") });
+        capBuf(s.console);
       } else if (method === "Log.entryAdded") {
         const e = params.entry || {};
-        cdp.console.push({ level: e.level, text: e.text, url: e.url });
-        capBuf(cdp.console);
+        s.console.push({ level: e.level, text: e.text, url: e.url });
+        capBuf(s.console);
       } else if (method === "Runtime.exceptionThrown") {
         const d = params.exceptionDetails || {};
-        cdp.console.push({ level: "error", text: (d.exception && (d.exception.description || d.exception.value)) || d.text || "uncaught exception" });
-        capBuf(cdp.console);
+        s.console.push({ level: "error", text: (d.exception && (d.exception.description || d.exception.value)) || d.text || "uncaught exception" });
+        capBuf(s.console);
       } else if (method === "Network.requestWillBeSent") {
         const r = { id: params.requestId, url: params.request.url, method: params.request.method, type: params.type, status: null, mimeType: null, failed: null };
-        cdp.netMap.set(params.requestId, r);
-        cdp.network.push(r);
-        capBuf(cdp.network);
+        s.netMap.set(params.requestId, r);
+        s.network.push(r);
+        capBuf(s.network);
       } else if (method === "Network.responseReceived") {
-        const r = cdp.netMap.get(params.requestId);
+        const r = s.netMap.get(params.requestId);
         if (r) {
           r.status = params.response.status;
           r.mimeType = params.response.mimeType;
         }
       } else if (method === "Network.loadingFailed") {
-        const r = cdp.netMap.get(params.requestId);
+        const r = s.netMap.get(params.requestId);
         if (r) r.failed = params.errorText;
       }
       // Wake anyone waiting on this CDP event (e.g. navigation load).
-      if (cdp.waiters.length) {
+      if (s.waiters.length) {
         const still = [];
-        for (const w of cdp.waiters) {
+        for (const w of s.waiters) {
           if (w.method === method) w.resolve(params);
           else still.push(w);
         }
-        cdp.waiters = still;
+        s.waiters = still;
       }
     });
     chrome.debugger.onDetach.addListener((source) => {
-      if (cdp.tabId != null && source.tabId === cdp.tabId) resetCdp();
+      if (source.tabId != null) resetCdp(source.tabId);
     });
   }
-  function waitForCdpEvent(method, timeoutMs) {
+  function waitForCdpEvent(tabId, method, timeoutMs) {
     return new Promise((resolve) => {
+      const s = cdpSessions.get(tabId);
+      if (!s) return resolve(null);
       const w = { method, resolve: (p) => { clearTimeout(t); resolve(p); } };
       const t = setTimeout(() => {
-        cdp.waiters = cdp.waiters.filter((x) => x !== w);
+        s.waiters = s.waiters.filter((x) => x !== w);
         resolve(null);
       }, timeoutMs || 15000);
-      cdp.waiters.push(w);
+      s.waiters.push(w);
     });
   }
   function ensureAttached(tabId) {
     return new Promise((resolve, reject) => {
       ensureCdpListeners();
-      if (cdp.tabId === tabId) {
-        bumpIdle();
+      if (cdpSessions.has(tabId)) {
+        bumpIdle(tabId);
         return resolve();
       }
-      const attach = () => {
-        chrome.debugger.attach({ tabId }, CDP_VERSION, async () => {
-          const e = chrome.runtime.lastError;
-          if (e) return reject(new Error(e.message));
-          cdp.tabId = tabId;
-          cdp.console = [];
-          cdp.network = [];
-          cdp.netMap.clear();
-          try {
-            await dbgSend(tabId, "Runtime.enable");
-            await dbgSend(tabId, "Log.enable");
-            await dbgSend(tabId, "Network.enable");
-            await dbgSend(tabId, "Page.enable");
-            await dbgSend(tabId, "DOM.enable");
-          } catch (_) {}
-          bumpIdle();
-          resolve();
-        });
-      };
-      if (cdp.tabId != null && cdp.tabId !== tabId) {
-        const old = cdp.tabId;
-        chrome.debugger.detach({ tabId: old }, () => {
-          void chrome.runtime.lastError;
-          resetCdp();
-          attach();
-        });
-      } else {
-        attach();
-      }
+      chrome.debugger.attach({ tabId }, CDP_VERSION, async () => {
+        const e = chrome.runtime.lastError;
+        if (e) return reject(new Error(e.message));
+        cdpSessions.set(tabId, { console: [], network: [], netMap: new Map(), refs: new Map(), waiters: [], idleTimer: null });
+        try {
+          await dbgSend(tabId, "Runtime.enable");
+          await dbgSend(tabId, "Log.enable");
+          await dbgSend(tabId, "Network.enable");
+          await dbgSend(tabId, "Page.enable");
+          await dbgSend(tabId, "DOM.enable");
+        } catch (_) {}
+        bumpIdle(tabId);
+        resolve();
+      });
     });
   }
 
@@ -2230,8 +2236,50 @@
     const done = (ok, data, error) => post({ type: "browserResult", bid: msg.bid, ok, data, error });
     try {
       if (!(chrome.tabs && chrome.tabs.query)) return done(false, null, "Browser tab access unavailable.");
-      const tab = await activeTab();
-      if (!tab || tab.id == null) return done(false, null, "No active browser tab.");
+
+      if (op === "tabs") {
+        const [tabs, current] = await Promise.all([listTabs(), activeTab()]);
+        return done(true, {
+          activeTabId: current ? current.id : null,
+          tabs: tabs.map((t) => ({ tabId: t.id, windowId: t.windowId, title: t.title, url: t.url, active: !!t.active, pinned: !!t.pinned, audible: !!t.audible })),
+        });
+      }
+
+      if (op === "tab_open") {
+        const url = String(args.url || "");
+        if (!/^https?:\/\//i.test(url)) return done(false, null, "Provide an absolute http(s) URL.");
+        const t = await new Promise((resolve) => {
+          chrome.tabs.create({ url, active: args.active !== false }, (nt) => resolve(chrome.runtime.lastError ? null : nt));
+        });
+        if (!t) return done(false, null, "Couldn't open a new tab.");
+        return done(true, { tabId: t.id, windowId: t.windowId, url });
+      }
+
+      // Everything below targets one tab: args.tabId if given, else the active tab.
+      let tab;
+      if (args.tabId != null) {
+        tab = await getTab(Number(args.tabId));
+        if (!tab || tab.id == null) return done(false, null, "No tab with id " + args.tabId + " — call browser_tabs for the current list.");
+      } else {
+        tab = await activeTab();
+        if (!tab || tab.id == null) return done(false, null, "No active browser tab.");
+      }
+
+      if (op === "tab_activate") {
+        await new Promise((resolve) => chrome.tabs.update(tab.id, { active: true }, () => { void chrome.runtime.lastError; resolve(); }));
+        await new Promise((resolve) => chrome.windows.update(tab.windowId, { focused: true }, () => { void chrome.runtime.lastError; resolve(); }));
+        return done(true, { activated: true, tabId: tab.id, title: tab.title, url: tab.url });
+      }
+
+      if (op === "tab_close") {
+        if (args.tabId == null) return done(false, null, "tabId is required to close a tab.");
+        detachCdp(tab.id);
+        const closed = await new Promise((resolve) => {
+          chrome.tabs.remove(tab.id, () => resolve(!chrome.runtime.lastError));
+        });
+        if (!closed) return done(false, null, "Couldn't close tab " + tab.id + ".");
+        return done(true, { closed: true, tabId: tab.id });
+      }
 
       if (op === "info" || op === "dom") {
         const format = op === "info" ? "info" : args.format === "html" ? "html" : "text";
@@ -2244,14 +2292,24 @@
       }
 
       if (op === "screenshot") {
-        const dataUrl = await captureTab(tab.windowId);
+        // captureVisibleTab only sees the tab shown in the window — for background
+        // tabs (or when that fails) capture via CDP without activating the tab.
+        let dataUrl = tab.active ? await captureTab(tab.windowId) : null;
+        if (!dataUrl) {
+          try {
+            await ensureAttached(tab.id);
+            const r = await dbgSend(tab.id, "Page.captureScreenshot", { format: "png" });
+            if (r && r.data) dataUrl = "data:image/png;base64," + r.data;
+          } catch (_) {}
+        }
         if (!dataUrl) return done(false, null, "Screenshot failed (tab not capturable).");
         return done(true, { dataUrl });
       }
 
       // console / network / eval need the DevTools Protocol.
       await ensureAttached(tab.id);
-      bumpIdle();
+      bumpIdle(tab.id);
+      const sess = cdpSessions.get(tab.id);
 
       if (op === "eval") {
         const r = await dbgSend(tab.id, "Runtime.evaluate", {
@@ -2272,16 +2330,16 @@
       if (op === "console") {
         const limit = Math.max(1, Math.min(args.limit || 100, 500));
         return done(true, {
-          note: cdp.console.length ? undefined : "No console output captured yet — capture began when the tools attached. Reload the page or re-run the code, then call again.",
-          entries: cdp.console.slice(-limit),
+          note: sess.console.length ? undefined : "No console output captured yet — capture began when the tools attached. Reload the page or re-run the code, then call again.",
+          entries: sess.console.slice(-limit),
         });
       }
 
       if (op === "network") {
         const limit = Math.max(1, Math.min(args.limit || 80, 300));
         return done(true, {
-          note: cdp.network.length ? undefined : "No requests captured yet — capture began when the tools attached. Reload the page or re-trigger the request, then call again.",
-          requests: cdp.network.slice(-limit).map((r) => ({ url: r.url, method: r.method, status: r.status, type: r.type, mimeType: r.mimeType, failed: r.failed || undefined })),
+          note: sess.network.length ? undefined : "No requests captured yet — capture began when the tools attached. Reload the page or re-trigger the request, then call again.",
+          requests: sess.network.slice(-limit).map((r) => ({ url: r.url, method: r.method, status: r.status, type: r.type, mimeType: r.mimeType, failed: r.failed || undefined })),
         });
       }
 
@@ -2293,11 +2351,11 @@
       if (op === "navigate") {
         const url = String(args.url || "");
         if (!/^https?:\/\//i.test(url)) return done(false, null, "Provide an absolute http(s) URL.");
-        const loaded = waitForCdpEvent("Page.loadEventFired", 20000);
+        const loaded = waitForCdpEvent(tab.id, "Page.loadEventFired", 20000);
         await dbgSend(tab.id, "Page.navigate", { url });
         await loaded;
         const info = await dbgSend(tab.id, "Runtime.evaluate", { expression: "({url:location.href,title:document.title})", returnByValue: true });
-        cdp.refs.clear();
+        sess.refs.clear();
         return done(true, info && info.result ? info.result.value : { url });
       }
 
@@ -2393,9 +2451,10 @@
     await dbgSend(tabId, "Input.dispatchMouseEvent", press);
     await dbgSend(tabId, "Input.dispatchMouseEvent", release);
   }
-  // Map a ref (@eN) from the last snapshot to a live Runtime object.
+  // Map a ref (@eN) from the tab's last snapshot to a live Runtime object.
   async function refToObject(tabId, ref) {
-    const backendNodeId = cdp.refs.get(ref);
+    const s = cdpSessions.get(tabId);
+    const backendNodeId = s && s.refs.get(ref);
     if (!backendNodeId) return null;
     try {
       const r = await dbgSend(tabId, "DOM.resolveNode", { backendNodeId });
@@ -2431,13 +2490,14 @@
     await dbgSend(tabId, "Input.dispatchKeyEvent", { type: "keyUp", ...base });
   }
 
-  // Compact accessibility-tree snapshot with stable @refs (rebuilds cdp.refs).
+  // Compact accessibility-tree snapshot with stable @refs (rebuilds the tab's refs).
   async function axSnapshot(tabId, interactiveOnly) {
     try {
       await dbgSend(tabId, "Accessibility.enable");
     } catch (_) {}
     const res = await dbgSend(tabId, "Accessibility.getFullAXTree", {});
-    cdp.refs.clear();
+    const refs = (cdpSessions.get(tabId) || { refs: new Map() }).refs;
+    refs.clear();
     const nodes = (res && res.nodes) || [];
     const lines = [];
     let n = 0;
@@ -2453,7 +2513,7 @@
       if (node.backendDOMNodeId == null) continue;
       n++;
       const ref = "@e" + n;
-      cdp.refs.set(ref, node.backendDOMNodeId);
+      refs.set(ref, node.backendDOMNodeId);
       let line = ref + " " + role;
       if (name) line += ' "' + name.slice(0, 120) + '"';
       const val = node.value && node.value.value;
@@ -2467,8 +2527,8 @@
     };
   }
 
-  // Drop the debugger when the panel goes away so the banner never lingers.
-  window.addEventListener("beforeunload", detachCdp);
+  // Drop all debugger sessions when the panel goes away so the banner never lingers.
+  window.addEventListener("beforeunload", detachAllCdp);
 
   window.RKChat = { mount, activate, deactivate, addContext, addImage };
 })();
