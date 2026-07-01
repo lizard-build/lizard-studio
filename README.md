@@ -33,7 +33,14 @@ The extension's side panel is a two-tab surface:
 ### One-time setup (Claude Code host)
 
 The chat talks to the CLI through a tiny local native-messaging host (Node, no dependencies — it spawns
-`claude` as a child process). Install it once from the extension folder:
+`claude` as a child process). Install it once, straight from GitHub — no clone needed, and it's stable
+across however you got the extension (Load unpacked from any folder, Desktop, etc.):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash
+```
+
+Already have the repo checked out? Run it locally instead (equivalent, just skips the download):
 
 ```sh
 bash src/host/install.sh        # registers com.lizard.code for Chrome-family browsers

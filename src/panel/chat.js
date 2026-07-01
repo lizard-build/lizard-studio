@@ -99,7 +99,7 @@
   let activeId = null;
   let history = [];
   let lastModel = DEFAULT_MODEL;
-  let lastMode = "default";
+  let lastMode = "auto";
   // Last folder the user actually picked (never home — see rememberCwd). New
   // chats default to this so reopening the panel resumes where you left off.
   let lastCwd = null;
@@ -2044,10 +2044,10 @@
         <h2>Connect the Claude Code host</h2>
         <p>The chat drives the real <code>claude</code> CLI through a tiny local helper. Install it once:</p>
         <div class="cmd-row">
-          <code>bash src/host/install.sh</code>
-          <button id="chat-copy-install" data-cmd="bash src/host/install.sh">Copy</button>
+          <code>curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash</code>
+          <button id="chat-copy-install" data-cmd="curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash">Copy</button>
         </div>
-        <p class="hint">Run it from the extension folder, then reload the extension. This panel connects automatically.</p>
+        <p class="hint">Run it in a terminal, then reload the extension. This panel connects automatically.</p>
         <div class="status"><span class="dot"></span><span id="chat-onboarding-status">Waiting for the helper…</span></div>
       </div>
     </div>

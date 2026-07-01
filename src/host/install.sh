@@ -25,8 +25,15 @@ HOST_NAME="com.lizard.code"
 # Fixed by the extension's manifest "key" — do not change unless the key changes.
 DEFAULT_EXT_ID="nhcgkijjijdinhldjohkmbbgjokobecd"
 EXT_ID="${RK_EXT_ID:-$DEFAULT_EXT_ID}"
+RAW_BASE="https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host"
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The directory this script lives in — empty when there isn't one, e.g. run via
+# `curl … | bash` (no real BASH_SOURCE). Sibling host files are fetched from
+# GitHub in that case instead of copied off disk; see fetch_host_file below.
+HERE=""
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+  HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
 # Stable, non-TCC-protected home for the running host. Never put this under
 # Desktop/Documents/Downloads — that's the whole bug this avoids.
@@ -64,7 +71,9 @@ uninstall() {
     rm -f "$dir/$HOST_NAME.json" 2>/dev/null || true
   done < <(host_dirs)
   # Old in-repo artifacts (pre-relocation) and the runtime dir.
-  rm -f "$HERE/host-config.json" "$HERE/launch.sh" "$HERE/host.log" 2>/dev/null || true
+  if [[ -n "$HERE" ]]; then
+    rm -f "$HERE/host-config.json" "$HERE/launch.sh" "$HERE/host.log" 2>/dev/null || true
+  fi
   rm -rf "$RUNTIME_DIR" 2>/dev/null || true
   echo "Removed $HOST_NAME from all Chrome-family browsers."
 }
@@ -86,13 +95,24 @@ if [[ -z "$CLAUDE_BIN" ]]; then
   echo "         The host will still install and look in common locations at runtime." >&2
 fi
 
+# Puts a host file that normally lives alongside this script into the runtime
+# dir — copied from the local checkout when we have one, otherwise fetched
+# straight from GitHub so `curl … | bash` works without a git clone.
+fetch_host_file() {
+  if [[ -n "$HERE" && -f "$HERE/$1" ]]; then
+    cp "$HERE/$1" "$RUNTIME_DIR/$1"
+  else
+    curl -fsSL "$RAW_BASE/$1" -o "$RUNTIME_DIR/$1"
+  fi
+}
+
 # 0) copy the (self-contained, dependency-free) host into the runtime dir so the
 #    manifest can point outside any TCC-protected folder. Re-copied every run so
-#    `git pull` + re-install picks up host changes.
+#    `git pull` (or re-running the curl one-liner) picks up host changes.
 mkdir -p "$RUNTIME_DIR"
-cp "$HERE/claude-host.mjs" "$RUNTIME_DIR/claude-host.mjs"
+fetch_host_file claude-host.mjs
 # The browser MCP relay claude spawns to reach the live tab (see claude-host.mjs).
-cp "$HERE/mcp-browser.mjs" "$RUNTIME_DIR/mcp-browser.mjs"
+fetch_host_file mcp-browser.mjs
 
 # 1) host config the runtime reads (Chrome launches us with a minimal PATH).
 cat > "$RUNTIME_DIR/host-config.json" <<JSON
