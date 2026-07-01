@@ -21,6 +21,10 @@
   chrome.runtime.onMessage.addListener((msg) => {
     if (!msg || !RK.alive()) return;
     if (msg.type === "RK_TOGGLE_TOOLBAR") RK.toolbar.toggle();
+    // The side panel opened — bring the bar up alongside it. Only if it isn't
+    // already shown, so a minimized bar (still "visible") is left untouched and
+    // service-worker reconnects don't re-open it.
+    else if (msg.type === "RK_SHOW_TOOLBAR") { if (!RK.state.visible) RK.toolbar.show(); }
     // The side panel closed — closing it also closes the toolbar. (Minimizing the
     // bar to its handle is a separate action and does not close the panel.)
     else if (msg.type === "RK_HIDE_TOOLBAR") { if (RK.state.visible) RK.toolbar.hide(); }

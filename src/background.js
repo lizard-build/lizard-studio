@@ -17,6 +17,20 @@ function toggleStudio(tab) {
   toggleSidePanel(tab);
 }
 
+// Open the side panel via Chrome's native action-click behavior. This makes the
+// panel document load INSTANTLY on icon click, with no dependency on the service
+// worker — critical because an idle MV3 worker cold-starts on the first click,
+// and routing sidePanel.open() through that cold start left the panel frame blank
+// for seconds ("sometimes a big delay"). With this set, Chrome also toggles the
+// panel closed on the next click for free. The toolbar is brought up separately
+// when the panel connects its port (see onConnect below), keeping the two tied.
+chrome.sidePanel
+  .setPanelBehavior({ openPanelOnActionClick: true })
+  .catch((err) => console.error("[RK] setPanelBehavior", err));
+
+// Fallback for the rare case setPanelBehavior isn't honored: onClicked only fires
+// when Chrome ISN'T handling the click itself, so this never double-fires with the
+// native behavior above. It still carries the user gesture sidePanel.open() needs.
 chrome.action.onClicked.addListener((tab) => toggleStudio(tab));
 
 chrome.commands.onCommand.addListener((command) => {
@@ -36,6 +50,11 @@ const panelPorts = new Set();
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "rk-sidepanel") return;
   panelPorts.add(port);
+  // The panel just came up (natively, via openPanelOnActionClick — so onClicked
+  // didn't run). Bring the in-page toolbar up alongside it, on the tab the user is
+  // looking at, so opening Studio still surfaces both. The content script no-ops
+  // if the bar is already shown, so SW-recycle reconnects don't re-toggle it.
+  showToolbarOnActiveTab();
   port.onDisconnect.addListener(() => {
     panelPorts.delete(port);
     // Side panel went away (user closed it, or it closed itself) — closing the
@@ -45,6 +64,18 @@ chrome.runtime.onConnect.addListener((port) => {
     if (panelPorts.size === 0) hideToolbarEverywhere();
   });
 });
+
+// Show the Lizard Studio toolbar on the tab the user is currently looking at.
+// Used when the side panel opens (its port connects). The content script only
+// shows the bar if it isn't already visible, so this is safe to call on every
+// connect, including transient service-worker reconnects.
+function showToolbarOnActiveTab() {
+  chrome.tabs.query({ active: true, lastFocusedWindow: true }, ([tab]) => {
+    if (tab && tab.id != null) {
+      chrome.tabs.sendMessage(tab.id, { type: "RK_SHOW_TOOLBAR" }).catch(() => {});
+    }
+  });
+}
 
 // Tell every tab's content script to hide the Lizard Studio toolbar. Used when the
 // side panel closes. hide() is idempotent and a no-op where the bar isn't shown.
@@ -110,6 +141,11 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
       // context. Content scripts can't reach the panel directly, so relay it
       // over the open panel port(s).
       panelPorts.forEach((p) => p.postMessage({ cmd: "pickElement", element: msg.element }));
+      break;
+    case "RK_ADD_TO_CHAT":
+      // Annotate tool produced an annotated screenshot — relay it to the
+      // side-panel chat, which attaches it like a pasted image.
+      panelPorts.forEach((p) => p.postMessage({ cmd: "addImage", dataUrl: msg.dataUrl }));
       break;
   }
 });
