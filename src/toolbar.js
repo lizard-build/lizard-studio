@@ -60,7 +60,6 @@
       background:var(--bg-secondary); color:var(--text-secondary);
       border:1px solid var(--border-primary); border-bottom:0;
       border-radius:16px 16px 0 0;
-      box-shadow:0 -6px 24px rgba(0,0,0,.5);
       opacity: 0; pointer-events: none;
       transition:color .15s, background .15s, opacity .18s ease,
         transform .22s cubic-bezier(.3,.7,.4,1); }
