@@ -861,6 +861,85 @@ code.inline {
 .tok-number { color: #f78c6c; }
 .tok-fn { color: #82aaff; }
 
+/* permission ask — the Claude Code prompt, redrawn in panel idiom: a flat,
+   no-stroke card (brighter background instead) in the stream with the tool's
+   input, "Do you want to proceed?", and numbered options (❯ marks the
+   selection; 1-3 / ↑↓ + Enter / Esc work while the card has focus). Neutral
+   white/gray per DESIGN.md — no accent color. */
+.perm-card {
+  background: #1c1c1c;
+  border: 0;
+  border-radius: 12px;
+  padding: 12px 14px 10px;
+  outline: none;
+}
+.perm-card:focus {
+  box-shadow: 0 0 0 1px var(--border-secondary);
+}
+.perm-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.perm-title-ic { display: inline-flex; color: var(--text-secondary); }
+.perm-sub {
+  margin-top: 3px;
+  padding-left: 21px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+.perm-detail { margin-top: 8px; max-height: 260px; overflow-y: auto; scrollbar-width: thin; }
+/* toolDetail() reuses .tool-detail, which indents under a tool-card head —
+   inside the ask card it should sit flush. */
+.perm-card .tool-detail { padding: 0; }
+.perm-detail .code-block,
+.perm-detail .diff { margin: 0; }
+.perm-desc { margin-top: 6px; font-size: 12px; color: var(--text-secondary); }
+.perm-question {
+  margin: 12px 0 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.perm-opts { display: flex; flex-direction: column; gap: 1px; margin: 0 -6px; }
+.perm-opt {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  width: 100%;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-family: var(--font-family);
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  padding: 6px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.perm-opt.selected { background: rgba(255, 255, 255, 0.06); color: var(--text-primary); }
+.perm-caret {
+  flex: 0 0 auto;
+  width: 10px;
+  color: var(--text-primary);
+  opacity: 0;
+}
+.perm-opt.selected .perm-caret { opacity: 1; }
+.perm-num {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.perm-opt.selected .perm-num { color: var(--text-secondary); }
+.perm-opt-label { min-width: 0; }
+
 /* thinking */
 .thinking {
   margin: 4px 0 8px;
