@@ -52,11 +52,11 @@
   // ids: default, acceptEdits, plan, auto, bypassPermissions. Keep this list and
   // its order in sync with the CLI so the panel pill matches the terminal.
   const MODES = [
-    { id: "default", label: "Ask permissions", hint: "Asks for your approval before tools that aren't pre-approved.", cls: "mode-default" },
-    { id: "acceptEdits", label: "Accept edits", hint: "Auto-accepts file edits; still asks for risky commands.", cls: "mode-accept" },
-    { id: "plan", label: "Plan mode", hint: "Read-only planning — Claude won't run or edit anything.", cls: "mode-plan" },
-    { id: "auto", label: "Auto mode", hint: "A classifier auto-approves safe tool calls and denies risky ones. Availability depends on the model/provider.", cls: "mode-auto" },
-    { id: "bypassPermissions", label: "Bypass permissions", hint: "Allows everything without asking. Use with care.", cls: "mode-bypass" },
+    { id: "default", label: "Ask permissions", short: "Ask", hint: "Asks for your approval before tools that aren't pre-approved.", cls: "mode-default" },
+    { id: "acceptEdits", label: "Accept edits", short: "Accept", hint: "Auto-accepts file edits; still asks for risky commands.", cls: "mode-accept" },
+    { id: "plan", label: "Plan mode", short: "Plan", hint: "Read-only planning — Claude won't run or edit anything.", cls: "mode-plan" },
+    { id: "auto", label: "Auto mode", short: "Auto", hint: "A classifier auto-approves safe tool calls and denies risky ones. Availability depends on the model/provider.", cls: "mode-auto" },
+    { id: "bypassPermissions", label: "Bypass permissions", short: "Bypass", hint: "Allows everything without asking. Use with care.", cls: "mode-bypass" },
   ];
 
   const MODELS = [
@@ -1910,7 +1910,7 @@
     const chat = chats.get(activeId);
     if (!chat) return;
     const mode = MODES.find((m) => m.id === chat.mode) || MODES[0];
-    els.mode.textContent = mode.label;
+    els.mode.textContent = mode.short || mode.label;
     els.mode.className = "mode-btn " + mode.cls;
     els.mode.title = mode.hint;
     els.folder.querySelector(".folder-label").textContent = folderLabel(chat.cwd);

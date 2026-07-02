@@ -362,14 +362,14 @@ body {
   transition: filter 0.15s, background 0.15s, color 0.15s;
 }
 .mode-btn:hover { filter: brightness(1.18); }
-/* solid tint in the mode's colour, no stroke. Label stays white (design.md
-   --text-primary) so the pill reads clearly; the tint carries the mode. */
+/* solid tint in the mode's colour, no stroke. Neutral modes stay white; Auto
+   and Bypass carry their warning colour in both tint and label (DESIGN.md
+   --other-yellow / --other-red). */
 .mode-btn.mode-default,
 .mode-btn.mode-accept,
-.mode-btn.mode-plan,
-.mode-btn.mode-auto { background: rgba(255, 255, 255, 0.08); color: var(--text-primary); }
-/* Bypass keeps a red tint as a standing warning. */
-.mode-btn.mode-bypass { background: rgba(239, 68, 68, 0.22); color: var(--text-primary); }
+.mode-btn.mode-plan { background: rgba(255, 255, 255, 0.08); color: var(--text-primary); }
+.mode-btn.mode-auto { background: rgba(245, 158, 11, 0.18); color: var(--other-yellow); }
+.mode-btn.mode-bypass { background: rgba(239, 68, 68, 0.18); color: var(--other-red); }
 
 /* mode picker dropdown (opens upward, above the composer toolbar) */
 .mode-menu {
@@ -408,13 +408,13 @@ body {
   flex: 0 0 auto;
   background: var(--text-primary);
 }
-/* Dots match their label's color — neutral white, except Bypass's red and
-   Auto's amber warning tint (DESIGN.md --other-yellow). */
-.mode-item.mode-bypass .mode-dot { background: #ff8b8b; }
+/* Dots match their label's color — neutral white, except Bypass's red
+   (DESIGN.md --other-red) and Auto's amber warning tint (--other-yellow). */
+.mode-item.mode-bypass .mode-dot { background: var(--other-red); }
 .mode-item.mode-auto .mode-dot { background: var(--other-yellow); }
 .mode-meta { min-width: 0; }
 .mode-item-label { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
-.mode-item.mode-bypass .mode-item-label { color: #ff8b8b; }
+.mode-item.mode-bypass .mode-item-label { color: var(--other-red); }
 .mode-item.mode-auto .mode-item-label { color: var(--other-yellow); }
 .mode-item-ic { display: inline-flex; width: 13px; flex: 0 0 auto; margin-left: auto; color: var(--text-primary); }
 
