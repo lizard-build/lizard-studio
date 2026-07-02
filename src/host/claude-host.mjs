@@ -16,13 +16,14 @@
 // stream back to the right conversation.
 //
 // Protocol — panel -> host:
-//   { type:"start",   id, cwd, model?, permissionMode?, resume? }  spawn (or respawn) claude
+//   { type:"start",   id, cwd, model?, effort?, permissionMode?, resume? }  spawn (or respawn) claude
 //   { type:"prompt",  id, text, images? }                          send one user turn (images: [{mediaType,data}])
 //   { type:"interrupt", id }                                       cancel the current turn
 //   { type:"stop",    id }                                         kill the claude process
 //   { type:"close",   id }                                         kill + forget the session
 //   { type:"setMode", id, permissionMode }                         restart, resuming the session
 //   { type:"setModel", id, model }                                 restart, resuming the session
+//   { type:"setEffort", id, effort }                                restart, resuming the session
 //   { type:"loadTranscript", id, sessionId, cwd }                  replay a past session's messages
 //   { type:"pickFolder", id }                                      native folder chooser
 //   { type:"gitBranches", id, cwd }                                list local branches + current
@@ -33,7 +34,7 @@
 //
 // Protocol — host -> panel:
 //   { type:"ready",   home, claudePath, ok }                   sent once on connect (no id)
-//   { type:"started", id, pid, cwd, model, permissionMode }
+//   { type:"started", id, pid, cwd, model, effort, permissionMode }
 //   { type:"event",   id, data }                               one claude stream-json object
 //   { type:"exit",    id, code }
 //   { type:"folder",  id, path }                               null path == cancelled
@@ -252,7 +253,7 @@ const bridgeServer = net.createServer((sock) => {
         continue;
       }
       const reqId = m.reqId;
-      browserRequest(m.op, m.args).then((r) => {
+      browserRequest(m.op, m.args, m.session).then((r) => {
         try {
           sock.write(JSON.stringify({ reqId, ...r }) + "\n");
         } catch {
@@ -269,7 +270,7 @@ bridgeServer.listen(0, "127.0.0.1", () => {
   log("browser bridge listening on 127.0.0.1:" + bridgePort);
 });
 
-function browserRequest(op, args) {
+function browserRequest(op, args, session) {
   return new Promise((resolve) => {
     const bid = nextBid++;
     const timer = setTimeout(() => {
@@ -279,7 +280,7 @@ function browserRequest(op, args) {
       }
     }, 30000);
     browserPending.set(bid, { resolve, timer });
-    send({ type: "browser", bid, op, args });
+    send({ type: "browser", bid, op, args, session });
   });
 }
 
@@ -293,13 +294,18 @@ function resolveBrowser(msg) {
 
 // Appended to claude's system prompt so it knows the live-tab tools exist.
 const BROWSER_HINT =
-  "You have a set of browser_* tools (MCP server `browser`) that inspect AND control the user's CURRENTLY ACTIVE Chrome tab in real time. " +
-  "Read/observe: browser_info (url/title/selection), browser_dom (visible text or HTML), browser_snapshot (accessibility tree with stable @refs — the best way to understand the page before acting), " +
+  "You have a set of browser_* tools (MCP server `browser`) that inspect AND control the user's Chrome tabs in real time — not just the active one. " +
+  "Tabs: browser_tabs lists every open tab (tabId, windowId, title, url, active); almost every other browser_* tool accepts an optional tabId to target any tab in the background without switching to it. " +
+  "Tab pinning: the FIRST browser_* call in a task that omits tabId resolves to the active tab and PINS this conversation to it — every later call that also omits tabId reuses that same pinned tab, even if the user switches which tab is active in the meantime. " +
+  "So once you've started working with a tab, keep omitting tabId to keep targeting it; only pass tabId explicitly when you deliberately mean a different tab (that re-pins to the new one). browser_tabs' response includes workingTabId, the tab currently pinned for this conversation. " +
+  "browser_tab_activate brings a tab to the front for the user; browser_tab_open / browser_tab_close open and close tabs. " +
+  "Read/observe: browser_info (url/title/selection — cheap, call first), browser_dom (visible text or HTML, optional CSS selector), browser_snapshot (accessibility tree with stable @refs — the best way to understand a page before acting), " +
   "browser_eval (run JS and read anything — DOM, app state, localStorage, fetch), browser_console (recent logs + exceptions), browser_network (recent requests), browser_screenshot. " +
-  "Act: browser_click, browser_type, browser_fill, browser_key, browser_navigate. " +
-  "Prefer browser_snapshot to get @refs, then target clicks/typing by ref rather than guessing selectors. " +
-  "When the user refers to \"this page\", \"the open tab\", what they're \"looking at\", or asks you to debug or drive a live site, USE THESE TOOLS instead of guessing. " +
-  "Console and network capture begin when you first call those tools, so if they're empty, ask the user to reload the page or re-trigger the action, then call again.";
+  "Act: browser_click, browser_type, browser_fill, browser_key, browser_navigate, browser_reload. " +
+  "Prefer browser_snapshot to get @refs, then target clicks/typing/fills by ref rather than guessing selectors. " +
+  "Every user message may be preceded by a short '[Open browser tabs]' block auto-listing currently open tabs (title + URL), with a leading → marking the one the user is actively viewing — that's environment context the extension injected, not something the user typed. " +
+  "It only has title/URL, so when the user refers to \"this page\", \"the open tab\", what they're \"looking at\", or asks you to debug or drive a live site, still call browser_info / browser_dom / browser_snapshot (targeting that tabId if it's not the active one) instead of guessing from the title alone. " +
+  "Console and network capture begin when browser_console / browser_network first attach to a tab, so if they come back empty, call browser_reload (or re-trigger the action yourself, e.g. browser_click) rather than asking the user to reload — then call browser_console / browser_network again.";
 
 // ---- Chrome native-messaging framing ---------------------------------------
 // Read loop: a 4-byte uint32 LE length, then that many bytes of UTF-8 JSON.
@@ -368,9 +374,9 @@ function truncateDeep(value, budget = 60000) {
 // a panel-supplied `id`. Each session tracks its own cwd / model / mode and its
 // resumable sessionId. Every host->panel message is tagged with the id so the
 // panel can route the stream back to the right tab.
-const sessions = new Map(); // id -> { id, child, cwd, model, mode, sessionId, stdoutBuf, stderrBuf }
+const sessions = new Map(); // id -> { id, child, cwd, model, effort, mode, sessionId, stdoutBuf, stderrBuf }
 
-function startClaude({ id, cwd, model, permissionMode, resume }) {
+function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
   id = id || "default";
   killSession(id);
 
@@ -386,6 +392,7 @@ function startClaude({ id, cwd, model, permissionMode, resume }) {
     child: null,
     cwd,
     model: model || null,
+    effort: effort || null,
     mode: permissionMode || "default",
     sessionId: resume || null,
     stdoutBuf: "",
@@ -415,6 +422,7 @@ function startClaude({ id, cwd, model, permissionMode, resume }) {
     "--permission-prompt-tool", "stdio",
   ];
   if (s.model) args.push("--model", s.model);
+  if (s.effort) args.push("--effort", s.effort);
   if (resume) args.push("--resume", resume);
 
   // Ship the lizard-build/skill bootstrap skill to this session (see the
@@ -454,7 +462,7 @@ function startClaude({ id, cwd, model, permissionMode, resume }) {
   s.child = proc;
   sessions.set(id, s);
 
-  send({ type: "started", id, pid: proc.pid, cwd: s.cwd, model: s.model, permissionMode: s.mode });
+  send({ type: "started", id, pid: proc.pid, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.mode });
   ensureCommands(id, s.cwd, s.model);
 
   proc.stdout.on("data", (chunk) => {
@@ -896,12 +904,17 @@ function handle(msg) {
       break;
     case "setMode": {
       const s = sessions.get(id);
-      startClaude({ id, cwd: s && s.cwd, model: s && s.model, permissionMode: msg.permissionMode, resume: s && s.sessionId });
+      startClaude({ id, cwd: s && s.cwd, model: s && s.model, effort: s && s.effort, permissionMode: msg.permissionMode, resume: s && s.sessionId });
       break;
     }
     case "setModel": {
       const s = sessions.get(id);
-      startClaude({ id, cwd: s && s.cwd, model: msg.model, permissionMode: s && s.mode, resume: s && s.sessionId });
+      startClaude({ id, cwd: s && s.cwd, model: msg.model, effort: s && s.effort, permissionMode: s && s.mode, resume: s && s.sessionId });
+      break;
+    }
+    case "setEffort": {
+      const s = sessions.get(id);
+      startClaude({ id, cwd: s && s.cwd, model: s && s.model, effort: msg.effort, permissionMode: s && s.mode, resume: s && s.sessionId });
       break;
     }
     case "loadTranscript":

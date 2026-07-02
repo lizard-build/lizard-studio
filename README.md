@@ -32,7 +32,6 @@ Everything runs locally: the extension talks to a tiny native host on your machi
 | Measure | **Distance (hold ⌥/Alt)** | Hover an element, hold **⌥/Alt**, hover another → the gaps between them. |
 | Layout | **Guides** | Drag from the edges to place snap-to-element guides; Backspace or double-click removes one. |
 | Layout | **Column grid** | Configurable 12/16-col grid (columns, gutter, max-width, margins, opacity). |
-| Layout | **Image overlay** | Drop a mockup over the page for pixel-perfect comparison; opacity, scale, drag to position, lock to click through. |
 | Layout | **Responsive mode** | Re-renders the page in a device frame — presets, custom W/H, orientation, zoom — with real media queries responding. |
 
 Tools toggle independently from a draggable, minimizable toolbar; several can run at once. Number keys `1–9` toggle tools in bar order; tools with settings open an inline panel on right-click. Tool state is per-page and ephemeral by design.

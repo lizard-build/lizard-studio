@@ -39,7 +39,6 @@
         "src/tools/inspect.js",
         "src/tools/guides.js",
         "src/tools/grid.js",
-        "src/tools/imageoverlay.js",
         "src/tools/responsive.js",
         "src/toolbar.js",
         "src/main.js"

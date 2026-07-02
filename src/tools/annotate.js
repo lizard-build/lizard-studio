@@ -12,7 +12,7 @@
   const COLORS = ["#EF4444", "#3B82F6", "#22C55E", "#6B7280"];
   const STROKE = 3;     // line weight in CSS px (scaled up when compositing)
   const FONT_PX = 18;   // text size in CSS px
-  const FONT_STACK = "'Geist', system-ui, -apple-system, 'Segoe UI', sans-serif";
+  const FONT_STACK = "'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif";
 
   // Each shape stores raw CSS-px coordinates so it can be re-rendered to the SVG
   // overlay live and re-drawn onto the capture canvas at its native resolution.
@@ -31,9 +31,10 @@
     circle: `<svg viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="18"><circle cx="128" cy="128" r="86"/></svg>`,
     text: `<svg viewBox="0 0 256 256" fill="currentColor"><path d="M208,56V88a8,8,0,0,1-16,0V64H136V192h24a8,8,0,0,1,0,16H96a8,8,0,0,1,0-16h24V64H64V88a8,8,0,0,1-16,0V56a8,8,0,0,1,8-8H200A8,8,0,0,1,208,56Z"/></svg>`,
     trash: `<svg viewBox="0 0 256 256" fill="currentColor"><path d="M216,48H176V40a24,24,0,0,0-24-24H104A24,24,0,0,0,80,40v8H40a8,8,0,0,0,0,16h8V208a16,16,0,0,0,16,16H192a16,16,0,0,0,16-16V64h8a8,8,0,0,0,0-16ZM96,40a8,8,0,0,1,8-8h48a8,8,0,0,1,8,8v8H96Zm96,168H64V64H192ZM112,104v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Zm48,0v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Z"/></svg>`,
+    paintBrush: `<svg viewBox="0 0 256 256" fill="currentColor"><path d="M232,32a8,8,0,0,0-8-8c-44.08,0-89.31,49.71-114.43,82.63A60,60,0,0,0,32,164c0,30.88-19.54,44.73-20.47,45.37A8,8,0,0,0,16,224H92a60,60,0,0,0,57.37-77.57C182.3,121.31,232,76.08,232,32ZM124.42,113.55q5.14-6.66,10.09-12.55A76.23,76.23,0,0,1,155,121.49q-5.9,4.94-12.55,10.09A60.54,60.54,0,0,0,124.42,113.55Zm42.7-2.68a92.57,92.57,0,0,0-22-22c31.78-34.53,55.75-45,69.9-47.91C212.17,55.12,201.65,79.09,167.12,110.87Z"/></svg>`,
   };
-  // Bar (main toolbar) glyph — a pencil over a line, reads as "markup".
-  const TOOL_ICON = I.pencil;
+  // Bar (main toolbar) glyph — a paintbrush, reads as "markup".
+  const TOOL_ICON = I.paintBrush;
 
   const TOOLS = [
     ["pencil", I.pencil, "Draw"],

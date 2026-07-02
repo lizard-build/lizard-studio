@@ -17,13 +17,17 @@ const PORT = parseInt(process.env.RK_BRIDGE_PORT || "0", 10);
 const SESSION = process.env.RK_BRIDGE_SESSION || "default";
 
 // Every tab-scoped tool accepts this: omit to use the user's active tab.
-const TAB_ID = { type: "number", description: "Target tab id (from browser_tabs). Omit to use the user's active tab. Works on background tabs without switching to them." };
+const TAB_ID = {
+  type: "number",
+  description:
+    "Target tab id (from browser_tabs). Works on background tabs without switching to them. Omit to use this conversation's working tab: the first tab resolved (normally the active one) the first time a call omits tabId, reused automatically after that even if the user switches tabs — so pass tabId explicitly whenever you mean a *different* tab, and expect NOT to need it again for the same one.",
+};
 
 const TOOLS = [
   {
     name: "browser_tabs",
     description:
-      "List ALL open browser tabs across every window: tabId, windowId, title, URL, and which one is active. Pass a tabId to any other browser_* tool to work with that tab (no need to switch to it), or use browser_tab_activate to bring it to the front for the user.",
+      "List ALL open browser tabs across every window: tabId, windowId, title, URL, and which one is active. Also returns workingTabId — the tab this conversation is currently pinned to (see the tabId note below). Pass a tabId to any other browser_* tool to work with that tab (no need to switch to it), or use browser_tab_activate to bring it to the front for the user.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -97,7 +101,7 @@ const TOOLS = [
   {
     name: "browser_console",
     description:
-      "Return recent console messages (log/info/warn/error) and uncaught exceptions from a tab (active tab unless tabId is given). NOTE: capture starts when these tools first attach to the tab, so reload the page or re-trigger the code to capture earlier logs.",
+      "Return recent console messages (log/info/warn/error) and uncaught exceptions from a tab (active tab unless tabId is given). NOTE: capture starts when these tools first attach to the tab, so if this is empty, call browser_reload (or re-trigger the code) and call this again.",
     inputSchema: {
       type: "object",
       properties: {
@@ -110,7 +114,7 @@ const TOOLS = [
   {
     name: "browser_network",
     description:
-      "Return recent network requests (URL, method, status, type, mime) from a tab (active tab unless tabId is given). NOTE: capture starts when these tools first attach, so reload the page or re-trigger the request to capture it.",
+      "Return recent network requests (URL, method, status, type, mime) from a tab (active tab unless tabId is given). NOTE: capture starts when these tools first attach, so if this is empty, call browser_reload (or re-trigger the request) and call this again.",
     inputSchema: {
       type: "object",
       properties: {
@@ -202,6 +206,16 @@ const TOOLS = [
       type: "object",
       properties: { url: { type: "string" }, tabId: TAB_ID },
       required: ["url"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "browser_reload",
+    description:
+      "Reload a tab and wait for it to finish loading (active tab unless tabId is given). Use this instead of asking the user to reload — e.g. to capture console/network activity from page load with browser_console / browser_network. Set hardReload:true to bypass cache.",
+    inputSchema: {
+      type: "object",
+      properties: { hardReload: { type: "boolean", description: "Bypass cache (default false)" }, tabId: TAB_ID },
       additionalProperties: false,
     },
   },

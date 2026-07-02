@@ -1,25 +1,34 @@
-/* Geist Sans — the Lizard brand typeface (vendored, variable weights) */
+/* Inter — vendored, variable weights */
 @font-face {
-  font-family: "Geist";
-  src: url("../terminal/vendor/fonts/Geist-Variable.woff2") format("woff2");
+  font-family: "Inter";
+  src: url("../terminal/vendor/fonts/InterVariable.woff2") format("woff2");
   font-weight: 100 900;
   font-style: normal;
   font-display: swap;
 }
 
-/* Geist Mono — used for code, paths and the terminal */
+/* JetBrains Mono — used for code, paths and the terminal */
 @font-face {
-  font-family: "Geist Mono";
-  src: url("../terminal/vendor/fonts/GeistMono-Variable.woff2") format("woff2");
-  font-weight: 100 900;
+  font-family: "JetBrains Mono";
+  src: url("../terminal/vendor/fonts/JetBrainsMono-Variable-latin.woff2") format("woff2");
+  font-weight: 100 800;
   font-style: normal;
   font-display: swap;
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../terminal/vendor/fonts/JetBrainsMono-Variable-cyrillic.woff2") format("woff2");
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
 }
 
 /* Brand tokens — from lizard-client/DESIGN.md (locked values) */
 :root {
-  --font-family: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "Geist Mono", "SF Mono", Menlo, Monaco, "Cascadia Code", monospace;
+  --font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", Menlo, Monaco, "Cascadia Code", monospace;
 
   --bg-primary: #070707;
   --bg-secondary: #141414;
@@ -111,6 +120,7 @@ body {
   transition: color 0.15s, background 0.15s;
 }
 .chat-tab:hover { color: var(--text-secondary); background: rgba(255, 255, 255, 0.03); }
+.chat-tab.dragging { position: relative; z-index: 5; opacity: 0.85; cursor: grabbing; }
 .chat-tab.active {
   color: var(--text-primary);
   background: var(--bg-primary);
@@ -298,24 +308,24 @@ body {
   gap: 4px;
   background: transparent;
   border: none;
-  color: var(--text-primary);
+  color: var(--text-secondary);
   font-family: var(--font-family);
   font-size: 12px;
   font-weight: 500;
-  padding: 4px 6px;
+  padding: 5px 8px;
   border-radius: 6px;
   cursor: pointer;
   max-width: 150px;
   transition: background 0.15s, color 0.15s;
 }
-.model-btn:hover { background: rgba(255, 255, 255, 0.05); }
+.model-btn:hover { background: rgba(255, 255, 255, 0.05); color: var(--text-primary); }
 .model-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.model-caret { display: inline-flex; color: var(--text-tertiary); }
 
-/* model dropdown (opens upward, anchored to the picker) */
+/* model dropdown (opens upward; the pickers sit at the toolbar's right edge,
+   so the menu anchors right to stay inside the panel) */
 .model-menu {
   position: absolute;
-  left: 0;
+  right: 0;
   bottom: calc(100% + 6px);
   z-index: 20;
   min-width: 170px;
@@ -355,8 +365,8 @@ body {
   font-family: var(--font-family);
   font-size: 12px;
   font-weight: 600;
-  padding: 5px 12px;
-  border-radius: 999px;
+  padding: 5px 10px;
+  border-radius: 6px;
   cursor: pointer;
   white-space: nowrap;
   transition: filter 0.15s, background 0.15s, color 0.15s;
@@ -368,7 +378,7 @@ body {
 .mode-btn.mode-default,
 .mode-btn.mode-accept,
 .mode-btn.mode-plan { background: rgba(255, 255, 255, 0.08); color: var(--text-primary); }
-.mode-btn.mode-auto { background: rgba(245, 158, 11, 0.18); color: var(--other-yellow); }
+.mode-btn.mode-auto { background: rgba(255, 208, 20, 0.18); color: #FFD014; }
 .mode-btn.mode-bypass { background: rgba(239, 68, 68, 0.18); color: var(--other-red); }
 
 /* mode picker dropdown (opens upward, above the composer toolbar) */
@@ -411,12 +421,16 @@ body {
 /* Dots match their label's color — neutral white, except Bypass's red
    (DESIGN.md --other-red) and Auto's amber warning tint (--other-yellow). */
 .mode-item.mode-bypass .mode-dot { background: var(--other-red); }
-.mode-item.mode-auto .mode-dot { background: var(--other-yellow); }
+.mode-item.mode-auto .mode-dot { background: #FFD014; }
 .mode-meta { min-width: 0; }
 .mode-item-label { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
 .mode-item.mode-bypass .mode-item-label { color: var(--other-red); }
-.mode-item.mode-auto .mode-item-label { color: var(--other-yellow); }
+.mode-item.mode-auto .mode-item-label { color: #FFD014; }
 .mode-item-ic { display: inline-flex; width: 13px; flex: 0 0 auto; margin-left: auto; color: var(--text-primary); }
+
+/* effort picker — same look as the model picker, smaller footprint */
+.effort-btn { max-width: 90px; }
+.effort-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .icon-btn {
   appearance: none;
@@ -438,16 +452,46 @@ body {
 }
 .icon-btn { display: inline-flex; align-items: center; justify-content: center; }
 
+.attach-file-btn { width: 26px; height: 26px; margin-right: 2px; }
+/* Sits on the composer box, which is already --bg-secondary — the shared
+   .icon-btn hover (also --bg-secondary) would be invisible here, so give it
+   the same "highlighted chip on this card" treatment as the mode/model
+   buttons instead. */
+.attach-file-btn:hover { background: rgba(255, 255, 255, 0.08); }
+.hidden-file-input { display: none; }
+
 /* ---- chat stack: one scrollable .chat-messages per tab, only active shown ---- */
 .chat-stack {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
 }
+/* Thin fades at the seams where the tab strip / composer meet the scrollable
+   chat, so messages scrolling underneath dissolve into black instead of
+   cutting off sharply. Static overlays — no scroll listener needed. */
+.chat-stack::before,
+.chat-stack::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 18px;
+  pointer-events: none;
+  z-index: 1;
+}
+.chat-stack::before {
+  top: 0;
+  background: linear-gradient(to bottom, var(--bg-primary), transparent);
+}
+.chat-stack::after {
+  bottom: 0;
+  background: linear-gradient(to top, var(--bg-primary), transparent);
+}
 .chat-messages {
   position: absolute;
   inset: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 14px 12px;
   display: flex;
   flex-direction: column;
@@ -474,19 +518,36 @@ body {
   padding: 6px;
   scrollbar-width: thin;
 }
-.history-head {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-tertiary);
-  padding: 6px 8px 8px;
+.history-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  margin-bottom: 4px;
+  border-radius: 8px;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-primary);
 }
+.history-search-ic { display: inline-flex; color: var(--text-tertiary); flex: 0 0 auto; }
+.history-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-family: inherit;
+}
+.history-search-input::placeholder { color: var(--text-tertiary); }
+.history-list { display: flex; flex-direction: column; }
 .history-empty { font-size: 12px; color: var(--text-tertiary); padding: 6px 8px 10px; }
 .history-item {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 7px 8px;
-  border-radius: 8px;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
   cursor: pointer;
   transition: background 0.12s;
 }
@@ -494,7 +555,8 @@ body {
 .history-ic { display: inline-flex; color: var(--text-primary); flex: 0 0 auto; }
 .history-meta { flex: 1 1 auto; min-width: 0; }
 .history-title {
-  font-size: 12.5px;
+  font-size: 12px;
+  line-height: 18px;
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
@@ -533,6 +595,7 @@ body {
 }
 .msg-user .bubble {
   width: 100%;
+  min-width: 0;
   background: var(--bg-secondary);
   border: 1px solid var(--border-secondary);
   border-radius: 10px;
@@ -614,7 +677,7 @@ body {
 }
 
 /* markdown */
-.md { font-size: 14px; line-height: 1.55; color: var(--text-primary); }
+.md { font-size: 14px; line-height: 1.55; color: var(--text-primary); overflow-wrap: anywhere; }
 .md > *:first-child { margin-top: 0; }
 .md > *:last-child { margin-bottom: 0; }
 .md p { margin: 0 0 8px; }
@@ -672,62 +735,6 @@ code.inline {
 .code-block code { font-family: inherit; white-space: pre; }
 .code-block::-webkit-scrollbar { height: 8px; }
 .code-block::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 4px; }
-
-/* /usage card */
-.usage-card {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-primary);
-  border-radius: 12px;
-  padding: 14px 16px 16px;
-}
-.usage-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 14px;
-}
-.usage-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.usage-row { margin-top: 12px; }
-.usage-row:first-of-type { margin-top: 0; }
-.usage-row-top {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 6px;
-}
-.usage-label { font-size: 12.5px; color: var(--text-secondary); }
-.usage-pct {
-  font-family: var(--font-mono);
-  font-size: 12.5px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  color: var(--text-primary);
-}
-.usage-track {
-  height: 6px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.07);
-  overflow: hidden;
-}
-.usage-fill {
-  height: 100%;
-  border-radius: 999px;
-  min-width: 2px;
-  transition: width 0.5s ease;
-}
-.usage-fill.tone-ok { background: var(--control-primary); }
-.usage-fill.tone-warn { background: var(--other-yellow); }
-.usage-fill.tone-crit { background: var(--other-red); }
-.usage-reset {
-  margin-top: 6px;
-  font-size: 11px;
-  color: var(--text-tertiary);
-}
 
 /* /login card */
 .login-card {
@@ -1092,7 +1099,10 @@ code.inline {
 .composer {
   position: relative;
   flex: 0 0 auto;
-  padding: 8px 12px 14px;
+  /* No top padding: the composer box sits flush against the chat-stack's
+     bottom fade, so the gradient is the only transition — no flat gap
+     between the fade and the input. */
+  padding: 0 12px 14px;
 }
 
 /* slash-command autocomplete, opens upward above the input */
@@ -1307,13 +1317,11 @@ code.inline {
   cursor: pointer;
   transition: background 0.15s, transform 0.1s, opacity 0.15s;
 }
-.send-btn:hover { background: #e6e6e6; }
-.send-btn:active { transform: scale(0.92); }
-.stop-btn {
-  background: var(--other-red);
-  color: #fff;
-  font-size: 12px;
-}
+.send-btn:hover,
+.stop-btn:hover { background: #e6e6e6; }
+.send-btn:active,
+.stop-btn:active { transform: scale(0.92); }
+.stop-btn { font-size: 12px; }
 
 /* chat onboarding overlay */
 .chat-onboarding {

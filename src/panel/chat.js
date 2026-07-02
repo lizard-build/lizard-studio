@@ -67,6 +67,16 @@
   ];
   const DEFAULT_MODEL = "claude-opus-4-8";
 
+  // Reasoning effort — mirrors the CLI's `--effort <level>` flag.
+  const EFFORTS = [
+    { id: "low", label: "Low" },
+    { id: "medium", label: "Medium" },
+    { id: "high", label: "High" },
+    { id: "xhigh", label: "Xhigh" },
+    { id: "max", label: "Max" },
+  ];
+  const DEFAULT_EFFORT = "medium";
+
   // Friendly tool labels + Phosphor icon names.
   const TOOL_META = {
     Bash: { icon: "terminal", label: "Bash" },
@@ -98,7 +108,9 @@
   let order = [];
   let activeId = null;
   let history = [];
+  let historyFilter = "";
   let lastModel = DEFAULT_MODEL;
+  let lastEffort = DEFAULT_EFFORT;
   let lastMode = "auto";
   // Last folder the user actually picked (never home — see rememberCwd). New
   // chats default to this so reopening the panel resumes where you left off.
@@ -121,12 +133,13 @@
       chrome.storage.local.get(["rkChatV2"], (r) => {
         const p = (r && r.rkChatV2) || {};
         if (p.lastModel) lastModel = p.lastModel;
+        if (p.lastEffort) lastEffort = p.lastEffort;
         if (p.lastMode) lastMode = p.lastMode;
         if (p.lastCwd) lastCwd = p.lastCwd;
         if (Array.isArray(p.history)) history = p.history;
         if (Array.isArray(p.tabs) && p.tabs.length) {
           for (const t of p.tabs) {
-            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, model: t.model, mode: t.mode, sessionId: t.sessionId });
+            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, model: t.model, effort: t.effort, mode: t.mode, sessionId: t.sessionId });
             chats.set(chat.id, chat);
             order.push(chat.id);
           }
@@ -142,9 +155,9 @@
     try {
       const tabs = order.map((id) => {
         const c = chats.get(id);
-        return { id: c.id, title: c.title, cwd: c.cwd, model: c.model, mode: c.mode, sessionId: c.sessionId };
+        return { id: c.id, title: c.title, cwd: c.cwd, model: c.model, effort: c.effort, mode: c.mode, sessionId: c.sessionId };
       });
-      chrome.storage.local.set({ rkChatV2: { tabs, activeId, history: history.slice(0, 40), lastModel, lastMode, lastCwd } });
+      chrome.storage.local.set({ rkChatV2: { tabs, activeId, history: history.slice(0, 40), lastModel, lastEffort, lastMode, lastCwd } });
     } catch (_) {}
   }
 
@@ -218,6 +231,7 @@
       title: opts.title || DEFAULT_TITLE,
       cwd: opts.cwd || null,
       model: opts.model || lastModel || DEFAULT_MODEL,
+      effort: opts.effort || lastEffort || DEFAULT_EFFORT,
       mode: opts.mode || lastMode,
       sessionId: opts.sessionId || null,
       slashCommands: [],
@@ -243,8 +257,6 @@
       turnStartedAt: 0,
       turnTokens: 0,
       curMsgTokens: 0,
-      thoughtMs: 0,
-      thinkStartedAt: 0,
       statusWord: "",
       statusWordAt: 0,
       // Page elements attached via the Selector tool, sent as context with the
@@ -302,12 +314,13 @@
     if (!chat) return;
     // Remember non-empty conversations so they can be reopened from history.
     if (!chat.empty || chat.sessionId) {
-      history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, model: chat.model, mode: chat.mode, sessionId: chat.sessionId, ts: Date.now() });
+      history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, model: chat.model, effort: chat.effort, mode: chat.mode, sessionId: chat.sessionId, ts: Date.now() });
       history = history.slice(0, 40);
     }
     if (chat.started) post({ type: "close", id });
     chat.messagesEl.remove();
     chats.delete(id);
+    pinnedTabBySession.delete(id);
     order = order.filter((x) => x !== id);
 
     if (!order.length) {
@@ -331,6 +344,7 @@
       const chat = chats.get(id);
       const tab = el("button", "chat-tab" + (id === activeId ? " active" : ""));
       tab.title = chat.title;
+      tab.dataset.tabId = id;
       tab.appendChild(el("span", "tab-label", chat.title));
       const close = el("span", "tab-close");
       close.innerHTML = ICON("x", 12);
@@ -340,7 +354,82 @@
         closeChat(id);
       });
       tab.appendChild(close);
-      tab.addEventListener("click", () => setActive(id));
+      // Custom pointer drag instead of native HTML5 DnD — the browser's drag
+      // image otherwise tracks the cursor on both axes. Here the tab is only
+      // ever translated on X, so vertical mouse movement has no effect at all.
+      // `order` itself is reordered live, the moment the dragged tab's center
+      // crosses a neighbor's — siblings slide out of the way immediately,
+      // mirroring native browser tab bars, rather than only committing on drop.
+      let wasDragging = false;
+      tab.addEventListener("click", () => {
+        if (wasDragging) { wasDragging = false; return; }
+        setActive(id);
+      });
+      tab.addEventListener("mousedown", (e) => {
+        if (e.button !== 0 || e.target.closest(".tab-close")) return;
+        const startX = e.clientX;
+        let dragging = false;
+
+        // Snapshot every tab's layout once, up front. Live reordering below
+        // simulates each new arrangement from these fixed widths instead of
+        // re-measuring the DOM mid-drag — siblings only ever move visually
+        // (via transform), never actually reflow, until the drag ends.
+        const nodes = Array.from(els.tabs.children);
+        const gap = parseFloat(getComputedStyle(els.tabs).columnGap) || 0;
+        const rects = new Map(nodes.map((n) => [n.dataset.tabId, { left: n.offsetLeft, width: n.offsetWidth }]));
+        const anchorLeft = nodes[0].offsetLeft;
+        const originalOrder = order.slice();
+        const startLeft = rects.get(id).left;
+
+        const onMove = (ev) => {
+          const dx = ev.clientX - startX;
+          if (!dragging) {
+            if (Math.abs(dx) < 4) return;
+            dragging = true;
+            tab.classList.add("dragging");
+            for (const n of nodes) if (n !== tab) n.style.transition = "transform 0.15s ease";
+          }
+          tab.style.transform = `translateX(${dx}px)`;
+
+          // Target slot = how many (originally-positioned) siblings the
+          // dragged tab's current center has moved past.
+          const draggedCenter = startLeft + rects.get(id).width / 2 + dx;
+          let newIndex = 0;
+          for (const oid of originalOrder) {
+            if (oid === id) continue;
+            const r = rects.get(oid);
+            if (r.left + r.width / 2 < draggedCenter) newIndex++;
+          }
+          const curIndex = order.indexOf(id);
+          if (newIndex !== curIndex) {
+            order.splice(curIndex, 1);
+            order.splice(newIndex, 0, id);
+          }
+
+          // Slide every other tab to where it'd sit if the dragged tab were
+          // already parked in its new slot.
+          let cursor = anchorLeft;
+          for (const oid of order) {
+            const r = rects.get(oid);
+            if (oid !== id) {
+              const node = els.tabs.querySelector(`[data-tab-id="${oid}"]`);
+              if (node) node.style.transform = `translateX(${cursor - r.left}px)`;
+            }
+            cursor += r.width + gap;
+          }
+        };
+        const onUp = () => {
+          document.removeEventListener("mousemove", onMove);
+          document.removeEventListener("mouseup", onUp);
+          if (dragging) {
+            wasDragging = true;
+            renderTabs();
+            savePrefs();
+          }
+        };
+        document.addEventListener("mousemove", onMove);
+        document.addEventListener("mouseup", onUp);
+      });
       els.tabs.appendChild(tab);
     }
   }
@@ -352,45 +441,77 @@
       els.historyMenu.classList.add("hidden");
       return;
     }
+    historyFilter = "";
     renderHistory();
     els.historyMenu.classList.remove("hidden");
+    const input = els.historyMenu.querySelector(".history-search-input");
+    if (input) input.focus();
   }
   function renderHistory() {
     els.historyMenu.innerHTML = "";
-    const head = el("div", "history-head", "Recent chats");
-    els.historyMenu.appendChild(head);
+
+    const searchWrap = el("div", "history-search");
+    const searchIc = el("span", "history-search-ic");
+    searchIc.innerHTML = ICON("search", 13);
+    searchWrap.appendChild(searchIc);
+    const input = el("input", "history-search-input");
+    input.type = "text";
+    input.placeholder = "Search chats";
+    input.value = historyFilter;
+    input.addEventListener("click", (e) => e.stopPropagation());
+    input.addEventListener("input", () => {
+      historyFilter = input.value;
+      renderHistoryList();
+    });
+    searchWrap.appendChild(input);
+    els.historyMenu.appendChild(searchWrap);
+
+    const list = el("div", "history-list");
+    els.historyMenu.appendChild(list);
+    renderHistoryList();
+  }
+  function renderHistoryList() {
+    const list = els.historyMenu.querySelector(".history-list");
+    if (!list) return;
+    list.innerHTML = "";
+    const q = historyFilter.trim().toLowerCase();
+    const items = q ? history.filter((h) => (h.title || DEFAULT_TITLE).toLowerCase().includes(q)) : history;
     if (!history.length) {
-      els.historyMenu.appendChild(el("div", "history-empty", "No past chats yet."));
+      list.appendChild(el("div", "history-empty", "No past chats yet."));
       return;
     }
-    for (const item of history) {
+    if (!items.length) {
+      list.appendChild(el("div", "history-empty", "No matches."));
+      return;
+    }
+    for (const item of items) {
       const row = el("div", "history-item");
       const ic = el("span", "history-ic");
-      ic.innerHTML = ICON("chat", 15);
+      ic.innerHTML = ICON("chat", 14);
       row.appendChild(ic);
       const meta = el("div", "history-meta");
       meta.appendChild(el("div", "history-title", item.title || DEFAULT_TITLE));
       row.appendChild(meta);
       const del = el("button", "history-del");
-      del.innerHTML = ICON("trash", 15);
+      del.innerHTML = ICON("trash", 14);
       del.title = "Remove from history";
       del.addEventListener("click", (e) => {
         e.stopPropagation();
         history = history.filter((h) => h !== item);
         savePrefs();
-        renderHistory();
+        renderHistoryList();
       });
       row.appendChild(del);
       row.addEventListener("click", () => {
         els.historyMenu.classList.add("hidden");
         reopenFromHistory(item);
       });
-      els.historyMenu.appendChild(row);
+      list.appendChild(row);
     }
   }
   function reopenFromHistory(item) {
     history = history.filter((h) => h !== item);
-    createChat({ title: item.title, cwd: item.cwd, model: item.model, mode: item.mode, sessionId: item.sessionId });
+    createChat({ title: item.title, cwd: item.cwd, model: item.model, effort: item.effort, mode: item.mode, sessionId: item.sessionId });
     savePrefs();
   }
 
@@ -452,6 +573,10 @@
         ic.innerHTML = ICON("globe", 12);
         label = c.title ? c.title.slice(0, 44) : c.url || "Page";
         chip.title = c.url || c.title || "Current tab";
+      } else if (c.kind === "file") {
+        ic.innerHTML = ICON("file", 13);
+        label = c.name;
+        chip.title = c.name;
       } else {
         ic.innerHTML = ICON("selection", 13);
         label = `<${c.tag}>`;
@@ -485,8 +610,17 @@
       blocks.push(lines.join("\n"));
     }
 
+    // Attached files (from the "+" filesystem picker). Fenced with the file
+    // name so Claude can tell them apart from pasted/selected page text.
+    for (const c of chat.contexts.filter((c) => c.kind === "file")) {
+      const fence = c.text.includes("```") ? "````" : "```";
+      blocks.push(
+        `[Attached file: ${c.name}]\n${fence}\n${c.text}${c.truncated ? "\n…[file truncated]" : ""}\n${fence}`
+      );
+    }
+
     // Picked-element contexts (from the Selector tool).
-    const elems = chat.contexts.filter((c) => c.kind !== "page");
+    const elems = chat.contexts.filter((c) => c.kind !== "page" && c.kind !== "file");
     if (elems.length) {
       const elBlocks = elems.map((c) => {
         const lines = [c.openTag || `<${c.tag}>`, `selector: ${c.selector}`];
@@ -513,6 +647,15 @@
 
     return blocks.join("\n\n") + "\n\n";
   }
+
+  // Invisible-char sentinels wrapping auto-injected context (tabs/page/file/element
+  // blocks) inside the text actually sent to the CLI. Never rendered live — the
+  // composer's own bubble is shown as-is — but they let replayTranscript() strip
+  // that same context back out when it reconstructs bubbles from the on-disk
+  // transcript, which otherwise stores (and would redisplay) the raw wire text.
+  const CTX_MARK_START = "​​​";
+  const CTX_MARK_END = "‌‌‌";
+  const CTX_MARK_RE = new RegExp(`${CTX_MARK_START}[\\s\\S]*?${CTX_MARK_END}\\n*`, "g");
 
   // ---- auto tab context -------------------------------------------------
   // Lightweight, always-on context: title + URL for every open tab, with the
@@ -605,6 +748,37 @@
     renderAttachmentThumbs();
   }
 
+  // ---- generic file attachments (from the "+" filesystem picker) ------------
+  // Images ride the existing screenshot/paste pipeline. Everything else is read
+  // as text (browsers don't expose a real filesystem path from <input type=file>)
+  // and carried as a removable context chip, embedded as a fenced block on send.
+  const MAX_FILE_TEXT = 100_000;
+  async function addFile(file) {
+    if (!file) return;
+    const chat = chats.get(activeId);
+    if (!chat) return;
+    if (file.type && file.type.startsWith("image/")) {
+      await addAttachment(file);
+      return;
+    }
+    try {
+      const text = await file.text();
+      if (!Array.isArray(chat.contexts)) chat.contexts = [];
+      const truncated = text.length > MAX_FILE_TEXT;
+      chat.contexts.push({
+        kind: "file",
+        id: newId(),
+        name: file.name,
+        text: truncated ? text.slice(0, MAX_FILE_TEXT) : text,
+        truncated,
+      });
+      renderContextChips();
+      if (els.input) els.input.focus();
+    } catch (_) {
+      systemNote(chat, `Couldn't read "${file.name}".`, "warn");
+    }
+  }
+
   function renderAttachmentThumbs() {
     if (!els.attachThumbs) return;
     const chat = chats.get(activeId);
@@ -680,14 +854,11 @@
 
   function addThinking(chat, body, text) {
     // Thinking/reasoning blocks are intentionally not rendered in the transcript.
-    // Timing still feeds the "thought for Xs" status metric (see streamEvent).
     return;
   }
 
   function addText(chat, body, text) {
-    // `/usage` returns a plain-text summary — render it as a card when it matches.
-    const usage = R.usageCard && R.usageCard(text);
-    body.appendChild(usage || R.markdown(text));
+    body.appendChild(R.markdown(text));
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
   }
 
@@ -809,9 +980,7 @@
           body.appendChild(node);
           chat.streamBlocks.set(ev.index, { type: "text", el: node, buf: "", raf: 0 });
         } else if (cb.type === "thinking") {
-          // Reasoning is not shown in the transcript — we only track its timing
-          // so the status pill can report "thought for Xs". No DOM is created.
-          chat.thinkStartedAt = Date.now();
+          // Reasoning is not shown in the transcript. No DOM is created.
           chat.streamBlocks.set(ev.index, { type: "thinking", el: null, buf: "", raf: 0 });
         }
         // tool_use blocks are left to the final `assistant` message (it carries
@@ -836,9 +1005,6 @@
           blk.el.replaceChildren(R.markdown(blk.buf));
           blk.el.classList.remove("streaming");
           if (!blk.buf.trim()) blk.el.remove();
-        } else if (blk.type === "thinking") {
-          // No DOM — just close out the reasoning timer for the status metric.
-          if (chat.thinkStartedAt) { chat.thoughtMs += Date.now() - chat.thinkStartedAt; chat.thinkStartedAt = 0; }
         }
         chat.streamBlocks.delete(ev.index);
         break;
@@ -1285,7 +1451,6 @@
     }
     chat.streamBlocks.clear();
     chat.streamMsgId = null;
-    if (chat.thinkStartedAt) { chat.thoughtMs += Date.now() - chat.thinkStartedAt; chat.thinkStartedAt = 0; }
     // Any ask still open is moot once the turn is over. Denials are NOT
     // summarized into a banner here — each rejected tool call already carries
     // its own inline error on its card (the synthesized tool_result), which is
@@ -1299,9 +1464,7 @@
         entry.toggle.classList.add("done", "err");
       }
     }
-    if (result) {
-      chat.turnStatusText = "";
-    }
+    if (result) chat.turnStatusText = "";
     if (chat.id === activeId) {
       setRunningUI(chat.turnRunning);
       renderTurnStatus(chat);
@@ -1310,7 +1473,7 @@
 
   // ---- running-status pill --------------------------------------------------
   // While a turn runs, show a spinning Lizard mark, a cycling verb, and live
-  // metrics (elapsed · output tokens · thinking time). When idle, fall back to
+  // metrics (elapsed · output tokens). When idle, fall back to
   // the final summary (cost · duration · steps) from the result event. The pill
   // lives at the bottom of the message stream (not a pinned bar), so it scrolls
   // with the conversation and sits just under the latest text.
@@ -1335,7 +1498,6 @@
       const tokens = chat.turnTokens + chat.curMsgTokens;
       const meta = [`${secs}s`];
       if (tokens > 0) meta.push(`↓ ${tokens.toLocaleString()} tokens`);
-      if (chat.thoughtMs > 500) meta.push(`thought for ${Math.max(1, Math.round(chat.thoughtMs / 1000))}s`);
       node.classList.add("running");
       // Build the spark once and only update the text parts on later ticks —
       // rewriting innerHTML every tick would recreate the lizard element and
@@ -1552,6 +1714,7 @@
       id: chat.id,
       cwd: chat.cwd,
       model: chat.model,
+      effort: chat.effort,
       permissionMode: chat.mode,
       resume: resume || chat.sessionId || undefined,
     });
@@ -1579,7 +1742,8 @@
       if (ev.type === "user") {
         const content = ev.message.content;
         if (typeof content === "string") {
-          if (content.trim()) userBubble(chat, content, null);
+          const stripped = content.replace(CTX_MARK_RE, "").trim();
+          if (stripped) userBubble(chat, stripped, null);
         } else if (Array.isArray(content)) {
           const texts = [];
           for (const b of content) {
@@ -1587,7 +1751,8 @@
             if (b.type === "tool_result") fillToolResult(chat, b.tool_use_id, b.content, b.is_error);
             else if (b.type === "text" && b.text) texts.push(b.text);
           }
-          if (texts.length) userBubble(chat, texts.join("\n\n"), null);
+          const stripped = texts.join("\n\n").replace(CTX_MARK_RE, "").trim();
+          if (stripped) userBubble(chat, stripped, null);
         }
       } else if (ev.type === "assistant") {
         const body = ensureAssistantBody(chat, ev.message.id);
@@ -1625,6 +1790,7 @@
     chat.currentAssistantBody = null;
     chat.sessionId = null;
     chat.lastTabsSnapshot = null;
+    pinnedTabBySession.delete(chat.id);
     chat.empty = true;
     chat.turnStatusText = "";
     chat.streamBlocks.clear();
@@ -1682,9 +1848,26 @@
     // Prepend any attached page/element context as a block, then clear it.
     const ctx = formatContexts(chat);
     const hasPage = hasContext && chat.contexts.some((c) => c.kind === "page");
-    const fallback = hasContext ? (hasPage ? "What's on this page?" : "What can you tell me about this element?") : "";
-    const bubbleHint = hasPage ? "_(attached current tab)_" : "_(selected page element)_";
-    const sentText = tabsBlock + ctx + (text || fallback);
+    const hasFile = hasContext && chat.contexts.some((c) => c.kind === "file");
+    const fallback = hasContext
+      ? hasPage
+        ? "What's on this page?"
+        : hasFile
+          ? "What can you tell me about the attached file(s)?"
+          : "What can you tell me about this element?"
+      : "";
+    const bubbleHint = hasPage ? "_(attached current tab)_" : hasFile ? "_(attached file)_" : "_(selected page element)_";
+    // Slash commands (built-ins like /usage, or skills) only get recognized by
+    // the CLI when the message starts with "/name" — prepending the tabs/context
+    // blocks before it turns it into plain text the model has to interpret
+    // itself instead of a real command. So for a bare "/…" prompt, the command
+    // goes first and any context follows after it, instead of leading.
+    const extra = tabsBlock + ctx;
+    // Wrap injected context in invisible sentinels so replayTranscript() can
+    // strip it back out on reload — the live bubble above already shows just
+    // the literal typed text, and replay should match that.
+    const wrappedExtra = extra ? CTX_MARK_START + extra + CTX_MARK_END : "";
+    const sentText = /^\//.test(text) ? text + (wrappedExtra ? "\n\n" + wrappedExtra : "") : wrappedExtra + (text || fallback);
     const images = attachments.map((a) => ({ mediaType: a.mediaType, data: a.base64 }));
     userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments);
     post({ type: "prompt", id: chat.id, text: sentText, images });
@@ -1701,8 +1884,6 @@
     chat.turnStartedAt = Date.now();
     chat.turnTokens = 0;
     chat.curMsgTokens = 0;
-    chat.thoughtMs = 0;
-    chat.thinkStartedAt = 0;
     chat.statusWord = randStatusWord();
     chat.statusWordAt = Date.now();
     chat.streamedMsgIds.clear();
@@ -1932,6 +2113,44 @@
     if (known) chat.model = known.id;
   }
 
+  // ---- effort picker (mirrors the model picker) ------------------------------
+  function applyEffort(chat, effortId) {
+    const e = EFFORTS.find((x) => x.id === effortId) || EFFORTS.find((x) => x.id === DEFAULT_EFFORT);
+    chat.effort = e.id;
+    lastEffort = e.id;
+    savePrefs();
+    syncComposer();
+    if (chat.started) post({ type: "setEffort", id: chat.id, effort: chat.effort });
+  }
+
+  function toggleEffortMenu() {
+    if (!els.effortMenu.classList.contains("hidden")) return hideEffortMenu();
+    renderEffortMenu();
+    els.effortMenu.classList.remove("hidden");
+  }
+  function renderEffortMenu() {
+    const chat = chats.get(activeId);
+    els.effortMenu.innerHTML = "";
+    els.effortMenu.appendChild(el("div", "model-head", "Effort"));
+    for (const e of EFFORTS) {
+      const isCur = chat && chat.effort === e.id;
+      const row = el("div", "model-item" + (isCur ? " current" : ""));
+      row.appendChild(el("span", "model-item-label", e.label));
+      const ic = el("span", "model-item-ic");
+      if (isCur) ic.innerHTML = ICON("check", 13);
+      row.appendChild(ic);
+      row.addEventListener("click", () => {
+        hideEffortMenu();
+        const c = chats.get(activeId);
+        if (c) applyEffort(c, e.id);
+      });
+      els.effortMenu.appendChild(row);
+    }
+  }
+  function hideEffortMenu() {
+    els.effortMenu.classList.add("hidden");
+  }
+
   function syncComposer() {
     if (!mounted) return;
     const chat = chats.get(activeId);
@@ -1946,6 +2165,8 @@
     els.folder.classList.toggle("needs-folder", !chat.cwd);
     const model = MODELS.find((m) => m.id === chat.model) || MODELS[0];
     els.modelBtn.querySelector(".model-label").textContent = model.label;
+    const effort = EFFORTS.find((e) => e.id === chat.effort) || EFFORTS.find((e) => e.id === DEFAULT_EFFORT);
+    if (els.effortBtn) els.effortBtn.querySelector(".effort-label").textContent = effort.label;
     setRunningUI(chat.turnRunning);
     renderTurnStatus(chat);
     if (chat.turnRunning) startStatusTicker();
@@ -2149,6 +2370,8 @@
     els.branchMenu = root.querySelector("#branch-menu");
     els.modelBtn = root.querySelector("#model-btn");
     els.modelMenu = root.querySelector("#model-menu");
+    els.effortBtn = root.querySelector("#effort-btn");
+    els.effortMenu = root.querySelector("#effort-menu");
     els.mode = root.querySelector("#mode-btn");
     els.modeMenu = root.querySelector("#mode-menu");
     els.newChat = root.querySelector("#new-chat-btn");
@@ -2158,18 +2381,26 @@
     els.onboarding = root.querySelector("#chat-onboarding");
     els.onboardingStatus = root.querySelector("#chat-onboarding-status");
     els.copyInstall = root.querySelector("#chat-copy-install");
+    els.attachFileBtn = root.querySelector("#attach-file-btn");
+    els.fileInput = root.querySelector("#file-input");
 
     // Static icons.
     root.querySelector("#new-chat-btn").innerHTML = ICON("plus", 17);
     root.querySelector("#history-btn").innerHTML = ICON("history", 17);
     root.querySelector("#folder-ic").innerHTML = ICON("folder", 14);
     root.querySelector("#branch-ic").innerHTML = ICON("git-branch", 13);
-    root.querySelector("#model-caret").innerHTML = ICON("caret-down", 12);
     els.send.innerHTML = ICON("send", 16);
     els.stop.innerHTML = ICON("stop", 14);
+    els.attachFileBtn.innerHTML = ICON("plus", 15);
 
     els.send.addEventListener("click", sendPrompt);
     els.stop.addEventListener("click", interrupt);
+    els.attachFileBtn.addEventListener("click", () => els.fileInput.click());
+    els.fileInput.addEventListener("change", () => {
+      const files = Array.from(els.fileInput.files || []);
+      els.fileInput.value = "";
+      for (const f of files) addFile(f);
+    });
     els.newChat.addEventListener("click", () => createChat({ cwd: defaultCwd() }));
     els.historyBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -2209,6 +2440,15 @@
     document.addEventListener("click", (e) => {
       if (els.modelMenu && !els.modelMenu.contains(e.target) && !els.modelBtn.contains(e.target)) {
         els.modelMenu.classList.add("hidden");
+      }
+    });
+    els.effortBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleEffortMenu();
+    });
+    document.addEventListener("click", (e) => {
+      if (els.effortMenu && !els.effortMenu.contains(e.target) && !els.effortBtn.contains(e.target)) {
+        els.effortMenu.classList.add("hidden");
       }
     });
     els.input.addEventListener("input", () => {
@@ -2346,17 +2586,24 @@
         <div id="context-chips" class="context-chips hidden"></div>
         <div id="attach-thumbs" class="attach-thumbs hidden"></div>
         <textarea id="composer-input" class="composer-input" rows="1"
-          placeholder="Plan, build, ask anything — / for skills"></textarea>
+          placeholder="Type / for commands"></textarea>
         <div class="composer-toolbar">
+          <button id="attach-file-btn" class="icon-btn attach-file-btn" title="Attach a file"></button>
+          <input id="file-input" type="file" multiple class="hidden-file-input" />
           <button id="mode-btn" class="mode-btn mode-default" title="Permission mode (Shift+Tab)">Ask</button>
+          <span class="composer-spacer"></span>
           <div class="model-picker">
             <button id="model-btn" class="model-btn" title="Model">
               <span class="model-label">Opus 4.8</span>
-              <span id="model-caret" class="model-caret"></span>
             </button>
             <div id="model-menu" class="model-menu hidden"></div>
           </div>
-          <span class="composer-spacer"></span>
+          <div class="model-picker">
+            <button id="effort-btn" class="model-btn effort-btn" title="Effort">
+              <span class="effort-label">Medium</span>
+            </button>
+            <div id="effort-menu" class="model-menu hidden"></div>
+          </div>
           <button id="send-btn" class="send-btn" title="Send"></button>
           <button id="stop-btn" class="stop-btn hidden" title="Interrupt"></button>
         </div>
@@ -2390,6 +2637,11 @@
   const CDP_VERSION = "1.3";
   const CDP_IDLE_MS = 3 * 60 * 1000;
   const cdpSessions = new Map(); // tabId -> { console, network, netMap, refs, waiters, idleTimer }
+  // Per-Claude-session (msg.session, the chat id) pinned tab. Resolved once —
+  // the first time a browser_* call omits tabId — then reused, so switching the
+  // browser's active tab mid-task doesn't retarget calls that still omit tabId.
+  // Passing an explicit tabId always re-pins to that tab.
+  const pinnedTabBySession = new Map(); // session -> tabId
   let cdpListening = false;
 
   function activeTab() {
@@ -2562,11 +2814,13 @@
     const done = (ok, data, error) => post({ type: "browserResult", bid: msg.bid, ok, data, error });
     try {
       if (!(chrome.tabs && chrome.tabs.query)) return done(false, null, "Browser tab access unavailable.");
+      const session = msg.session || null;
 
       if (op === "tabs") {
         const [tabs, current] = await Promise.all([listTabs(), activeTab()]);
         return done(true, {
           activeTabId: current ? current.id : null,
+          workingTabId: session ? pinnedTabBySession.get(session) ?? null : null,
           tabs: tabs.map((t) => ({ tabId: t.id, windowId: t.windowId, title: t.title, url: t.url, active: !!t.active, pinned: !!t.pinned, audible: !!t.audible })),
         });
       }
@@ -2578,17 +2832,27 @@
           chrome.tabs.create({ url, active: args.active !== false }, (nt) => resolve(chrome.runtime.lastError ? null : nt));
         });
         if (!t) return done(false, null, "Couldn't open a new tab.");
+        if (session) pinnedTabBySession.set(session, t.id);
         return done(true, { tabId: t.id, windowId: t.windowId, url });
       }
 
-      // Everything below targets one tab: args.tabId if given, else the active tab.
+      // Everything below targets one tab. An explicit tabId always wins and
+      // (re-)pins this Claude session to it. Otherwise reuse the tab this
+      // session already pinned; only fall back to (and pin) the live active
+      // tab if nothing's pinned yet or the pinned tab is gone.
       let tab;
       if (args.tabId != null) {
         tab = await getTab(Number(args.tabId));
         if (!tab || tab.id == null) return done(false, null, "No tab with id " + args.tabId + " — call browser_tabs for the current list.");
+        if (session) pinnedTabBySession.set(session, tab.id);
       } else {
-        tab = await activeTab();
-        if (!tab || tab.id == null) return done(false, null, "No active browser tab.");
+        const pinnedId = session ? pinnedTabBySession.get(session) : null;
+        tab = pinnedId != null ? await getTab(pinnedId) : null;
+        if (!tab || tab.id == null) {
+          tab = await activeTab();
+          if (!tab || tab.id == null) return done(false, null, "No active browser tab.");
+          if (session) pinnedTabBySession.set(session, tab.id);
+        }
       }
 
       if (op === "tab_activate") {
@@ -2604,6 +2868,7 @@
           chrome.tabs.remove(tab.id, () => resolve(!chrome.runtime.lastError));
         });
         if (!closed) return done(false, null, "Couldn't close tab " + tab.id + ".");
+        if (session && pinnedTabBySession.get(session) === tab.id) pinnedTabBySession.delete(session);
         return done(true, { closed: true, tabId: tab.id });
       }
 
@@ -2656,7 +2921,7 @@
       if (op === "console") {
         const limit = Math.max(1, Math.min(args.limit || 100, 500));
         return done(true, {
-          note: sess.console.length ? undefined : "No console output captured yet — capture began when the tools attached. Reload the page or re-run the code, then call again.",
+          note: sess.console.length ? undefined : "No console output captured yet — capture began when the tools attached. Call browser_reload (or re-run the code), then call again.",
           entries: sess.console.slice(-limit),
         });
       }
@@ -2664,7 +2929,7 @@
       if (op === "network") {
         const limit = Math.max(1, Math.min(args.limit || 80, 300));
         return done(true, {
-          note: sess.network.length ? undefined : "No requests captured yet — capture began when the tools attached. Reload the page or re-trigger the request, then call again.",
+          note: sess.network.length ? undefined : "No requests captured yet — capture began when the tools attached. Call browser_reload (or re-trigger the request), then call again.",
           requests: sess.network.slice(-limit).map((r) => ({ url: r.url, method: r.method, status: r.status, type: r.type, mimeType: r.mimeType, failed: r.failed || undefined })),
         });
       }
@@ -2683,6 +2948,15 @@
         const info = await dbgSend(tab.id, "Runtime.evaluate", { expression: "({url:location.href,title:document.title})", returnByValue: true });
         sess.refs.clear();
         return done(true, info && info.result ? info.result.value : { url });
+      }
+
+      if (op === "reload") {
+        const loaded = waitForCdpEvent(tab.id, "Page.loadEventFired", 20000);
+        await dbgSend(tab.id, "Page.reload", { ignoreCache: !!args.hardReload });
+        await loaded;
+        const info = await dbgSend(tab.id, "Runtime.evaluate", { expression: "({url:location.href,title:document.title})", returnByValue: true });
+        sess.refs.clear();
+        return done(true, info && info.result ? info.result.value : { reloaded: true });
       }
 
       if (op === "click") {

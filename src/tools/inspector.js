@@ -85,7 +85,7 @@
   function section(title, rows) {
     const kids = [RK.h("div", { style: {
       color: "#E9EDF4", fontWeight: "600", fontSize: "11px", letterSpacing: ".3px",
-      fontFamily: "'Geist', system-ui, sans-serif", margin: "0 0 7px",
+      fontFamily: "'Inter', system-ui, sans-serif", margin: "0 0 7px",
     } }, title)];
     rows.forEach((r) => r && kids.push(r));
     return RK.h("div", { style: {
@@ -182,7 +182,7 @@
     // Selector chip — top-left of the border box, above it when there's room.
     const chip = RK.h("div", { style: {
       position: "fixed", background: "#2D62F6", color: "#fff",
-      font: "600 11px/1.4 'Geist', system-ui, sans-serif", padding: "3px 8px",
+      font: "600 11px/1.4 'Inter', system-ui, sans-serif", padding: "3px 8px",
       borderRadius: "6px", whiteSpace: "nowrap", maxWidth: "min(420px, calc(100vw - 16px))",
       overflow: "hidden", textOverflow: "ellipsis", boxShadow: "0 4px 14px rgba(0,0,0,.4)",
     } }, selectorOf(hit.el));

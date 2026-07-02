@@ -113,7 +113,7 @@
 
     term = new Terminal({
       cursorBlink: true,
-      fontFamily: '"Geist Mono", "SF Mono", Menlo, Monaco, "Courier New", monospace',
+      fontFamily: '"JetBrains Mono", "SF Mono", Menlo, Monaco, "Courier New", monospace',
       fontSize: 13,
       theme: {
         background: "#070707",

@@ -393,7 +393,7 @@
     :host {
       all: initial;
       /* Lizard — Brand Design System tokens (see lizard-client/DESIGN.md) */
-      --rk-font: 'Geist', system-ui, -apple-system, 'Segoe UI', sans-serif;
+      --rk-font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
       --bg-primary: #070707;
       --bg-secondary: #141414;
       --border-primary: #2E2E2E;
