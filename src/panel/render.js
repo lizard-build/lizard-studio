@@ -176,10 +176,22 @@
           list = document.createElement(ordered ? "ol" : "ul");
           list.className = "md-list";
           list.dataset.ordered = String(ordered);
+          // Honor an explicit starting number ("3." resumes at 3).
+          if (ordered) {
+            const n = parseInt(li[2], 10);
+            if (n > 1) list.start = n;
+          }
         }
         const item = document.createElement("li");
         item.innerHTML = inlineMarkdown(li[3]);
         list.appendChild(item);
+        i++;
+        continue;
+      }
+
+      // indented continuation of the previous list item's text
+      if (list && /^\s{2,}\S/.test(line) && list.lastElementChild) {
+        list.lastElementChild.innerHTML += "<br>" + inlineMarkdown(line.trim());
         i++;
         continue;
       }
@@ -224,9 +236,16 @@
         continue;
       }
 
-      // blank line
+      // blank line — a list survives blank lines between its items (a "loose"
+      // list in markdown terms), otherwise every item would open a fresh <ol>
+      // and the numbering would restart at 1. Only flush when whatever follows
+      // is not another list item.
       if (!line.trim()) {
-        flushList();
+        if (list) {
+          let j = i + 1;
+          while (j < lines.length && !lines[j].trim()) j++;
+          if (!(j < lines.length && /^(\s*)([-*]|\d+\.)\s+/.test(lines[j]))) flushList();
+        }
         i++;
         continue;
       }
