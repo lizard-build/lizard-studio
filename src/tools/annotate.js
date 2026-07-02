@@ -26,6 +26,7 @@
   const I = {
     pencil: `<svg viewBox="0 0 256 256" fill="currentColor"><path d="M227.31,73.37,182.63,28.69a16,16,0,0,0-22.63,0L36.69,152A15.86,15.86,0,0,0,32,163.31V208a16,16,0,0,0,16,16H92.69A15.86,15.86,0,0,0,104,219.31L227.31,96a16,16,0,0,0,0-22.63ZM92.69,208H48V163.31l88-88L180.69,120ZM192,108.69,147.31,64l24-24L216,84.69Z"/></svg>`,
     line: `<svg viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="22" stroke-linecap="round"><line x1="56" y1="200" x2="200" y2="56"/></svg>`,
+    arrow: `<svg viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"><line x1="56" y1="200" x2="200" y2="56"/><polyline points="120 56 200 56 200 136"/></svg>`,
     square: `<svg viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="18"><rect x="46" y="46" width="164" height="164" rx="10"/></svg>`,
     circle: `<svg viewBox="0 0 256 256" fill="none" stroke="currentColor" stroke-width="18"><circle cx="128" cy="128" r="86"/></svg>`,
     text: `<svg viewBox="0 0 256 256" fill="currentColor"><path d="M208,56V88a8,8,0,0,1-16,0V64H136V192h24a8,8,0,0,1,0,16H96a8,8,0,0,1,0-16h24V64H64V88a8,8,0,0,1-16,0V56a8,8,0,0,1,8-8H200A8,8,0,0,1,208,56Z"/></svg>`,
@@ -37,6 +38,7 @@
   const TOOLS = [
     ["pencil", I.pencil, "Draw"],
     ["line", I.line, "Line"],
+    ["arrow", I.arrow, "Arrow"],
     ["square", I.square, "Rectangle"],
     ["circle", I.circle, "Ellipse"],
     ["text", I.text, "Text"],
@@ -73,6 +75,18 @@
              w: Math.abs(s.x2 - s.x1), h: Math.abs(s.y2 - s.y1) };
   }
 
+  // The two barb endpoints of an arrowhead at (x2,y2), in CSS px. Kept a bit
+  // shorter than the shaft when the arrow is tiny so the head never swallows it.
+  function arrowHead(s) {
+    const a = Math.atan2(s.y2 - s.y1, s.x2 - s.x1);
+    const len = Math.min(STROKE * 4.5, Math.hypot(s.x2 - s.x1, s.y2 - s.y1) * 0.6);
+    const spread = Math.PI / 6.5;
+    return [
+      [s.x2 - len * Math.cos(a - spread), s.y2 - len * Math.sin(a - spread)],
+      [s.x2 - len * Math.cos(a + spread), s.y2 - len * Math.sin(a + spread)],
+    ];
+  }
+
   function drawSvg(g, s) {
     const common = { fill: "none", stroke: s.color, "stroke-width": STROKE,
       "stroke-linecap": "round", "stroke-linejoin": "round" };
@@ -81,6 +95,11 @@
       g.appendChild(n);
     } else if (s.type === "line") {
       g.appendChild(RK.svg("line", { ...common, x1: s.x1, y1: s.y1, x2: s.x2, y2: s.y2 }));
+    } else if (s.type === "arrow") {
+      g.appendChild(RK.svg("line", { ...common, x1: s.x1, y1: s.y1, x2: s.x2, y2: s.y2 }));
+      const [h1, h2] = arrowHead(s);
+      g.appendChild(RK.svg("polyline", { ...common,
+        points: `${h1[0]},${h1[1]} ${s.x2},${s.y2} ${h2[0]},${h2[1]}` }));
     } else if (s.type === "square") {
       const r = rect(s);
       g.appendChild(RK.svg("rect", { ...common, x: r.x, y: r.y, width: r.w, height: r.h, rx: 2 }));
@@ -258,6 +277,12 @@
             ctx.stroke();
           } else if (sh.type === "line") {
             ctx.beginPath(); ctx.moveTo(sh.x1 * s, sh.y1 * s); ctx.lineTo(sh.x2 * s, sh.y2 * s); ctx.stroke();
+          } else if (sh.type === "arrow") {
+            ctx.beginPath(); ctx.moveTo(sh.x1 * s, sh.y1 * s); ctx.lineTo(sh.x2 * s, sh.y2 * s); ctx.stroke();
+            const [h1, h2] = arrowHead(sh);
+            ctx.beginPath();
+            ctx.moveTo(h1[0] * s, h1[1] * s); ctx.lineTo(sh.x2 * s, sh.y2 * s); ctx.lineTo(h2[0] * s, h2[1] * s);
+            ctx.stroke();
           } else if (sh.type === "square") {
             const r = rect(sh); ctx.strokeRect(r.x * s, r.y * s, r.w * s, r.h * s);
           } else if (sh.type === "circle") {
