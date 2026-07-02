@@ -330,8 +330,6 @@ body {
   font-weight: 600;
   color: var(--text-tertiary);
   padding: 6px 8px 8px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 .model-item {
   display: flex;
@@ -481,8 +479,6 @@ body {
   font-weight: 600;
   color: var(--text-tertiary);
   padding: 6px 8px 8px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 .history-empty { font-size: 12px; color: var(--text-tertiary); padding: 6px 8px 10px; }
 .history-item {
@@ -549,6 +545,9 @@ body {
 .assistant-body {
   flex: 1 1 auto;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 /* Per-message footer: copy button + relative timestamp, at the bottom of an
@@ -561,7 +560,6 @@ body {
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-top: 2px;
   margin-left: -6px;
   opacity: 0;
   pointer-events: none;
@@ -677,7 +675,6 @@ code.inline {
 
 /* /usage card */
 .usage-card {
-  margin: 2px 0;
   background: var(--bg-secondary);
   border: 1px solid var(--border-primary);
   border-radius: 12px;
@@ -692,14 +689,7 @@ code.inline {
 .usage-title {
   font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--text-primary);
-}
-.usage-plan {
-  font-size: 11px;
-  color: var(--text-tertiary);
-  text-transform: capitalize;
 }
 .usage-row { margin-top: 12px; }
 .usage-row:first-of-type { margin-top: 0; }
@@ -716,6 +706,7 @@ code.inline {
   font-size: 12.5px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
 }
 .usage-track {
   height: 6px;
@@ -729,9 +720,6 @@ code.inline {
   min-width: 2px;
   transition: width 0.5s ease;
 }
-.usage-pct.tone-ok { color: var(--control-primary); }
-.usage-pct.tone-warn { color: var(--other-yellow); }
-.usage-pct.tone-crit { color: var(--other-red); }
 .usage-fill.tone-ok { background: var(--control-primary); }
 .usage-fill.tone-warn { background: var(--other-yellow); }
 .usage-fill.tone-crit { background: var(--other-red); }
@@ -825,31 +813,36 @@ code.inline {
 .login-input {
   flex: 1 1 auto;
   min-width: 0;
+  height: 32px;
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
   background: var(--bg-primary);
   border: 1px solid var(--border-primary);
   border-radius: 8px;
-  padding: 7px 10px;
+  padding: 0 10px;
   outline: none;
+  transition: border-color 0.15s;
 }
+.login-input::placeholder { color: var(--text-tertiary); }
 .login-input:focus { border-color: var(--control-primary); }
 .login-input:disabled { opacity: 0.5; }
 .login-submit {
   flex: 0 0 auto;
+  height: 32px;
+  padding: 0 12px;
   font-family: var(--font-family);
   font-size: 12px;
-  font-weight: 500;
-  color: #04120c;
-  background: var(--control-primary);
-  border: 0;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(16, 185, 129, 0.5);
+  border: 1px solid var(--control-primary);
   border-radius: 8px;
-  padding: 7px 14px;
   cursor: pointer;
   transition: background 0.15s;
 }
-.login-submit:hover { background: var(--control-primary-hover); }
+.login-submit:hover:not(:disabled) { background: var(--control-primary); }
+.login-submit:active:not(:disabled) { transform: scale(0.97); }
 .login-submit:disabled { opacity: 0.5; cursor: default; }
 
 .tok-kw { color: #c792ea; }
@@ -959,7 +952,6 @@ code.inline {
 /* tool / skill calls — flat, no stroke frame (the bordered box is reserved for
    user messages). These read as a quiet inline row in the assistant stream. */
 .tool-card {
-  margin: 4px 0;
   border: 0;
   border-radius: 0;
   background: transparent;

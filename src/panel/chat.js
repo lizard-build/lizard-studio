@@ -261,6 +261,8 @@
       isRepo: false,
       branch: null,
       branches: [],
+      // Pending permission asks (can_use_tool): requestId -> { card, opts, … }.
+      permCards: new Map(),
     };
   }
 
@@ -510,6 +512,34 @@
     }
 
     return blocks.join("\n\n") + "\n\n";
+  }
+
+  // ---- auto tab context -------------------------------------------------
+  // Lightweight, always-on context: title + URL for every open tab, with the
+  // active one flagged, so the model knows what the user has open without an
+  // explicit "attach tab" action. No page content (cheap), and only resent
+  // when the open tabs or the active tab actually changed since the last
+  // turn, so it doesn't balloon on long conversations.
+  async function buildTabsContextBlock(chat) {
+    if (!(chrome.tabs && chrome.tabs.query)) return "";
+    const [tabs, current] = await Promise.all([listTabs(), activeTab()]);
+    const real = tabs.filter((t) => t.id != null && t.url && !/^chrome(-extension)?:\/\//i.test(t.url));
+    if (!real.length) return "";
+    const activeTabId = current ? current.id : null;
+    const snapshot = real.map((t) => `${t.id}:${t.url}`).sort().join("|") + `|active:${activeTabId}`;
+    if (chat.lastTabsSnapshot === snapshot) return "";
+    chat.lastTabsSnapshot = snapshot;
+    const MAX = 30;
+    const shown = real.slice(0, MAX);
+    const lines = ["[Open browser tabs — for context on what the user has open; not something they typed]"];
+    for (const t of shown) {
+      const mark = t.id === activeTabId ? "→ " : "  ";
+      const title = (t.title || "").replace(/\s+/g, " ").trim().slice(0, 80);
+      lines.push(`${mark}${title || "(untitled)"} — ${t.url}`);
+    }
+    if (real.length > shown.length) lines.push(`  …and ${real.length - shown.length} more tabs`);
+    lines.push("(→ marks the tab the user is currently viewing)");
+    return lines.join("\n") + "\n\n";
   }
 
   // ---- image attachments (paste / drop) ------------------------------------
@@ -936,6 +966,215 @@
     return content == null ? "" : String(content);
   }
 
+  // ---- permission asks (Claude Code-style) ----------------------------------
+  // When claude wants to run a tool the mode doesn't pre-approve, the CLI blocks
+  // on a can_use_tool control request; the host relays it here as a `permission`
+  // message. We render the same dialog Claude Code shows in the terminal: the
+  // tool + its input, "Do you want to proceed?", and numbered options — Yes /
+  // Yes-and-don't-ask-again / No-and-tell-Claude. Keyboard: 1-3, ↑↓ + Enter,
+  // Esc. The answer goes back as `permissionResult`; a denial becomes the
+  // tool_result error on that tool's own card (never an aggregated banner).
+  const PERM_DENY_MESSAGE =
+    "The user doesn't want to proceed with this tool use. The tool use was rejected " +
+    "(eg. if it was a file edit, the new_string was NOT written to the file). " +
+    "STOP what you are doing and wait for the user to tell you how to proceed.";
+
+  const PERM_TITLES = {
+    Bash: "Bash command",
+    Edit: "Edit file",
+    Write: "Create file",
+    NotebookEdit: "Edit notebook",
+    Read: "Read file",
+    WebFetch: "Fetch",
+    WebSearch: "Web search",
+    Task: "Launch agent",
+    KillShell: "Kill shell",
+  };
+
+  function permTitle(toolName) {
+    if (PERM_TITLES[toolName]) return PERM_TITLES[toolName];
+    if (toolName && toolName.startsWith("mcp__")) return "Tool use";
+    return toolName || "Tool use";
+  }
+
+  // Context line under the title: the file path, URL, or `server · tool (MCP)`.
+  function permSubtitle(chat, toolName, input) {
+    input = input || {};
+    if (toolName === "Edit" || toolName === "Write" || toolName === "Read" || toolName === "NotebookEdit") {
+      return el("div", "perm-sub", shortPathFor(chat, input.file_path || input.notebook_path || ""));
+    }
+    if (toolName === "WebFetch" || toolName === "WebSearch") {
+      return el("div", "perm-sub", input.url || input.query || "");
+    }
+    const m = /^mcp__(.+?)__(.+)$/.exec(toolName || "");
+    if (m) return el("div", "perm-sub", `${m[1]} · ${m[2]} (MCP)`);
+    return null;
+  }
+
+  function permDetail(toolName, input) {
+    input = input || {};
+    if (toolName === "Bash") {
+      const wrap = el("div", "perm-detail");
+      wrap.appendChild(R.codeBlock(input.command || "", "bash"));
+      if (input.description) wrap.appendChild(el("div", "perm-desc", input.description));
+      return wrap;
+    }
+    // Edit diffs and Write contents reuse the tool-card renderers.
+    const d = toolDetail(toolName, input);
+    if (d) {
+      d.classList.add("perm-detail");
+      return d;
+    }
+    // MCP browser_eval and friends: show the code being run, not JSON.
+    if (typeof input.expression === "string") {
+      const wrap = el("div", "perm-detail");
+      wrap.appendChild(R.codeBlock(input.expression, "js"));
+      return wrap;
+    }
+    const keys = Object.keys(input);
+    if (!keys.length) return null;
+    const s = JSON.stringify(input, null, 2);
+    const wrap = el("div", "perm-detail");
+    wrap.appendChild(R.codeBlock(s.length > 2000 ? s.slice(0, 2000) + "\n…" : s, "json"));
+    return wrap;
+  }
+
+  function permOptions(toolName, suggestions) {
+    const hasSuggestions = Array.isArray(suggestions) && suggestions.length > 0;
+    const opts = [{ label: "Yes", allow: true }];
+    if (toolName === "Edit" || toolName === "Write" || toolName === "NotebookEdit") {
+      // Mirrors Claude Code: the "always" option for edits flips the session
+      // into acceptEdits rather than allow-listing one file.
+      opts.push({
+        label: "Yes, allow all edits during this session (shift+tab)",
+        allow: true,
+        updatedPermissions: [{ type: "setMode", mode: "acceptEdits", destination: "session" }],
+      });
+    } else {
+      // Prefer the CLI's own permission_suggestions (e.g. a Bash prefix rule);
+      // fall back to a session-wide allow rule for the tool.
+      const updated = hasSuggestions
+        ? suggestions
+        : [{ type: "addRules", rules: [{ toolName }], behavior: "allow", destination: "session" }];
+      const bare = toolName && toolName.startsWith("mcp__") ? toolName.split("__").slice(2).join("__") || toolName : toolName;
+      const what = toolName === "Bash" ? (hasSuggestions ? "similar commands" : "Bash commands") : bare;
+      opts.push({ label: `Yes, and don't ask again for ${what} this session`, allow: true, updatedPermissions: updated });
+    }
+    opts.push({ label: "No, and tell Claude what to do differently (esc)", allow: false });
+    return opts;
+  }
+
+  function paintPerm(entry) {
+    entry.rows.forEach((row, i) => row.classList.toggle("selected", i === entry.selected));
+  }
+
+  function showPermission(chat, msg) {
+    const requestId = msg.requestId;
+    if (!requestId || chat.permCards.has(requestId)) return;
+    const toolName = msg.toolName || "";
+    const input = msg.input || {};
+
+    const card = el("div", "perm-card");
+    card.tabIndex = 0;
+
+    const meta = TOOL_META[toolName] || (toolName.startsWith("mcp__") ? { icon: "server" } : { icon: "code" });
+    const title = el("div", "perm-title");
+    const ic = el("span", "perm-title-ic");
+    ic.innerHTML = ICON(meta.icon || "code", 14);
+    title.appendChild(ic);
+    title.appendChild(el("span", null, permTitle(toolName)));
+    card.appendChild(title);
+
+    const sub = permSubtitle(chat, toolName, input) || (msg.description ? el("div", "perm-sub", msg.description) : null);
+    if (sub) card.appendChild(sub);
+    const detail = permDetail(toolName, input);
+    if (detail) card.appendChild(detail);
+
+    card.appendChild(el("div", "perm-question", "Do you want to proceed?"));
+
+    const opts = permOptions(toolName, msg.suggestions);
+    const entry = { card, opts, selected: 0, rows: [] };
+    const list = el("div", "perm-opts");
+    opts.forEach((opt, i) => {
+      const row = el("button", "perm-opt");
+      row.type = "button";
+      row.appendChild(el("span", "perm-caret", "❯"));
+      row.appendChild(el("span", "perm-num", i + 1 + "."));
+      row.appendChild(el("span", "perm-opt-label", opt.label));
+      row.addEventListener("mouseenter", () => {
+        entry.selected = i;
+        paintPerm(entry);
+      });
+      row.addEventListener("click", () => answerPermission(chat, requestId, opt));
+      list.appendChild(row);
+      entry.rows.push(row);
+    });
+    card.appendChild(list);
+
+    card.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const d = e.key === "ArrowDown" ? 1 : opts.length - 1;
+        entry.selected = (entry.selected + d) % opts.length;
+        paintPerm(entry);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        answerPermission(chat, requestId, opts[entry.selected]);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        answerPermission(chat, requestId, opts[opts.length - 1]);
+      } else if (/^[1-9]$/.test(e.key)) {
+        const i = Number(e.key) - 1;
+        if (opts[i]) {
+          e.preventDefault();
+          answerPermission(chat, requestId, opts[i]);
+        }
+      }
+    });
+
+    chat.permCards.set(requestId, entry);
+    paintPerm(entry);
+    append(chat, card);
+    if (chat.id === activeId) {
+      scrollToBottom(chat);
+      // Take focus like Claude Code's prompt does — but never steal a draft.
+      if (!els.input || !els.input.value.trim()) card.focus();
+    }
+  }
+
+  function answerPermission(chat, requestId, opt) {
+    const entry = chat.permCards.get(requestId);
+    if (!entry) return;
+    chat.permCards.delete(requestId);
+    entry.card.remove();
+    const out = { type: "permissionResult", id: chat.id, requestId, behavior: opt.allow ? "allow" : "deny" };
+    if (opt.allow && opt.updatedPermissions) out.updatedPermissions = opt.updatedPermissions;
+    if (!opt.allow) {
+      out.message = PERM_DENY_MESSAGE;
+      // Matches Claude Code: "No" also stops the turn so the user can redirect.
+      out.interrupt = true;
+    }
+    post(out);
+    const next = chat.permCards.values().next().value;
+    if (next && chat.id === activeId) next.card.focus();
+    else if (!opt.allow && els.input) els.input.focus();
+  }
+
+  function removePermCard(chat, requestId) {
+    const entry = chat.permCards.get(requestId);
+    if (!entry) return;
+    chat.permCards.delete(requestId);
+    entry.card.remove();
+  }
+
+  // Drop every pending ask (turn ended, session restarted, or process exited —
+  // the control requests they answer no longer exist).
+  function clearPermCards(chat) {
+    if (!chat || !chat.permCards) return;
+    for (const entry of chat.permCards.values()) entry.card.remove();
+    chat.permCards.clear();
+  }
+
   // ---- event handling (routed per chat) -------------------------------------
   function onClaudeEvent(chat, d) {
     if (!d || !d.type) return;
@@ -1020,11 +1259,20 @@
     chat.streamBlocks.clear();
     chat.streamMsgId = null;
     if (chat.thinkStartedAt) { chat.thoughtMs += Date.now() - chat.thinkStartedAt; chat.thinkStartedAt = 0; }
-    if (result) {
-      if (Array.isArray(result.permission_denials) && result.permission_denials.length) {
-        const names = result.permission_denials.map((p) => p.tool_name || p.tool || "tool").join(", ");
-        systemNote(chat, `Denied by permission mode: ${names}. Switch mode to allow.`, "warn");
+    // Any ask still open is moot once the turn is over. Denials are NOT
+    // summarized into a banner here — each rejected tool call already carries
+    // its own inline error on its card (the synthesized tool_result), which is
+    // how Claude Code presents them.
+    clearPermCards(chat);
+    // Tool calls that never got a result (denied-with-interrupt, or the turn
+    // was cancelled mid-run) would pulse forever — close them out as errored.
+    for (const entry of chat.toolCards.values()) {
+      if (entry.toggle.classList.contains("running")) {
+        entry.toggle.classList.remove("running");
+        entry.toggle.classList.add("done", "err");
       }
+    }
+    if (result) {
       chat.turnStatusText = "";
     }
     if (chat.id === activeId) {
@@ -1161,6 +1409,8 @@
         break;
       case "started":
         if (chat) {
+          // A (re)spawned process can't answer asks from the previous one.
+          clearPermCards(chat);
           if (msg.cwd) { chat.cwd = msg.cwd; rememberCwd(msg.cwd); }
           if (msg.permissionMode) chat.mode = msg.permissionMode;
           if (chat.id === activeId) syncComposer();
@@ -1177,6 +1427,12 @@
         // Not chat-scoped — claude is inspecting the live browser tab.
         handleBrowserOp(msg);
         break;
+      case "permission":
+        if (chat) showPermission(chat, msg);
+        break;
+      case "permissionCancel":
+        if (chat) removePermCard(chat, msg.requestId);
+        break;
       case "commands":
         if (chat && Array.isArray(msg.list)) {
           // `/login` is handled by the panel (the headless CLI doesn't list it),
@@ -1189,6 +1445,7 @@
       case "exit":
         if (chat) {
           chat.started = false;
+          clearPermCards(chat);
           if (chat.turnRunning) endTurn(chat, null);
           systemNote(chat, `Claude session ended (code ${msg.code}).`, "warn");
         }
@@ -1334,11 +1591,13 @@
     chat.messagesEl.innerHTML = "";
     chat.loginCard = null; // detached from the DOM above; drop the stale reference
     chat.statusEl = null; // wiped with the stream; recreated on next render
+    chat.permCards.clear(); // card nodes went with the innerHTML wipe
     chat.toolCards.clear();
     chat.emittedToolIds.clear();
     chat.currentAssistantId = null;
     chat.currentAssistantBody = null;
     chat.sessionId = null;
+    chat.lastTabsSnapshot = null;
     chat.empty = true;
     chat.turnStatusText = "";
     chat.streamBlocks.clear();
@@ -1352,7 +1611,7 @@
     startChatSession(chat);
   }
 
-  function sendPrompt() {
+  async function sendPrompt() {
     const chat = chats.get(activeId);
     if (!chat) return;
     const text = els.input.value.trim();
@@ -1391,12 +1650,14 @@
       return;
     }
     if (!chat.started) startChatSession(chat);
+    // Silent, always-on context: what tabs are open right now, active one flagged.
+    const tabsBlock = await buildTabsContextBlock(chat);
     // Prepend any attached page/element context as a block, then clear it.
     const ctx = formatContexts(chat);
     const hasPage = hasContext && chat.contexts.some((c) => c.kind === "page");
     const fallback = hasContext ? (hasPage ? "What's on this page?" : "What can you tell me about this element?") : "";
     const bubbleHint = hasPage ? "_(attached current tab)_" : "_(selected page element)_";
-    const sentText = ctx + (text || fallback);
+    const sentText = tabsBlock + ctx + (text || fallback);
     const images = attachments.map((a) => ({ mediaType: a.mediaType, data: a.base64 }));
     userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments);
     post({ type: "prompt", id: chat.id, text: sentText, images });

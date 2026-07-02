@@ -327,16 +327,8 @@
     head.className = "usage-head";
     const title = document.createElement("span");
     title.className = "usage-title";
-    title.textContent = "Usage";
-    // Plan/source taken from the intro line: "… your subscription to power …".
-    const planMatch = /using your\s+(.+?)\s+to power/i.exec(intro);
+    title.textContent = "Plan usage";
     head.appendChild(title);
-    if (planMatch) {
-      const sub = document.createElement("span");
-      sub.className = "usage-plan";
-      sub.textContent = planMatch[1];
-      head.appendChild(sub);
-    }
     card.appendChild(head);
 
     for (const mt of metrics) {
