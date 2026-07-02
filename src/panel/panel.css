@@ -604,18 +604,18 @@ body {
   align-items: center;
   gap: 6px;
   font-size: 11px;
-  color: var(--text-tertiary);
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-primary);
-  border-radius: 999px;
-  padding: 4px 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: #1c1c1c;
+  border-radius: 8px;
+  padding: 5px 12px;
   max-width: 90%;
   text-align: center;
 }
 .sys-note .sys-ic { display: inline-flex; flex: 0 0 auto; }
 .sys-note.warn {
-  color: var(--other-yellow);
-  border-color: rgba(245, 158, 11, 0.35);
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.12);
 }
 
 /* markdown */
