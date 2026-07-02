@@ -1576,12 +1576,16 @@
     els.modeMenu.innerHTML = "";
     els.modeMenu.appendChild(el("div", "mode-head", "Permission mode"));
     for (const m of MODES) {
-      const row = el("div", "mode-item " + m.cls + (chat && chat.mode === m.id ? " current" : ""));
+      const isCur = !!(chat && chat.mode === m.id);
+      const row = el("div", "mode-item " + m.cls + (isCur ? " current" : ""));
       row.appendChild(el("span", "mode-dot"));
       const meta = el("div", "mode-meta");
       meta.appendChild(el("div", "mode-item-label", m.label));
       meta.appendChild(el("div", "mode-item-hint", m.hint));
       row.appendChild(meta);
+      const ic = el("span", "mode-item-ic");
+      if (isCur) ic.innerHTML = ICON("check", 13);
+      row.appendChild(ic);
       row.addEventListener("click", () => {
         hideModeMenu();
         const c = chats.get(activeId);
@@ -1621,6 +1625,9 @@
       logo.innerHTML = window.RKClaudeHTML(15);
       row.appendChild(logo);
       row.appendChild(el("span", "model-item-label", m.label));
+      const ic = el("span", "model-item-ic");
+      if (isCur) ic.innerHTML = ICON("check", 13);
+      row.appendChild(ic);
       row.addEventListener("click", () => {
         hideModelMenu();
         const c = chats.get(activeId);

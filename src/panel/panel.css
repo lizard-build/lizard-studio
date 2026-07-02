@@ -346,6 +346,7 @@ body {
 .model-item.current { background: rgba(255, 255, 255, 0.08); }
 .model-item-logo { display: inline-flex; flex: 0 0 auto; }
 .model-item-logo .claude-mark { display: block; }
+.model-item-ic { display: inline-flex; width: 13px; flex: 0 0 auto; margin-left: auto; color: var(--text-primary); }
 .model-item-label { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
 
 .mode-btn {
@@ -420,6 +421,7 @@ body {
 .mode-item-label { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
 .mode-item.mode-bypass .mode-item-label { color: #ff8b8b; }
 .mode-item-hint { font-size: 11px; color: var(--text-tertiary); line-height: 1.35; margin-top: 1px; }
+.mode-item-ic { display: inline-flex; width: 13px; flex: 0 0 auto; margin-top: 4px; margin-left: auto; color: var(--text-primary); }
 
 .icon-btn {
   appearance: none;
