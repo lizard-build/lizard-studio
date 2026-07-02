@@ -888,7 +888,7 @@ code.inline {
 .perm-sub {
   margin-top: 3px;
   padding-left: 21px;
-  font-family: var(--font-mono);
+  font-family: var(--font-family);
   font-size: 11.5px;
   color: var(--text-secondary);
   word-break: break-all;
