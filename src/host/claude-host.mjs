@@ -28,6 +28,8 @@
 //   { type:"gitBranches", id, cwd }                                list local branches + current
 //   { type:"checkoutBranch", id, cwd, branch }                     git checkout <branch>
 //   { type:"browserResult", bid, ok, data?, error? }              reply to a `browser` request
+//   { type:"permissionResult", id, requestId, behavior,           answer a `permission` ask:
+//     message?, updatedPermissions?, interrupt? }                 behavior "allow" | "deny"
 //
 // Protocol — host -> panel:
 //   { type:"ready",   home, claudePath, ok }                   sent once on connect (no id)
@@ -38,15 +40,19 @@
 //   { type:"gitBranches", id, cwd, isRepo, current, branches, checkedOut? }
 //   { type:"transcript", id, events, done }                    a chunk of replayed past messages
 //   { type:"browser", bid, op, args }                          ask the panel to inspect the live tab
+//   { type:"permission", id, requestId, toolName, input,       claude wants to use a tool — ask the user
+//     suggestions }                                            (answered with `permissionResult`)
+//   { type:"permissionCancel", id, requestId }                 claude no longer needs that answer
 //   { type:"error",   id, message }
 
 import { spawn, execFile, execSync } from "node:child_process";
-import { existsSync, readFileSync, appendFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, appendFileSync, readdirSync, mkdirSync, writeFileSync, renameSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir, userInfo } from "node:os";
 import { randomUUID } from "node:crypto";
 import net from "node:net";
+import https from "node:https";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // Sibling MCP relay that exposes the browser tools to claude (see mcp-browser.mjs).
@@ -78,6 +84,60 @@ process.on("unhandledRejection", (reason) => {
 });
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
+
+// ---- bundled "lizard" skill ---------------------------------------------------
+// Ships the lizard-build/skill bootstrap skill to every spawned claude via
+// --plugin-dir — ephemeral, per-process, never touches the user's own
+// ~/.claude/skills. install.sh seeds this dir with a copy at install time (so it
+// works offline / on first run); in the background we refresh it straight from
+// GitHub so users get upstream updates without reinstalling the host. Fetches
+// are throttled and never block a claude spawn — spawning always uses whatever
+// is on disk right now.
+const SKILL_DIR = join(HERE, "skills", "lizard");
+const SKILL_MARKER = join(SKILL_DIR, "SKILL.md");
+const SKILL_FILES = ["SKILL.md", "README.md", "skills.sh.json"];
+const SKILL_RAW_BASE = "https://raw.githubusercontent.com/lizard-build/skill/main";
+const SKILL_REFRESH_TTL_MS = 12 * 60 * 60 * 1000; // 12h — upstream is a thin, rarely-changing bootstrap
+
+function fetchText(url) {
+  return new Promise((resolve, reject) => {
+    https
+      .get(url, { headers: { "User-Agent": "lizard-studio-host" } }, (res) => {
+        if (res.statusCode !== 200) {
+          res.resume();
+          return reject(new Error("HTTP " + res.statusCode + " for " + url));
+        }
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => (body += c));
+        res.on("end", () => resolve(body));
+      })
+      .on("error", reject);
+  });
+}
+
+async function refreshBundledSkill() {
+  try {
+    if (existsSync(SKILL_MARKER) && Date.now() - statSync(SKILL_MARKER).mtimeMs < SKILL_REFRESH_TTL_MS) {
+      return; // refreshed recently enough — skip the network round-trip
+    }
+    mkdirSync(SKILL_DIR, { recursive: true });
+    for (const name of SKILL_FILES) {
+      const text = await fetchText(`${SKILL_RAW_BASE}/${name}`);
+      const tmp = join(SKILL_DIR, name + ".tmp");
+      writeFileSync(tmp, text, "utf8");
+      renameSync(tmp, join(SKILL_DIR, name)); // atomic swap — never leaves a half-written file
+    }
+    log("skill: refreshed lizard-build/skill from upstream");
+  } catch (err) {
+    // Offline, GitHub unreachable, rate-limited, etc. — keep whatever's already
+    // on disk (the bundled fallback from install.sh, or the last good fetch).
+    log("skill: refresh skipped —", err && err.message);
+  }
+}
+// Fire-and-forget at startup; every claude spawn below just reads SKILL_DIR
+// synchronously off disk, so this never adds latency to a chat turn.
+refreshBundledSkill();
 
 // install.sh writes resolved binary paths here, since Chrome launches native
 // hosts with a minimal PATH that usually misses /opt/homebrew, nvm, etc.
@@ -330,6 +390,11 @@ function startClaude({ id, cwd, model, permissionMode, resume }) {
     sessionId: resume || null,
     stdoutBuf: "",
     stderrBuf: "",
+    // Pending can_use_tool asks: request_id -> the tool's ORIGINAL input. Kept
+    // here (not round-tripped through the panel) because host->panel messages
+    // may be truncated for Chrome's 1 MB cap — echoing a truncated input back
+    // on "allow" would corrupt the tool call (e.g. a big Write).
+    permPending: new Map(),
   };
 
   const args = [
@@ -343,9 +408,18 @@ function startClaude({ id, cwd, model, permissionMode, resume }) {
     "--include-partial-messages",
     "--verbose",
     "--permission-mode", s.mode,
+    // Route permission checks to us over stdio (the Agent SDK's canUseTool
+    // mechanism): instead of silently denying, claude emits a `control_request`
+    // {subtype:"can_use_tool"} line and waits for our control_response. The
+    // panel renders it as a Claude Code-style ask dialog.
+    "--permission-prompt-tool", "stdio",
   ];
   if (s.model) args.push("--model", s.model);
   if (resume) args.push("--resume", resume);
+
+  // Ship the lizard-build/skill bootstrap skill to this session (see the
+  // refreshBundledSkill block above) — ephemeral, doesn't touch user config.
+  if (existsSync(SKILL_MARKER)) args.push("--plugin-dir", SKILL_DIR);
 
   // Register the browser MCP server so claude can inspect the live tab. The
   // read-only tools are pre-allowed; browser_eval still goes through the normal
@@ -395,6 +469,43 @@ function startClaude({ id, cwd, model, permissionMode, resume }) {
         obj = JSON.parse(line);
       } catch {
         continue; // not JSON (shouldn't happen in stream-json) — skip
+      }
+      // Control-protocol traffic (the SDK channel) is handled here, not
+      // forwarded as a transcript event.
+      if (obj.type === "control_request" && obj.request) {
+        if (obj.request.subtype === "can_use_tool") {
+          s.permPending.set(obj.request_id, obj.request.input || {});
+          send({
+            type: "permission",
+            id,
+            requestId: obj.request_id,
+            toolName: obj.request.tool_name,
+            input: obj.request.input || {},
+            suggestions: obj.request.permission_suggestions || null,
+            description: obj.request.description || null,
+            toolUseId: obj.request.tool_use_id || null,
+          });
+        } else {
+          // A control request we don't implement (hooks, SDK MCP…) — refuse it
+          // right away so claude never hangs waiting on us.
+          try {
+            s.child.stdin.write(
+              JSON.stringify({
+                type: "control_response",
+                response: { subtype: "error", request_id: obj.request_id, error: "unsupported control request: " + obj.request.subtype },
+              }) + "\n"
+            );
+          } catch {
+            /* child went away */
+          }
+        }
+        continue;
+      }
+      if (obj.type === "control_cancel_request") {
+        // The turn was interrupted (or claude moved on) — the ask is moot.
+        s.permPending.delete(obj.request_id);
+        send({ type: "permissionCancel", id, requestId: obj.request_id });
+        continue;
       }
       if (obj.type === "system" && obj.subtype === "init" && obj.session_id) {
         s.sessionId = obj.session_id;
@@ -468,6 +579,7 @@ function ensureCommands(id, cwd, model) {
 function harvestCommands(id, cwd, model) {
   const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"];
   if (model) args.push("--model", model);
+  if (existsSync(SKILL_MARKER)) args.push("--plugin-dir", SKILL_DIR);
   let proc;
   try {
     proc = spawn(CLAUDE, args, { cwd, env: CHILD_ENV, stdio: ["pipe", "pipe", "ignore"] });
@@ -807,6 +919,41 @@ function handle(msg) {
     case "browserResult":
       resolveBrowser(msg);
       break;
+    case "permissionResult": {
+      // The user answered a `permission` ask — relay it to claude as the
+      // control_response it's blocked on. On allow, updatedInput must be the
+      // ORIGINAL input we stashed (the panel's copy may have been truncated
+      // for the native-messaging size cap).
+      const s = sessions.get(id);
+      if (!s || !s.child || !s.child.stdin.writable) break;
+      const input = s.permPending.get(msg.requestId) || {};
+      s.permPending.delete(msg.requestId);
+      const response =
+        msg.behavior === "allow"
+          ? {
+              behavior: "allow",
+              updatedInput: input,
+              ...(Array.isArray(msg.updatedPermissions) && msg.updatedPermissions.length
+                ? { updatedPermissions: msg.updatedPermissions }
+                : {}),
+            }
+          : {
+              behavior: "deny",
+              message: msg.message || "The user denied this tool use.",
+              ...(msg.interrupt ? { interrupt: true } : {}),
+            };
+      try {
+        s.child.stdin.write(
+          JSON.stringify({
+            type: "control_response",
+            response: { subtype: "success", request_id: msg.requestId, response },
+          }) + "\n"
+        );
+      } catch {
+        /* child went away */
+      }
+      break;
+    }
     case "authLogin":
       authLogin(id);
       break;

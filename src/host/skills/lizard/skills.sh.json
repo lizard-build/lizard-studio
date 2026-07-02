@@ -1,0 +1,13 @@
+{
+  "$schema": "https://skills.sh/schemas/skills.sh.schema.json",
+  "notGrouped": "bottom",
+  "groupings": [
+    {
+      "title": "Deploy",
+      "description": "Deploy and manage apps, agents, workers, and managed databases on Lizard via the lizard CLI.",
+      "skills": [
+        "lizard"
+      ]
+    }
+  ]
+}

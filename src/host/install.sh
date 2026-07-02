@@ -99,6 +99,7 @@ fi
 # dir — copied from the local checkout when we have one, otherwise fetched
 # straight from GitHub so `curl … | bash` works without a git clone.
 fetch_host_file() {
+  mkdir -p "$(dirname "$RUNTIME_DIR/$1")"
   if [[ -n "$HERE" && -f "$HERE/$1" ]]; then
     cp "$HERE/$1" "$RUNTIME_DIR/$1"
   else
@@ -113,6 +114,12 @@ mkdir -p "$RUNTIME_DIR"
 fetch_host_file claude-host.mjs
 # The browser MCP relay claude spawns to reach the live tab (see claude-host.mjs).
 fetch_host_file mcp-browser.mjs
+# Bundled fallback copy of the lizard-build/skill bootstrap skill, so claude has
+# it available (via --plugin-dir) from the very first run, offline included. The
+# host refreshes this from upstream itself afterwards — see claude-host.mjs.
+fetch_host_file skills/lizard/SKILL.md
+fetch_host_file skills/lizard/README.md
+fetch_host_file skills/lizard/skills.sh.json
 
 # 1) host config the runtime reads (Chrome launches us with a minimal PATH).
 cat > "$RUNTIME_DIR/host-config.json" <<JSON
