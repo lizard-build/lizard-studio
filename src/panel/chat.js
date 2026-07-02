@@ -642,6 +642,21 @@
 
   function ensureAssistantBody(chat, messageId) {
     if (chat.currentAssistantId === messageId && chat.currentAssistantBody) return chat.currentAssistantBody;
+    // The CLI opens a new message id after every tool result, but visually a
+    // turn is one reply: keep appending into the previous body while its row is
+    // still the last thing in the transcript (endTurn / user bubbles / notes
+    // break the chain), so spacing stays even instead of jumping at message
+    // boundaries. The copy footer moves back to the bottom as content grows.
+    const prev = chat.currentAssistantBody;
+    if (prev && prev.parentElement && prev.parentElement === chat.messagesEl.lastElementChild) {
+      chat.currentAssistantId = messageId;
+      if (prev.dataset.footered) {
+        const f = prev.querySelector(":scope > .msg-footer");
+        if (f) f.remove();
+        delete prev.dataset.footered;
+      }
+      return prev;
+    }
     chat.currentAssistantId = messageId;
     const row = el("div", "msg msg-assistant");
     const body = el("div", "assistant-body");
