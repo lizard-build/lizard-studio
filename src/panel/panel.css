@@ -623,7 +623,7 @@ body {
 .md-h { font-size: 15px; font-weight: 600; margin: 12px 0 6px; }
 .md-list { margin: 6px 0; padding-left: 20px; }
 .md-list li { margin: 2px 0; }
-.md a { color: var(--control-primary); text-decoration: none; }
+.md a { color: var(--other-blue); text-decoration: none; }
 .md a:hover { text-decoration: underline; }
 
 /* GFM tables */
