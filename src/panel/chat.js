@@ -61,7 +61,7 @@
 
   const MODELS = [
     { id: "claude-opus-4-8", label: "Opus 4.8" },
-    { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
+    { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
     { id: "claude-fable-5", label: "Fable 5" },
   ];
@@ -1621,9 +1621,6 @@
       logo.innerHTML = window.RKClaudeHTML(15);
       row.appendChild(logo);
       row.appendChild(el("span", "model-item-label", m.label));
-      const ic = el("span", "model-item-ic");
-      if (isCur) ic.innerHTML = ICON("check", 13);
-      row.appendChild(ic);
       row.addEventListener("click", () => {
         hideModelMenu();
         const c = chats.get(activeId);
