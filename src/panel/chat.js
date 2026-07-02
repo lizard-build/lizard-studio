@@ -52,11 +52,11 @@
   // ids: default, acceptEdits, plan, auto, bypassPermissions. Keep this list and
   // its order in sync with the CLI so the panel pill matches the terminal.
   const MODES = [
-    { id: "default", label: "Ask", hint: "Prompts via your configured rules; unapproved tools are denied.", cls: "mode-default" },
+    { id: "default", label: "Ask permissions", hint: "Asks for your approval before tools that aren't pre-approved.", cls: "mode-default" },
     { id: "acceptEdits", label: "Accept edits", hint: "Auto-accepts file edits; still asks for risky commands.", cls: "mode-accept" },
-    { id: "plan", label: "Plan", hint: "Read-only planning — Claude won't run or edit anything.", cls: "mode-plan" },
-    { id: "auto", label: "Auto", hint: "A classifier auto-approves safe tool calls and denies risky ones. Availability depends on the model/provider.", cls: "mode-auto" },
-    { id: "bypassPermissions", label: "Bypass", hint: "Allows everything without asking. Use with care.", cls: "mode-bypass" },
+    { id: "plan", label: "Plan mode", hint: "Read-only planning — Claude won't run or edit anything.", cls: "mode-plan" },
+    { id: "auto", label: "Auto mode", hint: "A classifier auto-approves safe tool calls and denies risky ones. Availability depends on the model/provider.", cls: "mode-auto" },
+    { id: "bypassPermissions", label: "Bypass permissions", hint: "Allows everything without asking. Use with care.", cls: "mode-bypass" },
   ];
 
   const MODELS = [
@@ -1581,7 +1581,6 @@
       row.appendChild(el("span", "mode-dot"));
       const meta = el("div", "mode-meta");
       meta.appendChild(el("div", "mode-item-label", m.label));
-      meta.appendChild(el("div", "mode-item-hint", m.hint));
       row.appendChild(meta);
       const ic = el("span", "mode-item-ic");
       if (isCur) ic.innerHTML = ICON("check", 13);

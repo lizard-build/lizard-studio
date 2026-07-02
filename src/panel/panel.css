@@ -391,12 +391,10 @@ body {
   font-weight: 600;
   color: var(--text-tertiary);
   padding: 6px 8px 8px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 .mode-item {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 9px;
   padding: 8px;
   border-radius: 8px;
@@ -409,19 +407,18 @@ body {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  margin-top: 4px;
   flex: 0 0 auto;
-  background: var(--text-tertiary);
+  background: var(--text-primary);
 }
-/* Labels are white (design.md --text-primary). The current mode is shown by the
-   row's background highlight (.mode-item.current), so every dot stays the same
-   neutral grey — only Bypass keeps its red warning tint. */
+/* Dots match their label's color — neutral white, except Bypass's red and
+   Auto's amber warning tint (DESIGN.md --other-yellow). */
 .mode-item.mode-bypass .mode-dot { background: #ff8b8b; }
+.mode-item.mode-auto .mode-dot { background: var(--other-yellow); }
 .mode-meta { min-width: 0; }
 .mode-item-label { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
 .mode-item.mode-bypass .mode-item-label { color: #ff8b8b; }
-.mode-item-hint { font-size: 11px; color: var(--text-tertiary); line-height: 1.35; margin-top: 1px; }
-.mode-item-ic { display: inline-flex; width: 13px; flex: 0 0 auto; margin-top: 4px; margin-left: auto; color: var(--text-primary); }
+.mode-item.mode-auto .mode-item-label { color: var(--other-yellow); }
+.mode-item-ic { display: inline-flex; width: 13px; flex: 0 0 auto; margin-left: auto; color: var(--text-primary); }
 
 .icon-btn {
   appearance: none;
