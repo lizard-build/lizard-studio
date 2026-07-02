@@ -748,38 +748,78 @@ code.inline {
 .login-card {
   margin: 4px 0;
   background: var(--bg-secondary);
-  border: 1px solid var(--border-primary);
   border-radius: 12px;
   padding: 14px 16px 16px;
   max-width: 90%;
 }
-.login-card.error { border-color: rgba(239, 68, 68, 0.4); }
 .login-title {
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 20px;
   font-weight: 600;
   color: var(--text-primary);
   margin-bottom: 4px;
 }
 .login-status {
   font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
   color: var(--text-secondary);
-  line-height: 1.45;
 }
+.login-card.waiting .login-status::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--control-primary);
+  margin-right: 7px;
+  vertical-align: 1px;
+  animation: dot-pulse 1.6s ease-in-out infinite;
+}
+.login-card.done .login-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-primary);
+}
+.login-check {
+  display: inline-flex;
+  color: var(--control-primary);
+}
+.login-card.error .login-status { color: #f87171; }
 .login-open {
   margin-top: 12px;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 12px;
   font-family: var(--font-family);
   font-size: 12px;
-  color: var(--text-primary);
-  background: var(--control-secondary);
-  border: 1px solid var(--border-primary);
+  font-weight: 600;
+  color: #fff;
+  background: rgba(16, 185, 129, 0.5);
+  border: 1px solid var(--control-primary);
   border-radius: 8px;
-  padding: 6px 12px;
   cursor: pointer;
   transition: background 0.15s;
 }
-.login-open:hover { background: var(--control-secondary-hover); }
+.login-open:hover { background: var(--control-primary); }
+.login-open:active { transform: scale(0.97); }
+.login-fallback {
+  display: block;
+  margin-top: 10px;
+  padding: 0;
+  background: none;
+  border: 0;
+  font-family: var(--font-family);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.login-fallback:hover { color: var(--text-secondary); }
 .login-row {
   display: flex;
   gap: 8px;

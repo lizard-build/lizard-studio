@@ -1374,6 +1374,9 @@
     if (/^\/login\s*$/.test(text)) {
       els.input.value = "";
       autosize();
+      userBubble(chat, "/login", null);
+      chat.empty = false;
+      updateSetup();
       startLogin(chat);
       return;
     }
@@ -1464,7 +1467,8 @@
   function loginShowUrl(chat, url) {
     const card = chat.loginCard;
     if (!card) return;
-    card._status.textContent = "Authorize in your browser, then paste the code below.";
+    card.classList.add("waiting");
+    card._status.textContent = "Click Authorize in the tab that just opened — you'll be signed in automatically.";
     const openTab = () => {
       try { chrome.tabs.create({ url }); }
       catch (_) { window.open(url, "_blank"); }
@@ -1473,10 +1477,15 @@
     const open = el("button", "login-open", "Open sign-in page");
     open.type = "button";
     open.addEventListener("click", openTab);
-    const row = el("div", "login-row");
+    // The browser callback completes sign-in on its own in almost every case;
+    // pasting the authorization code is a fallback for when it can't reach the
+    // CLI (remote host, blocked localhost callback), so keep it tucked away.
+    const fallback = el("button", "login-fallback", "Having trouble? Paste the code manually");
+    fallback.type = "button";
+    const row = el("div", "login-row hidden");
     const input = el("input", "login-input");
     input.type = "text";
-    input.placeholder = "Paste authorization code";
+    input.placeholder = "Authorization code";
     input.spellcheck = false;
     input.autocapitalize = "off";
     const submit = el("button", "login-submit", "Sign in");
@@ -1493,21 +1502,47 @@
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); doSubmit(); }
     });
+    fallback.addEventListener("click", () => {
+      fallback.classList.add("hidden");
+      row.classList.remove("hidden");
+      input.focus();
+    });
     row.appendChild(input);
     row.appendChild(submit);
     card.appendChild(open);
+    card.appendChild(fallback);
     card.appendChild(row);
-    input.focus();
+    card._controls = [open, fallback, row];
   }
 
   function loginDone(chat, ok, message) {
-    if (chat.loginCard) { chat.loginCard.remove(); chat.loginCard = null; }
-    if (ok) {
-      // resetChatSession wipes the message view, so add the note afterwards.
-      resetChatSession(chat);
-      systemNote(chat, "Signed in. You're all set.");
+    const card = chat.loginCard;
+    chat.loginCard = null;
+    const failText = "Sign-in failed: " + (message || "unknown error") + ". Type /login to try again.";
+    if (card) {
+      // Keep the card in the transcript; collapse it into its final state.
+      card.classList.remove("waiting");
+      if (card._controls) { for (const c of card._controls) c.remove(); card._controls = null; }
+      card.classList.add(ok ? "done" : "error");
+      card._status.textContent = "";
+      if (ok) {
+        const ic = el("span", "login-check");
+        ic.innerHTML = ICON("check", 13);
+        card._status.appendChild(ic);
+        card._status.appendChild(el("span", null, "Signed in. You're all set."));
+      } else {
+        card._status.textContent = failText;
+      }
     } else {
-      systemNote(chat, "Sign-in failed: " + (message || "unknown error") + ". Type /login to try again.", "warn");
+      // Card is gone (tab reset while signing in) — fall back to a note.
+      systemNote(chat, ok ? "Signed in. You're all set." : failText, ok ? undefined : "warn");
+    }
+    // Restart the backend session so the CLI picks up the fresh credentials.
+    // Resuming the same session id keeps the transcript and context intact —
+    // no need to wipe the conversation.
+    if (ok && chat.started) {
+      chat.started = false;
+      startChatSession(chat);
     }
   }
 
