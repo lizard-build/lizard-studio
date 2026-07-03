@@ -266,20 +266,21 @@
     h.classList.toggle("rk-visible", visible);
     if (instant) requestAnimationFrame(() => h.classList.remove("rk-instant"));
   }
+  // Shared by the user clicking minimize/restore here and by syncUI applying a
+  // change made in another tab — the latter must not write back to storage.
+  function applyMinimized(min, instant) {
+    minimized = min;
+    RK.state.minimized = min;
+    if (min) { closePop(); hideTip(); }
+    setBarCollapsed(min, instant);
+    setHandleVisible(min, instant);
+  }
   function minimize(instant) {
-    minimized = true;
-    RK.state.minimized = true;
-    closePop();
-    hideTip();
-    setBarCollapsed(true, instant);
-    setHandleVisible(true, instant);
+    applyMinimized(true, instant);
     RK.persistUI();
   }
   function restore(instant) {
-    minimized = false;
-    RK.state.minimized = false;
-    setHandleVisible(false, instant);
-    setBarCollapsed(false, instant);
+    applyMinimized(false, instant);
     RK.persistUI();
   }
 
@@ -559,6 +560,27 @@
       if (!RK.state.visible) return;
       if (minimized) setHandleVisible(true, true);
       else setBarCollapsed(false, true);
+    },
+    // Mirror shell-state changes made in ANOTHER tab (core.js relays
+    // storage.onChanged here): the collapsed state and position follow the user
+    // across open tabs instead of only applying on the next page load.
+    // Deliberately no persistUI — the change is already in storage, and writing
+    // it back would just echo onChanged around every open tab. Visibility is
+    // NOT synced live: it's per-tab, driven by the side panel broadcasts.
+    syncUI(ui) {
+      if (!ui) return;
+      if (ui.pos) {
+        RK.state.toolbarPos = ui.pos;
+        if (root) applyPos();
+      }
+      const min = !!ui.minimized;
+      if (min !== !!RK.state.minimized) {
+        RK.state.minimized = min;
+        // Only touch a bar that's actually on screen — a hidden one picks the
+        // state up from RK.state when show() next builds it. Instant: the
+        // animation already played in the tab where the user clicked.
+        if (root && RK.state.visible) applyMinimized(min, true);
+      }
     },
     // Where the bar currently sits, so a replacement UI can dock in the same spot.
     // null while minimized/hidden — caller should fall back to its default dock.

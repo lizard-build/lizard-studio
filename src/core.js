@@ -182,6 +182,17 @@
     } catch (e) { resolve(null); }
   });
 
+  // Shell state is also synced LIVE across tabs: minimizing or moving the bar
+  // in one tab updates every other open tab through storage.onChanged, not just
+  // the next page load. The originating tab hears its own write too — syncUI
+  // no-ops when the incoming state matches, so nothing loops.
+  try {
+    chrome.storage && chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== "local" || !changes[UI_KEY]) return;
+      if (RK.toolbar && RK.toolbar.syncUI) RK.toolbar.syncUI(changes[UI_KEY].newValue || null);
+    });
+  } catch (e) {}
+
   // Return a STABLE settings object per tool. Defaults are filled in once and
   // missing keys are back-filled in place — the object reference never changes,
   // so a panel's captured `cfg` and a tool's render() always read/write the
