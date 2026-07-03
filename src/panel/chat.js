@@ -94,6 +94,10 @@
 
   const DEFAULT_TITLE = "New chat";
 
+  // Minimum native-host protocol version this panel needs (the host reports
+  // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
+  const EXPECTED_HOST_VERSION = 2;
+
   let els = {};
   let port = null;
   let connected = false;
@@ -1696,6 +1700,15 @@
         if (!msg.ok) {
           const a = chats.get(activeId);
           if (a) systemNote(a, "Host is up but couldn't find the `claude` CLI. Install it: npm i -g @anthropic-ai/claude-code", "warn");
+        }
+        // The extension updates via git/store, but the native host runs from a
+        // copy in ~/.lizard-studio that only install.sh refreshes — so a stale
+        // host is easy to end up with and otherwise fails silently (missing
+        // tools, unknown ops). Hosts older than the version check don't send
+        // `version` at all, which reads as 0 and also triggers the warning.
+        if ((msg.version || 0) < EXPECTED_HOST_VERSION) {
+          const a = chats.get(activeId);
+          if (a) systemNote(a, "The native host is outdated for this extension version — some features won't work. Update it, then reload the extension:  curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash", "warn");
         }
         // Start whichever tab is in front; others start when first shown.
         {

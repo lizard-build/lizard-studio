@@ -33,7 +33,7 @@
 //     message?, updatedPermissions?, interrupt? }                 behavior "allow" | "deny"
 //
 // Protocol — host -> panel:
-//   { type:"ready",   home, claudePath, ok }                   sent once on connect (no id)
+//   { type:"ready",   version, home, claudePath, ok }          sent once on connect (no id)
 //   { type:"started", id, pid, cwd, model, effort, permissionMode }
 //   { type:"event",   id, data }                               one claude stream-json object
 //   { type:"exit",    id, code }
@@ -83,6 +83,13 @@ process.on("uncaughtException", (err) => {
 process.on("unhandledRejection", (reason) => {
   log("UNHANDLED_REJECTION", String(reason));
 });
+
+// Host protocol version, reported to the panel in the `ready` message. The
+// panel compares it against the version it expects and tells the user to
+// re-run install.sh when the runtime copy in ~/.lizard-studio is stale (the
+// extension updates via git/store, but the host copy only via install.sh).
+// Bump this on EVERY host change the extension needs to know about.
+const HOST_VERSION = 2;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -992,4 +999,4 @@ process.on("SIGTERM", () => shutdown(0));
 process.on("SIGINT", () => shutdown(0));
 
 // Announce ourselves so the panel can leave its onboarding screen.
-send({ type: "ready", home: homedir(), claudePath: CLAUDE, ok: existsSync(CLAUDE) || CLAUDE === "claude" });
+send({ type: "ready", version: HOST_VERSION, home: homedir(), claudePath: CLAUDE, ok: existsSync(CLAUDE) || CLAUDE === "claude" });
