@@ -12,6 +12,8 @@
 // No dependencies — Node built-ins only, 100% local.
 
 import net from "node:net";
+import { readFileSync, statSync } from "node:fs";
+import { basename } from "node:path";
 
 const PORT = parseInt(process.env.RK_BRIDGE_PORT || "0", 10);
 const SESSION = process.env.RK_BRIDGE_SESSION || "default";
@@ -190,6 +192,22 @@ const TOOLS = [
     },
   },
   {
+    name: "browser_upload_file",
+    description:
+      "Attach a local file to a file input or drop zone on a page (active tab unless tabId is given) — the programmatic equivalent of the user picking it in the OS file dialog. Reads the file from disk, so `path` must be absolute. Target the file input by `selector` (CSS); omit it when the page has exactly one <input type=file> (it's auto-picked, including hidden ones behind styled buttons). If the selector matches a non-input element, the file is delivered as a synthetic drag-and-drop onto it instead. Fires the same input/change (or drop) events a real user would, so framework listeners see it. Max 25 MB.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Absolute path of the file on disk" },
+        selector: { type: "string", description: "CSS selector of the <input type=file> or drop zone. Omit to auto-pick the page's only file input." },
+        mimeType: { type: "string", description: "Override the MIME type (default: guessed from the file extension)" },
+        tabId: TAB_ID,
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "browser_key",
     description: 'Press a key or chord in a tab (active tab unless tabId is given), e.g. "Enter", "Escape", "Tab", "ArrowDown", "Control+a", "Meta+c".',
     inputSchema: {
@@ -345,6 +363,15 @@ async function handle(m) {
     case "tools/call": {
       const name = (params && params.name) || "";
       const args = (params && params.arguments) || {};
+      if (name === "browser_upload_file") {
+        const res = await uploadFile(args);
+        if (!res || res.ok === false) {
+          reply(id, { content: [{ type: "text", text: "Error: " + ((res && res.error) || "upload failed") }], isError: true });
+        } else {
+          reply(id, toolResult(name, res.data));
+        }
+        break;
+      }
       const op = name.replace(/^browser_/, "");
       const res = await callHost(op, args);
       if (!res || res.ok === false) {
@@ -357,6 +384,59 @@ async function handle(m) {
     default:
       if (id !== undefined && id !== null) replyErr(id, -32601, "Method not found: " + method);
   }
+}
+
+// ---- file upload ------------------------------------------------------------
+// The native-messaging hop caps a single message at ~900 KB, so the file is
+// read here (this relay runs on the user's machine with normal fs access),
+// base64'd and streamed to the extension in chunks: upload_begin reserves a
+// buffer, upload_chunk appends, upload_commit injects it into the page.
+const UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
+const UPLOAD_CHUNK_CHARS = 600 * 1024; // base64 chars per native message
+
+const MIME_BY_EXT = {
+  pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+  gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", txt: "text/plain",
+  md: "text/markdown", csv: "text/csv", json: "application/json", xml: "application/xml",
+  html: "text/html", zip: "application/zip", mp4: "video/mp4", mp3: "audio/mpeg",
+  wav: "audio/wav", doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+};
+function guessMime(name) {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  return MIME_BY_EXT[ext] || "application/octet-stream";
+}
+
+async function uploadFile(args) {
+  const path = String(args.path || "");
+  let buf;
+  try {
+    const st = statSync(path);
+    if (!st.isFile()) return { ok: false, error: "Not a file: " + path };
+    if (st.size > UPLOAD_MAX_BYTES) return { ok: false, error: `File is ${st.size} bytes — over the 25 MB upload limit.` };
+    buf = readFileSync(path);
+  } catch (e) {
+    return { ok: false, error: "Can't read " + path + ": " + ((e && e.message) || e) };
+  }
+  const name = basename(path);
+  const mime = String(args.mimeType || "") || guessMime(name);
+  const b64 = buf.toString("base64");
+
+  const begin = await callHost("upload_begin", { name, mime, size: buf.length });
+  if (!begin || begin.ok === false) return begin || { ok: false, error: "upload_begin failed" };
+  const uploadId = begin.data && begin.data.uploadId;
+  if (!uploadId) return { ok: false, error: "upload_begin returned no uploadId" };
+
+  for (let off = 0; off < b64.length; off += UPLOAD_CHUNK_CHARS) {
+    const chunk = await callHost("upload_chunk", { uploadId, data: b64.slice(off, off + UPLOAD_CHUNK_CHARS) });
+    if (!chunk || chunk.ok === false) return chunk || { ok: false, error: "upload_chunk failed" };
+  }
+
+  return callHost("upload_commit", { uploadId, selector: args.selector, tabId: args.tabId });
 }
 
 function toolResult(name, data) {

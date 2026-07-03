@@ -62,6 +62,74 @@
     return true;
   });
 
+  // ---- programmatic file upload -------------------------------------------
+  // browser_upload_file: the panel hands us the file (name/mime/base64) and a
+  // target. Setting `.value` on a file input is forbidden, but assigning a
+  // FileList built from a DataTransfer is allowed — the page sees exactly what
+  // it would after a real OS file-picker choice. Non-input targets get the
+  // file as a synthetic drag-and-drop instead (covers styled drop zones).
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (!msg || msg.type !== "RK_UPLOAD_FILE") return;
+    try {
+      const bin = atob(msg.b64 || "");
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const file = new File([bytes], msg.name || "file", { type: msg.mime || "application/octet-stream" });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+
+      let target;
+      if (msg.selector) {
+        target = document.querySelector(msg.selector);
+        if (!target) {
+          sendResponse({ ok: false, error: "No element matched selector: " + msg.selector });
+          return true;
+        }
+      } else {
+        const inputs = document.querySelectorAll('input[type="file"]');
+        if (inputs.length !== 1) {
+          sendResponse({
+            ok: false,
+            error: inputs.length
+              ? inputs.length + " file inputs on the page — pass a selector to pick one."
+              : "No <input type=file> found — pass a selector for the input or drop zone.",
+          });
+          return true;
+        }
+        target = inputs[0];
+      }
+
+      const desc = target.tagName.toLowerCase() + (target.id ? "#" + target.id : "");
+      if (target instanceof HTMLInputElement && target.type === "file") {
+        if (target.disabled) {
+          sendResponse({ ok: false, error: "The file input is disabled." });
+          return true;
+        }
+        target.files = dt.files;
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+        target.dispatchEvent(new Event("change", { bubbles: true }));
+        sendResponse({ ok: true, via: "input", target: desc });
+      } else {
+        const rect = target.getBoundingClientRect();
+        const opts = {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          clientX: rect.left + rect.width / 2,
+          clientY: rect.top + rect.height / 2,
+          dataTransfer: dt,
+        };
+        target.dispatchEvent(new DragEvent("dragenter", opts));
+        target.dispatchEvent(new DragEvent("dragover", opts));
+        target.dispatchEvent(new DragEvent("drop", opts));
+        sendResponse({ ok: true, via: "drop", target: desc });
+      }
+    } catch (e) {
+      sendResponse({ ok: false, error: String((e && e.message) || e) });
+    }
+    return true;
+  });
+
   // ---- persistence -------------------------------------------------------
   // Tool *state* (which tools are active, their settings, guides) stays in-memory
   // only and page-scoped: every page load starts clean. The single exception is

@@ -2754,6 +2754,16 @@
   // Passing an explicit tabId always re-pins to that tab.
   const pinnedTabBySession = new Map(); // session -> tabId
   let cdpListening = false;
+  // In-flight file uploads (browser_upload_file): the MCP relay streams the
+  // base64 payload in ~600 KB ops (native messaging caps one message at ~1 MB),
+  // reassembled here and handed to the content script on commit.
+  const uploads = new Map(); // uploadId -> { name, mime, size, parts, ts }
+  let nextUploadId = 1;
+  const UPLOAD_TTL_MS = 2 * 60 * 1000;
+  function gcUploads() {
+    const now = Date.now();
+    for (const [id, u] of uploads) if (now - u.ts > UPLOAD_TTL_MS) uploads.delete(id);
+  }
 
   function activeTab() {
     return new Promise((resolve) => {
@@ -2947,6 +2957,21 @@
         return done(true, { tabId: t.id, windowId: t.windowId, url });
       }
 
+      // File-upload staging (no tab needed until commit).
+      if (op === "upload_begin") {
+        gcUploads();
+        const uploadId = "u" + nextUploadId++;
+        uploads.set(uploadId, { name: String(args.name || "file"), mime: String(args.mime || "application/octet-stream"), size: args.size || 0, parts: [], ts: Date.now() });
+        return done(true, { uploadId });
+      }
+      if (op === "upload_chunk") {
+        const u = uploads.get(args.uploadId);
+        if (!u) return done(false, null, "Unknown or expired uploadId — start over with a new browser_upload_file call.");
+        u.parts.push(String(args.data || ""));
+        u.ts = Date.now();
+        return done(true, { received: u.parts.length });
+      }
+
       // Everything below targets one tab. An explicit tabId always wins and
       // (re-)pins this Claude session to it. Otherwise reuse the tab this
       // session already pinned; only fall back to (and pin) the live active
@@ -2991,6 +3016,23 @@
         }
         if (op === "info") return done(true, { url: resp.url, title: resp.title, selection: resp.selection || "" });
         return done(true, { url: resp.url, title: resp.title, format, content: format === "html" ? resp.html : resp.text, truncated: !!resp.truncated });
+      }
+
+      if (op === "upload_commit") {
+        const u = uploads.get(args.uploadId);
+        if (!u) return done(false, null, "Unknown or expired uploadId — start over with a new browser_upload_file call.");
+        uploads.delete(args.uploadId);
+        const resp = await sendToTab(tab.id, {
+          type: "RK_UPLOAD_FILE",
+          selector: args.selector || null,
+          name: u.name,
+          mime: u.mime,
+          b64: u.parts.join(""),
+        });
+        if (!resp || !resp.ok) {
+          return done(false, null, (resp && resp.error) || "Couldn't reach this tab — open a normal web page (chrome:// and the Web Store are off-limits) and reload it so the helper is present.");
+        }
+        return done(true, { attached: u.name, size: u.size, mime: u.mime, via: resp.via, target: resp.target });
       }
 
       if (op === "screenshot") {

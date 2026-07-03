@@ -301,7 +301,7 @@ const BROWSER_HINT =
   "browser_tab_activate brings a tab to the front for the user; browser_tab_open / browser_tab_close open and close tabs. " +
   "Read/observe: browser_info (url/title/selection — cheap, call first), browser_dom (visible text or HTML, optional CSS selector), browser_snapshot (accessibility tree with stable @refs — the best way to understand a page before acting), " +
   "browser_eval (run JS and read anything — DOM, app state, localStorage, fetch), browser_console (recent logs + exceptions), browser_network (recent requests), browser_screenshot. " +
-  "Act: browser_click, browser_type, browser_fill, browser_key, browser_navigate, browser_reload. " +
+  "Act: browser_click, browser_type, browser_fill, browser_key, browser_navigate, browser_reload, browser_upload_file (attach a local file to a page's file input or drop zone by absolute path — no need to click the input or deal with the OS file dialog). " +
   "Prefer browser_snapshot to get @refs, then target clicks/typing/fills by ref rather than guessing selectors. " +
   "Every user message may be preceded by a short '[Open browser tabs]' block auto-listing currently open tabs (title + URL), with a leading → marking the one the user is actively viewing — that's environment context the extension injected, not something the user typed. " +
   "It only has title/URL, so when the user refers to \"this page\", \"the open tab\", what they're \"looking at\", or asks you to debug or drive a live site, still call browser_info / browser_dom / browser_snapshot (targeting that tabId if it's not the active one) instead of guessing from the title alone. " +
