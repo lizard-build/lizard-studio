@@ -1036,6 +1036,75 @@ code.inline {
 .perm-opt.selected .perm-num { color: var(--text-secondary); }
 .perm-opt-label { min-width: 0; }
 
+/* AskUserQuestion — same card, but the content is the question itself: an
+   optional header chip, the question text, options with descriptions, a
+   free-text "Other" row, and (multi-select) toggled checkmarks. */
+.ask-step {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.ask-tag {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 1px 8px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 999px;
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+}
+.ask-question {
+  margin: 8px 0 10px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+}
+.ask-opt { align-items: baseline; }
+.ask-opt-title { display: block; }
+.ask-opt-desc {
+  display: block;
+  margin-top: 1px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-tertiary);
+}
+.ask-opt.selected .ask-opt-desc { color: var(--text-secondary); }
+.ask-check {
+  flex: 0 0 auto;
+  display: inline-flex;
+  margin-left: auto;
+  align-self: center;
+  color: var(--control-primary);
+  opacity: 0;
+}
+.ask-opt.checked .ask-check { opacity: 1; }
+.ask-other { margin-top: 8px; }
+.ask-other.hidden { display: none; }
+.ask-other-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 7px;
+  padding: 6px 9px;
+  font-family: var(--font-family);
+  font-size: 12.5px;
+  color: var(--text-primary);
+  outline: none;
+}
+.ask-other-input:focus { border-color: var(--border-secondary); box-shadow: 0 0 0 1px var(--border-secondary); }
+.ask-other-input::placeholder { color: var(--text-tertiary); }
+.ask-hint {
+  margin-top: 8px;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+
 /* thinking */
 .thinking {
   margin: 4px 0 8px;

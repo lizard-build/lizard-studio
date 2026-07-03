@@ -30,7 +30,9 @@
 //   { type:"checkoutBranch", id, cwd, branch }                     git checkout <branch>
 //   { type:"browserResult", bid, ok, data?, error? }              reply to a `browser` request
 //   { type:"permissionResult", id, requestId, behavior,           answer a `permission` ask:
-//     message?, updatedPermissions?, interrupt? }                 behavior "allow" | "deny"
+//     message?, updatedPermissions?, interrupt?,                  behavior "allow" | "deny"
+//     updatedInput? }                                             merged over the original input
+//                                                                 (AskUserQuestion answers)
 //
 // Protocol — host -> panel:
 //   { type:"ready",   version, home, claudePath, ok }          sent once on connect (no id)
@@ -89,7 +91,7 @@ process.on("unhandledRejection", (reason) => {
 // re-run install.sh when the runtime copy in ~/.lizard-studio is stale (the
 // extension updates via git/store, but the host copy only via install.sh).
 // Bump this on EVERY host change the extension needs to know about.
-const HOST_VERSION = 2;
+const HOST_VERSION = 3;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -943,7 +945,8 @@ function handle(msg) {
       // The user answered a `permission` ask — relay it to claude as the
       // control_response it's blocked on. On allow, updatedInput must be the
       // ORIGINAL input we stashed (the panel's copy may have been truncated
-      // for the native-messaging size cap).
+      // for the native-messaging size cap); anything the panel adds on top
+      // (AskUserQuestion's `answers`) is merged over it.
       const s = sessions.get(id);
       if (!s || !s.child || !s.child.stdin.writable) break;
       const input = s.permPending.get(msg.requestId) || {};
@@ -952,7 +955,7 @@ function handle(msg) {
         msg.behavior === "allow"
           ? {
               behavior: "allow",
-              updatedInput: input,
+              updatedInput: msg.updatedInput && typeof msg.updatedInput === "object" ? { ...input, ...msg.updatedInput } : input,
               ...(Array.isArray(msg.updatedPermissions) && msg.updatedPermissions.length
                 ? { updatedPermissions: msg.updatedPermissions }
                 : {}),

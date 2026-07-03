@@ -90,13 +90,14 @@
     WebSearch: { icon: "search", label: "Search" },
     TodoWrite: { icon: "todo", label: "Plan" },
     ToolSearch: { icon: "search", label: "Search tools" },
+    AskUserQuestion: { icon: "chat", label: "Question" },
   };
 
   const DEFAULT_TITLE = "New chat";
 
   // Minimum native-host protocol version this panel needs (the host reports
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
-  const EXPECTED_HOST_VERSION = 2;
+  const EXPECTED_HOST_VERSION = 3;
 
   let els = {};
   let port = null;
@@ -1193,6 +1194,10 @@
         return input.url || input.query || "";
       case "Task":
         return input.description || "";
+      case "AskUserQuestion": {
+        const q = Array.isArray(input.questions) && input.questions[0];
+        return (q && q.question) || "";
+      }
       default: {
         const s = JSON.stringify(input);
         return s.length > 100 ? s.slice(0, 100) + "…" : s;
@@ -1378,6 +1383,13 @@
     const toolName = msg.toolName || "";
     const input = msg.input || {};
 
+    // AskUserQuestion isn't a permission — the dialog IS the tool. Render the
+    // question with its options instead of "Do you want to proceed?".
+    if (toolName === "AskUserQuestion" && Array.isArray(input.questions) && input.questions.some((q) => q && q.question)) {
+      showQuestionAsk(chat, msg);
+      return;
+    }
+
     const card = el("div", "perm-card");
     card.tabIndex = 0;
 
@@ -1462,6 +1474,210 @@
     const next = chat.permCards.values().next().value;
     if (next && chat.id === activeId) next.card.focus();
     else if (!opt.allow && els.input) els.input.focus();
+  }
+
+  // ---- AskUserQuestion ------------------------------------------------------
+  // The CLI routes AskUserQuestion through the same can_use_tool channel, but
+  // the expected answer is the user's choice, not a yes/no: allow with
+  // updatedInput.answers = { "<question text>": "<chosen label>" } — the shape
+  // Claude Code's own picker returns (multi-select labels joined with ", ",
+  // "Other" free text passed through verbatim). Questions (up to 4) are shown
+  // one at a time; Esc dismisses the whole ask like the "No" option.
+  function showQuestionAsk(chat, msg) {
+    const requestId = msg.requestId;
+    const questions = msg.input.questions.filter((q) => q && q.question).slice(0, 4);
+    const answers = {};
+    let qi = 0;
+
+    const card = el("div", "perm-card ask-card");
+    card.tabIndex = 0;
+    const entry = { card, selected: 0, rows: [] };
+
+    const title = el("div", "perm-title");
+    const ic = el("span", "perm-title-ic");
+    ic.innerHTML = ICON("chat", 14);
+    title.appendChild(ic);
+    title.appendChild(el("span", null, "Claude is asking"));
+    const step = el("span", "ask-step");
+    title.appendChild(step);
+    card.appendChild(title);
+
+    const body = el("div", "ask-body");
+    card.appendChild(body);
+    const hint = el("div", "ask-hint");
+    card.appendChild(hint);
+
+    function finish(out) {
+      chat.permCards.delete(requestId);
+      card.remove();
+      post(out);
+      const next = chat.permCards.values().next().value;
+      if (next && chat.id === activeId) next.card.focus();
+      else if (els.input) els.input.focus();
+    }
+
+    function dismiss() {
+      finish({ type: "permissionResult", id: chat.id, requestId, behavior: "deny", message: PERM_DENY_MESSAGE, interrupt: true });
+    }
+
+    function record(q, value) {
+      answers[q.question] = value;
+      if (qi + 1 < questions.length) {
+        qi++;
+        renderQuestion();
+        card.focus();
+      } else {
+        // The host merges updatedInput over the original input it stashed, so
+        // only the answers travel — never a truncated copy of the questions.
+        finish({ type: "permissionResult", id: chat.id, requestId, behavior: "allow", updatedInput: { answers } });
+      }
+    }
+
+    function renderQuestion() {
+      const q = questions[qi];
+      const multi = !!q.multiSelect;
+      const options = Array.isArray(q.options) ? q.options.filter((o) => o && o.label) : [];
+      const chosen = new Set();
+      body.textContent = "";
+      entry.rows = [];
+      entry.selected = 0;
+      step.textContent = questions.length > 1 ? `${qi + 1} of ${questions.length}` : "";
+      if (q.header) body.appendChild(el("div", "ask-tag", q.header));
+      body.appendChild(el("div", "ask-question", q.question));
+
+      const list = el("div", "perm-opts");
+      const rows = [];
+
+      const otherWrap = el("div", "ask-other hidden");
+      const otherInput = el("input", "ask-other-input");
+      otherInput.type = "text";
+      otherInput.placeholder = multi ? "Add your own answer…" : "Type your answer…";
+      otherWrap.appendChild(otherInput);
+
+      function confirmMulti() {
+        const picked = options.filter((_, i) => chosen.has(i)).map((o) => o.label);
+        const extra = otherInput.value.trim();
+        if (extra) picked.push(extra);
+        if (picked.length) record(q, picked.join(", "));
+      }
+
+      function activate(i) {
+        if (i < options.length) {
+          if (multi) {
+            if (chosen.has(i)) chosen.delete(i);
+            else chosen.add(i);
+            rows[i].classList.toggle("checked", chosen.has(i));
+          } else {
+            record(q, options[i].label);
+          }
+        } else {
+          otherWrap.classList.remove("hidden");
+          otherInput.focus();
+        }
+      }
+      entry.activate = activate;
+      entry.confirm = multi ? confirmMulti : null;
+
+      options.forEach((opt, i) => {
+        const row = el("button", "perm-opt ask-opt");
+        row.type = "button";
+        row.appendChild(el("span", "perm-caret", "❯"));
+        row.appendChild(el("span", "perm-num", i + 1 + "."));
+        const txt = el("span", "perm-opt-label");
+        txt.appendChild(el("span", "ask-opt-title", opt.label));
+        if (opt.description) txt.appendChild(el("span", "ask-opt-desc", opt.description));
+        row.appendChild(txt);
+        if (multi) {
+          const check = el("span", "ask-check");
+          check.innerHTML = ICON("check", 12);
+          row.appendChild(check);
+        }
+        row.addEventListener("mouseenter", () => {
+          entry.selected = i;
+          paintPerm(entry);
+        });
+        row.addEventListener("click", () => activate(i));
+        list.appendChild(row);
+        rows.push(row);
+        entry.rows.push(row);
+      });
+
+      // Trailing free-text row — AskUserQuestion always offers "Other".
+      const otherRow = el("button", "perm-opt ask-opt");
+      otherRow.type = "button";
+      otherRow.appendChild(el("span", "perm-caret", "❯"));
+      otherRow.appendChild(el("span", "perm-num", options.length + 1 + "."));
+      otherRow.appendChild(el("span", "perm-opt-label", "Other…"));
+      otherRow.addEventListener("mouseenter", () => {
+        entry.selected = options.length;
+        paintPerm(entry);
+      });
+      otherRow.addEventListener("click", () => activate(options.length));
+      list.appendChild(otherRow);
+      entry.rows.push(otherRow);
+
+      body.appendChild(list);
+      body.appendChild(otherWrap);
+
+      otherInput.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          if (multi) confirmMulti();
+          else {
+            const v = otherInput.value.trim();
+            if (v) record(q, v);
+          }
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          otherWrap.classList.add("hidden");
+          otherInput.value = "";
+          card.focus();
+        }
+      });
+
+      entry.hasChosen = () => chosen.size > 0 || !!otherInput.value.trim();
+      hint.textContent = multi
+        ? "click or 1-9 toggles · enter confirms · esc dismisses"
+        : "1-9 / ↑↓ + enter selects · esc dismisses";
+      paintPerm(entry);
+    }
+
+    card.addEventListener("keydown", (e) => {
+      const n = entry.rows.length;
+      if (!n) return;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        entry.selected = (entry.selected + (e.key === "ArrowDown" ? 1 : n - 1)) % n;
+        paintPerm(entry);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        // Multi-select: Enter confirms once something is picked; before that
+        // (or on the "Other" row) it acts on the highlighted row.
+        if (entry.confirm && entry.selected < n - 1 && entry.hasChosen()) entry.confirm();
+        else entry.activate(entry.selected);
+      } else if (e.key === " " && entry.confirm) {
+        e.preventDefault();
+        if (entry.selected < n - 1) entry.activate(entry.selected);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        dismiss();
+      } else if (/^[1-9]$/.test(e.key)) {
+        const i = Number(e.key) - 1;
+        if (i < n) {
+          e.preventDefault();
+          entry.activate(i);
+        }
+      }
+    });
+
+    chat.permCards.set(requestId, entry);
+    renderQuestion();
+    append(chat, card);
+    if (chat.id === activeId) {
+      scrollToBottom(chat);
+      if (!els.input || !els.input.value.trim()) card.focus();
+    }
   }
 
   function removePermCard(chat, requestId) {
