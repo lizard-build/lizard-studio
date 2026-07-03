@@ -275,6 +275,10 @@
       branches: [],
       // Pending permission asks (can_use_tool): requestId -> { card, opts, … }.
       permCards: new Map(),
+      // Set right before sending a bare "/usage" (or "/usage-credits" /
+      // "/extra-usage") command; consumed by the next assistant text block to
+      // render a progress-bar card instead of the raw CLI text.
+      pendingUsageCard: false,
     };
   }
 
@@ -337,14 +341,56 @@
     savePrefs();
   }
 
+  // ---- tab hover tooltip ------------------------------------------------
+  // A single shared tooltip node, positioned under whichever tab is hovered.
+  // Native `title` only shows the (often truncated) label after a long delay,
+  // so this surfaces the full title + folder + branch right below the tab.
+  let tabTip = null, tabTipTimer = null;
+  function ensureTabTip() {
+    if (tabTip) return tabTip;
+    tabTip = el("div", "chat-tab-tip");
+    document.body.appendChild(tabTip);
+    return tabTip;
+  }
+  function showTabTip(tabEl, chat) {
+    clearTimeout(tabTipTimer);
+    tabTipTimer = setTimeout(() => {
+      const tip = ensureTabTip();
+      tip.innerHTML = "";
+      tip.appendChild(el("div", "chat-tab-tip-title", chat.title));
+      const folderRow = el("div", "chat-tab-tip-row");
+      folderRow.innerHTML = ICON("folder", 12);
+      folderRow.appendChild(document.createTextNode(shortPath(chat.cwd) || "No folder selected"));
+      tip.appendChild(folderRow);
+      if (chat.isRepo && chat.branch) {
+        const branchRow = el("div", "chat-tab-tip-row");
+        branchRow.innerHTML = ICON("git-branch", 11);
+        branchRow.appendChild(document.createTextNode(chat.branch));
+        tip.appendChild(branchRow);
+      }
+      tip.classList.add("show");
+      const r = tabEl.getBoundingClientRect();
+      tip.style.top = r.bottom + 6 + "px";
+      let left = r.left;
+      const maxLeft = window.innerWidth - tip.offsetWidth - 8;
+      tip.style.left = Math.max(8, Math.min(left, maxLeft)) + "px";
+    }, 350);
+  }
+  function hideTabTip() {
+    clearTimeout(tabTipTimer);
+    if (tabTip) tabTip.classList.remove("show");
+  }
+
   // ---- tab bar --------------------------------------------------------------
   function renderTabs() {
+    hideTabTip();
     els.tabs.innerHTML = "";
     for (const id of order) {
       const chat = chats.get(id);
       const tab = el("button", "chat-tab" + (id === activeId ? " active" : ""));
-      tab.title = chat.title;
       tab.dataset.tabId = id;
+      tab.addEventListener("mouseenter", () => showTabTip(tab, chat));
+      tab.addEventListener("mouseleave", hideTabTip);
       tab.appendChild(el("span", "tab-label", chat.title));
       const close = el("span", "tab-close");
       close.innerHTML = ICON("x", 12);
@@ -367,6 +413,7 @@
       });
       tab.addEventListener("mousedown", (e) => {
         if (e.button !== 0 || e.target.closest(".tab-close")) return;
+        hideTabTip();
         const startX = e.clientX;
         let dragging = false;
 
@@ -857,7 +904,63 @@
     return;
   }
 
+  // ---- /usage card ------------------------------------------------------
+  // `/usage` (and its siblings) come back from the CLI as a synthetic,
+  // zero-turn plain-text reply shaped like:
+  //   "Current session: 52% used · resets Jul 3 at 2:20am (Asia/Dubai)
+  //    Current week (all models): 16% used · resets Jul 7 at 8pm (Asia/Dubai)"
+  // Parsed generically (label / percent / reset clause) so it also covers
+  // usage-credits, extra-usage, and any other plan-line shape the CLI adds.
+  const USAGE_LINE_RE = /^(.+?):\s*(\d{1,3})%\s*used(?:\s*·\s*resets\s*(.+))?$/i;
+  function parseUsageText(text) {
+    if (!text) return null;
+    const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+    const rows = [];
+    let intro = "";
+    for (const line of lines) {
+      const m = USAGE_LINE_RE.exec(line);
+      if (m) {
+        // Drop the trailing "(Asia/Dubai)"-style zone — it's implicitly the
+        // user's own timezone and just adds noise repeated on every row.
+        const resets = (m[3] || "").trim().replace(/\s*\([^)]*\)\s*$/, "");
+        rows.push({ label: m[1].trim(), pct: Math.max(0, Math.min(100, parseInt(m[2], 10))), resets });
+      } else if (!rows.length) {
+        intro = intro ? intro + " " + line : line;
+      }
+    }
+    return rows.length ? { intro, rows } : null;
+  }
+  function buildUsageCard(parsed) {
+    const card = el("div", "usage-card");
+    card.appendChild(el("div", "usage-card-head", "Plan usage"));
+    for (const row of parsed.rows) {
+      const r = el("div", "usage-row");
+      const top = el("div", "usage-row-top");
+      top.appendChild(el("span", "usage-row-label", row.label));
+      top.appendChild(el("span", "usage-row-pct", row.pct + "%"));
+      r.appendChild(top);
+      const bar = el("div", "usage-bar");
+      const fill = el("div", "usage-bar-fill");
+      fill.style.width = row.pct + "%";
+      bar.appendChild(fill);
+      r.appendChild(bar);
+      if (row.resets) r.appendChild(el("div", "usage-row-resets", "Resets " + row.resets));
+      card.appendChild(r);
+    }
+    if (parsed.intro) card.appendChild(el("div", "usage-card-caption", parsed.intro));
+    return card;
+  }
+
   function addText(chat, body, text) {
+    if (chat.pendingUsageCard) {
+      chat.pendingUsageCard = false;
+      const parsed = parseUsageText(text);
+      if (parsed) {
+        body.appendChild(buildUsageCard(parsed));
+        if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+        return;
+      }
+    }
     body.appendChild(R.markdown(text));
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
   }
@@ -915,8 +1018,12 @@
   }
 
   // Attach the copy + time footer once an assistant message is complete. No-op
-  // for tool-only messages (no prose to copy) or if a footer is already present.
-  function finalizeAssistant(body, ts) {
+  // for tool-only messages (no prose to copy), if a footer is already present,
+  // or if the turn is still running — a turn can span several assistant
+  // messages (interleaved with tool calls), and the footer should only land
+  // once the whole reply is done, not after each intermediate message.
+  function finalizeAssistant(chat, body, ts) {
+    if (chat && chat.turnRunning) return;
     if (!body || body.dataset.footered) return;
     if (!assistantProse(body)) return;
     body.dataset.footered = "1";
@@ -1019,7 +1126,7 @@
         chat.turnTokens += chat.curMsgTokens;
         chat.curMsgTokens = 0;
         chat.streamMsgId = null;
-        finalizeAssistant(chat.currentAssistantBody, Date.now());
+        finalizeAssistant(chat, chat.currentAssistantBody, Date.now());
         break;
       }
     }
@@ -1416,7 +1523,7 @@
             else if (block.type === "text") addText(chat, body, block.text);
           }
         }
-        if (!streamed) finalizeAssistant(body, Date.now());
+        if (!streamed) finalizeAssistant(chat, body, Date.now());
         break;
       }
       case "user": {
@@ -1441,6 +1548,7 @@
 
   function endTurn(chat, result) {
     chat.turnRunning = false;
+    finalizeAssistant(chat, chat.currentAssistantBody, Date.now());
     chat.currentAssistantId = null;
     chat.currentAssistantBody = null;
     // Finalize any dangling live blocks (e.g. an interrupted turn).
@@ -1769,7 +1877,7 @@
           }
         }
         const ts = ev.timestamp ? (Date.parse(ev.timestamp) || Date.now()) : Date.now();
-        finalizeAssistant(body, ts);
+        finalizeAssistant(null, body, ts);
       }
     }
     // Leave currentAssistantId pointing at the last replayed turn so a turn that
@@ -1857,6 +1965,9 @@
           : "What can you tell me about this element?"
       : "";
     const bubbleHint = hasPage ? "_(attached current tab)_" : hasFile ? "_(attached file)_" : "_(selected page element)_";
+    // The CLI answers a bare /usage (or /usage-credits, /extra-usage) with a
+    // synthetic, zero-turn plain-text reply — swap it for a progress-bar card.
+    chat.pendingUsageCard = /^\/(usage|usage-credits|extra-usage)\s*$/.test(text);
     // Slash commands (built-ins like /usage, or skills) only get recognized by
     // the CLI when the message starts with "/name" — prepending the tabs/context
     // blocks before it turns it into plain text the model has to interpret

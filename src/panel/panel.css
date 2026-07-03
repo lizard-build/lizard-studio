@@ -157,6 +157,47 @@ body {
 .chat-tab.active .tab-close { opacity: 1; }
 .chat-tab .tab-close:hover { background: rgba(255, 255, 255, 0.1); color: var(--text-primary); }
 
+.chat-tab-tip {
+  position: fixed;
+  z-index: 300;
+  pointer-events: none;
+  max-width: 280px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  padding: 7px 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transform: translateY(-3px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+.chat-tab-tip.show { opacity: 1; transform: translateY(0); }
+.chat-tab-tip-title {
+  font-family: var(--font-family);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-tab-tip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-family: var(--font-family);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-tab-tip-row svg {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+}
+
 /* ---- Tabs subbar (tabs + new chat / history) ---- */
 .chat-subbar {
   display: flex;
@@ -617,13 +658,14 @@ body {
    assistant reply. The row always reserves its space (so the cursor can land
    directly on the copy button), but stays invisible and non-interactive until
    the message is hovered — no dead zone where the button isn't there yet.
-   Negative margin-left cancels the copy button's internal centering so its icon
-   sits flush with the text's left edge. */
+   The copy button keeps a 24px hit/hover box for a comfortable click target,
+   but left-aligns its icon inside that box (rather than centering + correcting
+   with a magic negative margin) so the icon's own edge sits flush with the
+   text's left edge regardless of icon size. */
 .msg-footer {
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: -6px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.12s;
@@ -636,9 +678,10 @@ body {
   appearance: none;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   width: 24px;
   height: 24px;
+  padding: 0;
   flex: 0 0 auto;
   border: none;
   background: transparent;
@@ -674,6 +717,62 @@ body {
 .sys-note.warn {
   color: #fbbf24;
   background: rgba(245, 158, 11, 0.12);
+}
+
+/* ---- /usage card ---- */
+.usage-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.usage-card-head {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.usage-row { display: flex; flex-direction: column; gap: 6px; }
+.usage-row-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.usage-row-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.usage-row-pct {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+}
+.usage-bar {
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.usage-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--other-blue);
+}
+.usage-row-resets {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+.usage-card-caption {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  line-height: 1.4;
 }
 
 /* markdown */
@@ -1043,7 +1142,7 @@ code.inline {
   font-size: 12px;
   line-height: 1.5;
 }
-.diff span { display: block; padding: 0 10px; white-space: pre; }
+.diff > span { display: block; padding: 0 10px; white-space: pre; }
 .diff .diff-add { background: rgba(16, 185, 129, 0.12); color: #b9f6ca; }
 .diff .diff-del { background: rgba(239, 68, 68, 0.12); color: #ffcdd2; }
 .diff .diff-ctx { color: var(--text-secondary); }
@@ -1131,7 +1230,7 @@ code.inline {
 }
 .slash-item.active { background: rgba(255, 255, 255, 0.06); }
 .slash-cmd {
-  font-family: var(--font-mono);
+  font-family: var(--font-family);
   font-size: 12.5px;
   color: var(--text-primary);
 }
