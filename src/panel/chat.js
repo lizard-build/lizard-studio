@@ -1073,24 +1073,70 @@
     }
   }
 
-  // One shared timer keeps every relative timestamp fresh — no per-node interval.
-  setInterval(() => {
-    document.querySelectorAll(".msg-time").forEach((node) => {
-      const ts = Number(node.dataset.ts);
-      if (ts) node.textContent = relTime(ts);
-    });
-  }, 20000);
+  // Timestamps are only visible on hover and refresh on mouseenter (see
+  // finalizeAssistant) — no global timer scanning every transcript needed.
 
   // ---- live streaming (--include-partial-messages) --------------------------
-  // Coalesce markdown re-renders to one per animation frame so a fast token
-  // stream doesn't re-parse the whole buffer on every delta.
+  // Coalesce markdown re-renders to one per animation frame, and re-parse only
+  // the *unfinished tail* of the buffer: completed top-level blocks are parsed
+  // once and frozen into the DOM. Re-rendering the whole buffer every frame
+  // made a long streamed reply cost O(length²) overall and visibly janked
+  // near the end of big messages.
   function flushStreamBlock(chat, blk) {
     if (blk.raf) return;
     blk.raf = requestAnimationFrame(() => {
       blk.raf = 0;
-      blk.el.replaceChildren(R.markdown(blk.buf));
+      if (!blk.md) {
+        // One shared .md container so CSS (first/last-child margins, the
+        // streaming caret) sees the same shape a one-shot render produces.
+        blk.md = el("div", "md");
+        blk.live = el("div"); // classless wrapper holding the re-rendered tail
+        blk.md.appendChild(blk.live);
+        blk.el.replaceChildren(blk.md);
+      }
+      advanceStreamScan(blk);
+      if (blk.safe > blk.stable) {
+        const done = R.markdown(blk.buf.slice(blk.stable, blk.safe));
+        while (done.firstChild) blk.md.insertBefore(done.firstChild, blk.live);
+        blk.stable = blk.safe;
+      }
+      blk.live.replaceChildren(...R.markdown(blk.buf.slice(blk.stable)).childNodes);
       if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
     });
+  }
+
+  // Incremental scan for the last "safe" freeze offset in a stream block's
+  // buffer: a blank-line boundary outside any ``` fence that doesn't split a
+  // list continuing across blank lines (render.js keeps such a list open — a
+  // frozen half would restart an <ol>'s numbering). A boundary is committed
+  // only once the first complete line after the blank run is known. Every line
+  // is scanned once per stream, so scanning is O(length) total.
+  const STREAM_LIST_RE = /^(\s*)([-*]|\d+\.)\s+/;
+  function advanceStreamScan(blk) {
+    const buf = blk.buf;
+    let i = blk.scan;
+    for (;;) {
+      const nl = buf.indexOf("\n", i);
+      if (nl === -1) break;
+      const line = buf.slice(i, nl);
+      const t = line.trim();
+      if (blk.fenceOpen) {
+        if (/^```/.test(t)) { blk.fenceOpen = false; blk.prevList = false; }
+      } else if (!t) {
+        if (blk.cand === -1) blk.cand = i; // boundary at the blank run's start
+      } else {
+        const isFence = /^```/.test(t);
+        const isList = !isFence && STREAM_LIST_RE.test(line);
+        if (blk.cand !== -1) {
+          if (!(blk.prevList && isList)) blk.safe = blk.cand;
+          blk.cand = -1;
+        }
+        if (isFence) blk.fenceOpen = true;
+        blk.prevList = isList;
+      }
+      i = nl + 1;
+    }
+    blk.scan = i;
   }
 
   function handleStreamEvent(chat, ev) {
@@ -1118,7 +1164,11 @@
           closeToolGroup(chat);
           const node = el("div", "assistant-stream streaming");
           body.appendChild(node);
-          chat.streamBlocks.set(ev.index, { type: "text", el: node, buf: "", raf: 0 });
+          chat.streamBlocks.set(ev.index, {
+            type: "text", el: node, buf: "", raf: 0,
+            // incremental-render state (see flushStreamBlock/advanceStreamScan)
+            md: null, live: null, stable: 0, scan: 0, safe: 0, cand: -1, fenceOpen: false, prevList: false,
+          });
         } else if (cb.type === "thinking") {
           // Reasoning is not shown in the transcript. No DOM is created.
           chat.streamBlocks.set(ev.index, { type: "thinking", el: null, buf: "", raf: 0 });
