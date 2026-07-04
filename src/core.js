@@ -54,7 +54,7 @@
       const root = msg.selector ? document.querySelector(msg.selector) : null;
       if (msg.selector && !root) {
         sendResponse({ ok: false, error: "No element matched selector: " + msg.selector });
-        return true;
+        return; // sendResponse was called synchronously — no need to hold the channel open
       }
       const base = root || document.body || document.documentElement;
       const out = {
@@ -76,7 +76,7 @@
     } catch (e) {
       sendResponse({ ok: false, error: String((e && e.message) || e) });
     }
-    return true;
+    return; // sendResponse was called synchronously — no need to hold the channel open
   });
 
   // ---- programmatic file upload -------------------------------------------
@@ -100,7 +100,7 @@
         target = document.querySelector(msg.selector);
         if (!target) {
           sendResponse({ ok: false, error: "No element matched selector: " + msg.selector });
-          return true;
+          return; // sendResponse was called synchronously — no need to hold the channel open
         }
       } else {
         const inputs = document.querySelectorAll('input[type="file"]');
@@ -111,7 +111,7 @@
               ? inputs.length + " file inputs on the page — pass a selector to pick one."
               : "No <input type=file> found — pass a selector for the input or drop zone.",
           });
-          return true;
+          return; // sendResponse was called synchronously — no need to hold the channel open
         }
         target = inputs[0];
       }
@@ -120,7 +120,7 @@
       if (target instanceof HTMLInputElement && target.type === "file") {
         if (target.disabled) {
           sendResponse({ ok: false, error: "The file input is disabled." });
-          return true;
+          return; // sendResponse was called synchronously — no need to hold the channel open
         }
         target.files = dt.files;
         target.dispatchEvent(new Event("input", { bubbles: true }));
@@ -144,16 +144,14 @@
     } catch (e) {
       sendResponse({ ok: false, error: String((e && e.message) || e) });
     }
-    return true;
+    return; // sendResponse was called synchronously — no need to hold the channel open
   });
 
   // ---- persistence -------------------------------------------------------
-  // Tool *state* (which tools are active, their settings, guides) stays in-memory
-  // only and page-scoped: every page load starts clean. The single exception is
-  // the global accent color, which is a user preference — once chosen it is
-  // remembered across pages and sessions via chrome.storage.local.
-  RK.save = () => {};
-  RK.load = () => Promise.resolve(null);
+  // Tool *state* (which tools are active, their settings, guides) stays
+  // in-memory only and page-scoped: every page load starts clean. Only real
+  // user preferences persist — the accent color and the toolbar shell state
+  // below, via chrome.storage.local.
 
   const ACCENT_KEY = "rk.accent";
   let accentWrite = null;
@@ -316,14 +314,13 @@
   };
 
   // The element under the cursor on the *page*, skipping our own overlay host.
+  // The host is created with pointer-events:none and nothing changes it, so
+  // elementFromPoint already passes through it — no per-call style toggling
+  // (this runs on every hover frame; the write forced a style recalc).
   RK.elementAt = (x, y) => {
     const host = RK.overlay && RK.overlay.host;
-    if (!host) return document.elementFromPoint(x, y);
-    const prev = host.style.pointerEvents;
-    host.style.pointerEvents = "none";
     let el = document.elementFromPoint(x, y);
-    host.style.pointerEvents = prev;
-    if (el === host || (host.shadowRoot && host.contains(el))) el = null;
+    if (host && (el === host || host.contains(el))) el = null;
     return el;
   };
 
@@ -476,7 +473,6 @@
     try { t.enable && t.enable(); } catch (e) { console.error("[RK]", id, e); }
     finally { activationBag = null; }
     RK.emit("toolchange", { id, active: true });
-    RK.save();
   };
 
   RK.deactivate = (id) => {
@@ -488,7 +484,6 @@
     delete toolSubs[id];
     RK.clearLayer(id);
     RK.emit("toolchange", { id, active: false });
-    RK.save();
   };
 
   const BASE_CSS = `

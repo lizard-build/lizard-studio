@@ -132,7 +132,7 @@
     cfg.w = RK.clamp(Math.round(w), 80, 4000);
     cfg.h = RK.clamp(Math.round(h), 80, 4000);
     cfg.device = device;
-    syncInputs(); relayout(); RK.save();
+    syncInputs(); relayout();
   }
 
   function build() {
@@ -157,7 +157,7 @@
       oninput: (e) => setDims(s().w, Number(e.target.value) || cfg.h, "Responsive") });
 
     elZoom = select(cfg.zoom, ZOOMS.map((z) => ({ value: z, label: z === "fit" ? "Fit" : z + "%" })), (e) => {
-      s().zoom = e.target.value; relayout(); RK.save();
+      s().zoom = e.target.value; relayout();
     });
 
     const bar = RK.h("div", { class: "rk-rf-bar" }, [

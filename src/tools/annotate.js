@@ -228,7 +228,7 @@
     trash.addEventListener("click", clearAll);
     bar.appendChild(trash);
     bar.appendChild(RK.h("div", { class: "rk-div" }));
-    bar.appendChild(txtBtn("Cancel", "", () => finish(false)));
+    bar.appendChild(txtBtn("Cancel", "", () => finish()));
     bar.appendChild(txtBtn("Add to chat", "secondary", () => addToChat()));
     if (surface) surface.style.cursor = tool === "text" ? "text" : "crosshair";
   }
@@ -318,7 +318,7 @@
       chrome.runtime.sendMessage({ type: "RK_ADD_TO_CHAT", dataUrl: out });
       RK.toast("Added to chat", { swatch: color });
     } catch (_) { RK.toast("Couldn't reach the chat panel"); return; }
-    finish(true);
+    finish();
   }
 
   // Tear the tool down and reflect the off-state on the main bar.

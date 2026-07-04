@@ -1,6 +1,7 @@
-// Tool: Distance-on-hover.
-// Uses a ref-counted hover engine that resolves the page element under the
-// cursor and its box-model rects (also exposed as RK.boxRects for other tools).
+// Tool: Distance-on-hover (tool id "distance").
+// Also home of the shared ref-counted hover engine (RK._hoverSubscribe /
+// RK.boxRects) that resolves the page element under the cursor and its
+// box-model rects — selector.js depends on it, so this file loads first.
 (function () {
   const RK = window.RK;
 
@@ -20,14 +21,16 @@
     subs.add(fn);
     if (!installed) {
       window.addEventListener("mousemove", onMove, { passive: true });
-      window.addEventListener("scroll", reflow, { passive: true });
+      // capture: true — without it only document scrolls fire, and scrolling an
+      // inner overflow container leaves the overlay frozen at stale coordinates.
+      window.addEventListener("scroll", reflow, { capture: true, passive: true });
       installed = true;
     }
     return () => {
       subs.delete(fn);
       if (subs.size === 0 && installed) {
         window.removeEventListener("mousemove", onMove);
-        window.removeEventListener("scroll", reflow);
+        window.removeEventListener("scroll", reflow, { capture: true });
         installed = false;
       }
     };

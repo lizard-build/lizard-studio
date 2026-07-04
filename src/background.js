@@ -100,9 +100,34 @@ function openPanel(tab) {
 
 // Open the panel if nothing is showing; otherwise tell the live panel to close
 // itself (there's no chrome.sidePanel.close()).
-function toggleSidePanel(tab) {
-  if (panelPorts.size === 0) openPanel(tab);
-  else panelPorts.forEach((p) => p.postMessage({ cmd: "close" }));
+//
+// The port set is in-memory, so right after a service-worker cold start it can
+// be empty even though a panel IS open (its port hasn't reattached yet) — a
+// naive check would then call open() on an open panel and the toggle inverts.
+// getContexts() sees the panel regardless, so consult it before opening; the
+// user gesture survives extension-API promise boundaries, so open() still works.
+async function toggleSidePanel(tab) {
+  if (panelPorts.size > 0) {
+    panelPorts.forEach((p) => p.postMessage({ cmd: "close" }));
+    return;
+  }
+  let hasPanel = false;
+  try {
+    const ctxs = await chrome.runtime.getContexts({ contextTypes: ["SIDE_PANEL"] });
+    hasPanel = ctxs.length > 0;
+  } catch (_) { /* very old Chrome — fall through to open */ }
+  if (!hasPanel) {
+    openPanel(tab);
+    return;
+  }
+  // Panel open but not yet reconnected — close it once the port reattaches
+  // (the panel retries every ~500ms) instead of inverting the toggle.
+  const deadline = Date.now() + 2000;
+  const tryClose = () => {
+    if (panelPorts.size > 0) panelPorts.forEach((p) => p.postMessage({ cmd: "close" }));
+    else if (Date.now() < deadline) setTimeout(tryClose, 150);
+  };
+  tryClose();
 }
 
 // declarativeNetRequest session rule that strips framing headers from sub-frame

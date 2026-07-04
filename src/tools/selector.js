@@ -1,8 +1,9 @@
-// Tool: Selector — DevTools-style hover inspection.
+// Tool: Selector — DevTools-style hover inspection (tool id "inspect").
 // Hovering any element paints its box model (margin / padding / content bands
 // with size labels), tags it with a selector chip, and floats a card listing
 // the computed Box Model, Appearance and Text properties.
-// Reuses the shared hover engine from inspect.js (RK._hoverSubscribe).
+// Reuses the shared hover engine from distance.js (RK._hoverSubscribe), which
+// the manifest loads before this file.
 (function () {
   const RK = window.RK;
   const ID = "inspect";

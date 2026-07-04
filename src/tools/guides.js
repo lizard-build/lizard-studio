@@ -81,14 +81,16 @@
     e.preventDefault();
   }
 
-  function onMove(e) {
+  // rAF-throttled like every other tool's move handler — render() rebuilds all
+  // guide lines/badges/strips, too much work to run on every raw mousemove.
+  const onMove = RK.raf((e) => {
     // If we somehow missed the mouseup (released off-window, alt-tab, etc.) the
     // button is already up — finalise the drag instead of letting it stick.
     if (drag && e.buttons === 0) { onUp(); return; }
     if (!drag) return;
     guides[drag.index].pos = drag.axis === "h" ? e.clientY : e.clientX;
     render();
-  }
+  });
   function onUp() { if (drag) { drag = null; persist(); render(); } }
   // Losing window focus mid-drag (alt-tab, devtools, etc.) would otherwise leave
   // drag/hovered set, freezing the guide and pinning the delete hint open.
@@ -109,7 +111,7 @@
     render();
   }
 
-  function persist() { settings().items = guides.map((g) => ({ ...g })); RK.save(); }
+  function persist() { settings().items = guides.map((g) => ({ ...g })); }
 
   function enable() {
     guides = (settings().items || []).map((g) => ({ ...g }));

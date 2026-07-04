@@ -41,12 +41,12 @@
     ]);
     const numInput = (key, min, max) => RK.h("input", {
       type: "number", value: cfg[key], min, max,
-      oninput: (e) => { cfg[key] = Number(e.target.value); render(); RK.save(); },
+      oninput: (e) => { cfg[key] = Number(e.target.value); render(); },
     });
 
     // Columns — dropdown of common counts (current value kept if non-standard).
     const colSel = RK.h("select", {
-      onchange: (e) => { cfg.columns = Number(e.target.value); render(); RK.save(); },
+      onchange: (e) => { cfg.columns = Number(e.target.value); render(); },
     });
     const choices = COL_CHOICES.includes(cfg.columns)
       ? COL_CHOICES : [...COL_CHOICES, cfg.columns].sort((a, b) => a - b);
@@ -63,7 +63,7 @@
         const v = e.target.value.trim().toLowerCase();
         cfg.maxWidth = (v === "" || v === "auto") ? "auto" : (Number(v) || "auto");
         e.target.value = cfg.maxWidth;
-        render(); RK.save();
+        render();
       },
     });
 
@@ -81,7 +81,7 @@
     // Opacity — slider.
     const op = RK.h("input", {
       type: "range", min: 0, max: 100, value: cfg.opacity,
-      oninput: (e) => { cfg.opacity = Number(e.target.value); render(); RK.save(); },
+      oninput: (e) => { cfg.opacity = Number(e.target.value); render(); },
     });
 
     box.appendChild(RK.h("div", { class: "rk-prows" }, [
@@ -102,6 +102,6 @@
     panel,
     // Eye toggle in the panel header: hide/show the overlay without deactivating.
     isHidden() { return !!s().hidden; },
-    toggleVisible() { s().hidden = !s().hidden; render(); RK.save(); },
+    toggleVisible() { s().hidden = !s().hidden; render(); },
   });
 })();
