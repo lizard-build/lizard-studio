@@ -286,7 +286,7 @@
       // next prompt, then cleared.
       contexts: [],
       // Images pasted/dropped into the composer, sent as image blocks with the
-      // next prompt, then cleared. Each: { id, mediaType, base64, dataUrl }.
+      // next prompt, then cleared. Each: { id, mediaType, dataUrl }.
       attachments: [],
       empty: !opts.sessionId,
       // Whether this tab's on-disk transcript has been requested/replayed yet.
@@ -351,11 +351,7 @@
     order = order.filter((x) => x !== id);
 
     if (!order.length) {
-      const fresh = makeChat({ cwd: chat.cwd });
-      chats.set(fresh.id, fresh);
-      order.push(fresh.id);
-      els.stack.appendChild(fresh.messagesEl);
-      setActive(fresh.id);
+      createChat({ cwd: chat.cwd });
     } else if (activeId === id) {
       setActive(order[order.length - 1]);
     } else {
@@ -447,6 +443,7 @@
         const nodes = Array.from(els.tabs.children);
         const gap = parseFloat(getComputedStyle(els.tabs).columnGap) || 0;
         const rects = new Map(nodes.map((n) => [n.dataset.tabId, { left: n.offsetLeft, width: n.offsetWidth }]));
+        const nodeById = new Map(nodes.map((n) => [n.dataset.tabId, n]));
         const anchorLeft = nodes[0].offsetLeft;
         const originalOrder = order.slice();
         const startLeft = rects.get(id).left;
@@ -482,7 +479,7 @@
           for (const oid of order) {
             const r = rects.get(oid);
             if (oid !== id) {
-              const node = els.tabs.querySelector(`[data-tab-id="${oid}"]`);
+              const node = nodeById.get(oid);
               if (node) node.style.transform = `translateX(${cursor - r.left}px)`;
             }
             cursor += r.width + gap;
@@ -586,8 +583,9 @@
   }
 
   // ---- message rendering (per chat) -----------------------------------------
-  function userBubble(chat, text, attachments) {
-    const row = el("div", "msg msg-user");
+  // Thumbnail strip + markdown body, shared by live user bubbles and queued
+  // ones (renderQueuedBubble adds the queued tag/cancel on top).
+  function buildBubble(text, attachments) {
     const bubble = el("div", "bubble");
     if (attachments && attachments.length) {
       const thumbs = el("div", "bubble-thumbs");
@@ -599,7 +597,12 @@
       bubble.appendChild(thumbs);
     }
     if (text) bubble.appendChild(R.markdown(text));
-    row.appendChild(bubble);
+    return bubble;
+  }
+
+  function userBubble(chat, text, attachments) {
+    const row = el("div", "msg msg-user");
+    row.appendChild(buildBubble(text, attachments));
     append(chat, row);
   }
 
@@ -781,9 +784,10 @@
         canvas.height = h;
         canvas.getContext("2d").drawImage(img, 0, 0, w, h);
         // Keep small PNGs lossless; otherwise re-encode as JPEG to shrink.
+        // Only the dataUrl is kept — the base64 payload is derived at send
+        // time, instead of holding the same bytes twice per attachment.
         const type = blob.type === "image/png" && scale === 1 ? "image/png" : "image/jpeg";
-        const dataUrl = canvas.toDataURL(type, 0.92);
-        resolve({ mediaType: type, base64: dataUrl.split(",")[1] || "", dataUrl });
+        resolve({ mediaType: type, dataUrl: canvas.toDataURL(type, 0.92) });
       };
       img.onerror = () => {
         URL.revokeObjectURL(url);
@@ -928,11 +932,6 @@
     append(chat, row);
     chat.currentAssistantBody = body;
     return body;
-  }
-
-  function addThinking(chat, body, text) {
-    // Thinking/reasoning blocks are intentionally not rendered in the transcript.
-    return;
   }
 
   // ---- /usage card ------------------------------------------------------
@@ -1470,6 +1469,10 @@
       }
     }
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+    // A tool id gets exactly one result — drop the entry so a long agent
+    // session doesn't pin every resolved card's DOM in the map forever.
+    // (endTurn's sweep only needs the still-running entries.)
+    chat.toolCards.delete(toolUseId);
   }
 
   function normalizeResult(content) {
@@ -1947,8 +1950,8 @@
             // No live stream for this message (older claude / flag off) — render
             // the finished block directly. When it was streamed, the live nodes
             // already are the canonical render, so we skip to avoid duplicates.
-            if (block.type === "thinking") addThinking(chat, body, block.thinking);
-            else if (block.type === "text") addText(chat, body, block.text);
+            // (thinking blocks are intentionally not rendered.)
+            if (block.type === "text") addText(chat, body, block.text);
           }
         }
         if (!streamed) finalizeAssistant(chat, body, Date.now());
@@ -1984,7 +1987,6 @@
     for (const blk of chat.streamBlocks.values()) {
       if (blk.raf) { cancelAnimationFrame(blk.raf); blk.raf = 0; }
       if (blk.el) blk.el.classList && blk.el.classList.remove("streaming");
-      if (blk.det) blk.det.classList.remove("streaming");
     }
     chat.streamBlocks.clear();
     chat.streamMsgId = null;
@@ -2244,19 +2246,7 @@
         break;
       case "folder":
         if (chat && msg.path) {
-          chat.cwd = msg.path;
-          rememberCwd(msg.path);
-          // Title is left as-is — it comes from the first user message, not the
-          // folder name (see startTurn).
-          // New folder → unknown git state until the host reports back.
-          chat.isRepo = false;
-          chat.branch = null;
-          chat.branches = [];
-          savePrefs();
-          if (chat.id === activeId) syncComposer();
-          resetChatSession(chat);
-          requestBranches(chat);
-          renderTabs();
+          applyFolder(chat, msg.path);
         } else if (chat && msg.manual) {
           promptForFolder(chat);
         }
@@ -2366,9 +2356,8 @@
             if (chat.emittedToolIds.has(block.id)) continue;
             chat.emittedToolIds.add(block.id);
             toolCard(chat, body, block);
-          } else if (block.type === "thinking") {
-            addThinking(chat, body, block.thinking);
           } else if (block.type === "text") {
+            // (thinking blocks are intentionally not rendered.)
             addText(chat, body, block.text);
           }
         }
@@ -2484,18 +2473,7 @@
 
   function renderQueuedBubble(chat, entry) {
     const row = el("div", "msg msg-user queued");
-    const bubble = el("div", "bubble");
-    if (entry.attachments.length) {
-      const thumbs = el("div", "bubble-thumbs");
-      for (const a of entry.attachments) {
-        const img = el("img", "bubble-thumb");
-        img.src = a.dataUrl;
-        thumbs.appendChild(img);
-      }
-      bubble.appendChild(thumbs);
-    }
-    if (entry.text) bubble.appendChild(R.markdown(entry.text));
-    row.appendChild(bubble);
+    row.appendChild(buildBubble(entry.text, entry.attachments));
     const tag = el("div", "queued-tag");
     const cancel = el("button", "queued-cancel");
     cancel.type = "button";
@@ -2559,7 +2537,7 @@
     // the literal typed text, and replay should match that.
     const wrappedExtra = extra ? CTX_MARK_START + extra + CTX_MARK_END : "";
     const sentText = /^\//.test(text) ? text + (wrappedExtra ? "\n\n" + wrappedExtra : "") : wrappedExtra + (text || fallback);
-    const images = attachments.map((a) => ({ mediaType: a.mediaType, data: a.base64 }));
+    const images = attachments.map((a) => ({ mediaType: a.mediaType, data: (a.dataUrl.split(",")[1] || "") }));
     // If the port died since the connected check, post() reports it and nothing
     // reached the host. Requeue the prompt (visible, cancellable) instead of
     // entering a running state whose spinner would never stop — endTurn() or
@@ -2961,22 +2939,27 @@
     post({ type: "checkoutBranch", id: chat.id, cwd: chat.cwd, branch });
   }
 
+  // Shared folder-change sequence (native picker reply and the manual prompt
+  // fallback): remember the new cwd, reset git state until the host reports
+  // back, and restart the session in the new directory. The tab title is left
+  // as-is — it comes from the first user message, not the folder name.
+  function applyFolder(chat, path) {
+    chat.cwd = path;
+    rememberCwd(path);
+    chat.isRepo = false;
+    chat.branch = null;
+    chat.branches = [];
+    savePrefs();
+    if (chat.id === activeId) syncComposer();
+    resetChatSession(chat);
+    requestBranches(chat);
+    renderTabs();
+  }
+
   function promptForFolder(chat) {
     const cur = chat.cwd || home || "";
     const next = window.prompt("Project folder path:", cur);
-    if (next && next.trim()) {
-      chat.cwd = next.trim();
-      rememberCwd(chat.cwd);
-      // Title comes from the first user message, not the folder name.
-      chat.isRepo = false;
-      chat.branch = null;
-      chat.branches = [];
-      savePrefs();
-      syncComposer();
-      resetChatSession(chat);
-      requestBranches(chat);
-      renderTabs();
-    }
+    if (next && next.trim()) applyFolder(chat, next.trim());
   }
 
   function autosize() {
@@ -3598,11 +3581,18 @@
       return opOk({ uploadId });
     },
     async upload_chunk({ args }) {
+      gcUploads(); // expire stale uploads even when no new one ever begins
       const u = uploads.get(args.uploadId);
       if (!u) return opErr("Unknown or expired uploadId — start over with a new browser_upload_file call.");
       u.parts.push(String(args.data || ""));
       u.ts = Date.now();
       return opOk({ received: u.parts.length });
+    },
+    // Best-effort cleanup from the relay when a chunk/commit failed midway —
+    // frees the staged buffer instead of waiting for the gc sweep.
+    async upload_abort({ args }) {
+      uploads.delete(args.uploadId);
+      return opOk({ aborted: true });
     },
   };
 
@@ -3806,17 +3796,21 @@
     return false;
   }
   async function setValue(tabId, args, value) {
+    // One template written against an explicit `el` variable — the ref path
+    // binds `el = this` up front, instead of regex-rewriting the source (a
+    // .replace(/this/g, "el") would corrupt the code the moment any identifier
+    // contained "this" as a substring).
     const body =
-      "this.focus(); var proto=Object.getPrototypeOf(this); var d=Object.getOwnPropertyDescriptor(proto,'value'); if(d&&d.set){d.set.call(this,V);}else{this.value=V;} this.dispatchEvent(new Event('input',{bubbles:true})); this.dispatchEvent(new Event('change',{bubbles:true})); return true;";
-    const fn = "function(V){ " + body + " }";
+      "el.focus(); var proto=Object.getPrototypeOf(el); var d=Object.getOwnPropertyDescriptor(proto,'value'); if(d&&d.set){d.set.call(el,V);}else{el.value=V;} el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); return true;";
     if (args.ref) {
       const objectId = await refToObject(tabId, args.ref);
       if (!objectId) return false;
+      const fn = "function(V){ var el = this; " + body + " }";
       const r = await dbgSend(tabId, "Runtime.callFunctionOn", { objectId, functionDeclaration: fn, arguments: [{ value }], returnByValue: true });
       return !!(r && r.result && r.result.value);
     }
     if (args.selector) {
-      const expr = "(function(V){var el=document.querySelector(" + JSON.stringify(args.selector) + "); if(!el) return false; " + body.replace(/this/g, "el") + "})(" + JSON.stringify(value) + ")";
+      const expr = "(function(V){var el=document.querySelector(" + JSON.stringify(args.selector) + "); if(!el) return false; " + body + "})(" + JSON.stringify(value) + ")";
       const r = await dbgSend(tabId, "Runtime.evaluate", { expression: expr, returnByValue: true });
       return !!(r && r.result && r.result.value);
     }

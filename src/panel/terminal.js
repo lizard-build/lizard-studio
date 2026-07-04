@@ -5,16 +5,19 @@
 
 (function () {
   const HOST_NAME = "com.lizard.term";
-  const RECONNECT_MS = 1000;
+  const RECONNECT_MIN_MS = 1000;
+  const RECONNECT_MAX_MS = 30000;
 
   let term = null;
   let fitAddon = null;
   let port = null;
   let connected = false;
   let reconnectTimer = null;
+  let reconnectDelay = RECONNECT_MIN_MS;
   let mounted = false;
   let resizeObserver = null;
   let els = {};
+  const ENC = new TextEncoder();
 
   // ---- base64 <-> bytes (PTY traffic is raw bytes) ----
   function bytesToB64(bytes) {
@@ -69,6 +72,7 @@
     port.onMessage.addListener((msg) => {
       if (!connected) {
         connected = true;
+        reconnectDelay = RECONNECT_MIN_MS; // a live host resets the backoff
         els.dot.classList.add("ok");
         els.statusText.textContent = "Connected.";
         showTerminal();
@@ -95,12 +99,17 @@
       scheduleReconnect();
     });
   }
+  // Exponential backoff up to 30s: when the helper simply isn't installed, a
+  // fixed 1 Hz loop would spawn a native-host lookup every second for as long
+  // as the panel stays open.
   function scheduleReconnect() {
     clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(connect, RECONNECT_MS);
+    reconnectTimer = setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
   }
 
   function mount(root) {
+    if (mounted) return; // a second mount would leak the Terminal + observer
     els.root = root;
     root.innerHTML = TEMPLATE;
     els.onboarding = root.querySelector("#term-onboarding");
@@ -142,8 +151,7 @@
 
     term.onData((data) => {
       if (connected && port) {
-        const bytes = new TextEncoder().encode(data);
-        port.postMessage({ type: "stdin", data: bytesToB64(bytes) });
+        port.postMessage({ type: "stdin", data: bytesToB64(ENC.encode(data)) });
       }
     });
 
@@ -177,6 +185,20 @@
   function deactivate() {
     // keep PTY alive in the background
   }
+  // Full teardown for callers that unmount the view (not just tab away).
+  function dispose() {
+    clearTimeout(reconnectTimer);
+    if (resizeObserver) resizeObserver.disconnect();
+    resizeObserver = null;
+    if (port) { try { port.disconnect(); } catch (_) {} }
+    port = null;
+    connected = false;
+    started = false;
+    if (term) { try { term.dispose(); } catch (_) {} }
+    term = null;
+    fitAddon = null;
+    mounted = false;
+  }
 
   const TEMPLATE = `
     <section id="term-onboarding" class="screen">
@@ -194,5 +216,5 @@
     <section id="term-screen" class="screen hidden"><div id="terminal"></div></section>
   `;
 
-  window.RKTerminal = { mount, activate, deactivate };
+  window.RKTerminal = { mount, activate, deactivate, dispose };
 })();

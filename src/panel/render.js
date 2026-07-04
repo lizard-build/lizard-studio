@@ -27,7 +27,7 @@
         "catch", "finally", "throw", "typeof", "instanceof", "in", "of", "this",
         "super", "void", "delete", "null", "true", "false", "undefined", "def",
         "elif", "lambda", "pass", "with", "as", "is", "not", "and", "or", "None",
-        "True", "False", "self", "fn", "let", "mut", "pub", "struct", "enum",
+        "True", "False", "self", "fn", "mut", "pub", "struct", "enum",
         "impl", "match", "use", "type", "interface", "public", "private", "static",
         "package", "func", "go", "defer", "nil", "end", "then", "echo", "fi",
       ].join("|") +
@@ -35,11 +35,22 @@
     "g"
   );
 
+  // Comment syntax by language, so `#` doesn't turn half a JS line into a
+  // "comment" and `//` doesn't eat Python strings. Unknown languages keep the
+  // permissive combined pattern.
+  const HASH_LANGS = /^(py|python|sh|bash|zsh|shell|rb|ruby|yaml|yml|toml|make|makefile|dockerfile)$/i;
+  const SLASH_LANGS = /^(js|jsx|mjs|ts|tsx|javascript|typescript|c|h|cpp|cc|hpp|cs|java|kt|kotlin|swift|go|rust|rs|php|scala|dart)$/i;
+  function commentRe(lang) {
+    if (HASH_LANGS.test(lang || "")) return /(#[^\n]*)/g;
+    if (SLASH_LANGS.test(lang || "")) return /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)/g;
+    return /(\/\/[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/)/g;
+  }
+
   function highlight(escaped, lang) {
     // Tokenize over escaped text. Order matters: comments & strings first so we
     // don't highlight keywords inside them.
     const patterns = [
-      { cls: "tok-comment", re: /(\/\/[^\n]*|#[^\n]*|\/\*[\s\S]*?\*\/)/g },
+      { cls: "tok-comment", re: commentRe(lang) },
       { cls: "tok-string", re: /(&#39;(?:[^&\\]|\\.)*?&#39;|&quot;(?:[^&\\]|\\.)*?&quot;|`(?:[^`\\]|\\.)*?`)/g },
       { cls: "tok-number", re: /\b(0x[0-9a-fA-F]+|\d+\.?\d*(?:e[+-]?\d+)?)\b/g },
     ];
@@ -84,7 +95,6 @@
   function codeBlock(code, lang) {
     const pre = document.createElement("pre");
     pre.className = "code-block";
-    if (lang) pre.dataset.lang = lang;
     const codeEl = document.createElement("code");
     codeEl.innerHTML = highlight(escapeHtml(code), lang);
     pre.appendChild(codeEl);
@@ -190,8 +200,9 @@
       }
 
       // indented continuation of the previous list item's text
+      // (insertAdjacentHTML appends without re-serializing the whole <li>)
       if (list && /^\s{2,}\S/.test(line) && list.lastElementChild) {
-        list.lastElementChild.innerHTML += "<br>" + inlineMarkdown(line.trim());
+        list.lastElementChild.insertAdjacentHTML("beforeend", "<br>" + inlineMarkdown(line.trim()));
         i++;
         continue;
       }
@@ -250,7 +261,9 @@
         continue;
       }
 
-      // paragraph (gather consecutive non-special lines)
+      // paragraph (gather consecutive non-special lines; also stop at a table
+      // header+delimiter pair, so a table not preceded by a blank line isn't
+      // absorbed and rendered as raw pipes)
       flushList();
       const para = [line];
       i++;
@@ -259,7 +272,8 @@
         lines[i].trim() &&
         !/^```/.test(lines[i]) &&
         !/^#{1,4}\s/.test(lines[i]) &&
-        !/^(\s*)([-*]|\d+\.)\s+/.test(lines[i])
+        !/^(\s*)([-*]|\d+\.)\s+/.test(lines[i]) &&
+        !(lines[i].indexOf("|") !== -1 && i + 1 < lines.length && isDelimRow(lines[i + 1]))
       ) {
         para.push(lines[i]);
         i++;

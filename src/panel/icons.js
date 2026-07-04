@@ -4,7 +4,6 @@
 // 0 0 256 256 viewBox with fill:currentColor so CSS `color` tints them.
 //
 // Exposes:
-//   window.RKIcon(name, size?)  -> an <svg> element
 //   window.RKIconHTML(name, size?) -> an svg string for innerHTML templates
 
 (function () {
@@ -67,12 +66,6 @@
     return `<svg viewBox="0 0 256 256" fill="currentColor" class="ph" width="${s}" height="${s}" aria-hidden="true">${P[name] || ""}</svg>`;
   }
 
-  function icon(name, size) {
-    const t = document.createElement("template");
-    t.innerHTML = iconHTML(name, size).trim();
-    return t.content.firstElementChild;
-  }
-
   // Lizard brand mark (from lizard-client's DragonLogo/LizardLogo). It has its
   // own viewBox ("5 4 90 92"), so it can't ride the 0 0 256 256 Phosphor helper.
   // fill:currentColor lets CSS `color` tint it (we use the brand emerald).
@@ -95,9 +88,7 @@
     return `<svg viewBox="0 0 24 24" class="claude-mark" width="${s}" height="${s}" aria-hidden="true">${CLAUDE_PATH}</svg>`;
   }
 
-  window.RKIcon = icon;
   window.RKIconHTML = iconHTML;
   window.RKLizardHTML = lizardHTML;
   window.RKClaudeHTML = claudeHTML;
-  window.RKIcons = P;
 })();

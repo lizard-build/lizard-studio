@@ -48,6 +48,11 @@
   --other-red: #ef4444;
   --other-yellow: #f59e0b;
   --other-blue: #3b82f6;
+
+  /* Amber accents used on dark tints, where --other-yellow reads too muddy:
+     --warn-bright for the Auto mode chip, --warn-soft for warning banners. */
+  --warn-bright: #ffd014;
+  --warn-soft: #fbbf24;
 }
 
 * {
@@ -414,12 +419,12 @@ body {
 }
 .mode-btn:hover { filter: brightness(1.18); }
 /* solid tint in the mode's colour, no stroke. Neutral modes stay white; Auto
-   and Bypass carry their warning colour in both tint and label (DESIGN.md
-   --other-yellow / --other-red). */
+   and Bypass carry their warning colour in both tint and label
+   (--warn-bright / --other-red). */
 .mode-btn.mode-default,
 .mode-btn.mode-accept,
 .mode-btn.mode-plan { background: rgba(255, 255, 255, 0.08); color: var(--text-primary); }
-.mode-btn.mode-auto { background: rgba(255, 208, 20, 0.18); color: #FFD014; }
+.mode-btn.mode-auto { background: rgba(255, 208, 20, 0.18); color: var(--warn-bright); }
 .mode-btn.mode-bypass { background: rgba(239, 68, 68, 0.18); color: var(--other-red); }
 
 /* mode picker dropdown (opens upward, above the composer toolbar) */
@@ -460,13 +465,13 @@ body {
   background: var(--text-primary);
 }
 /* Dots match their label's color — neutral white, except Bypass's red
-   (DESIGN.md --other-red) and Auto's amber warning tint (--other-yellow). */
+   (DESIGN.md --other-red) and Auto's amber warning tint (--warn-bright). */
 .mode-item.mode-bypass .mode-dot { background: var(--other-red); }
-.mode-item.mode-auto .mode-dot { background: #FFD014; }
+.mode-item.mode-auto .mode-dot { background: var(--warn-bright); }
 .mode-meta { min-width: 0; }
 .mode-item-label { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
 .mode-item.mode-bypass .mode-item-label { color: var(--other-red); }
-.mode-item.mode-auto .mode-item-label { color: #FFD014; }
+.mode-item.mode-auto .mode-item-label { color: var(--warn-bright); }
 .mode-item-ic { display: inline-flex; width: 13px; flex: 0 0 auto; margin-left: auto; color: var(--text-primary); }
 
 /* effort picker — same look as the model picker, smaller footprint */
@@ -475,6 +480,9 @@ body {
 
 .icon-btn {
   appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 28px;
   height: 28px;
   flex: 0 0 auto;
@@ -491,7 +499,6 @@ body {
   color: var(--text-primary);
   background: var(--bg-secondary);
 }
-.icon-btn { display: inline-flex; align-items: center; justify-content: center; }
 
 .attach-file-btn { width: 26px; height: 26px; margin-right: 2px; }
 /* Sits on the composer box, which is already --bg-secondary — the shared
@@ -512,7 +519,7 @@ body {
   padding: 9px 10px;
   border-radius: 8px;
   background: rgba(245, 158, 11, 0.1);
-  color: #fbbf24;
+  color: var(--warn-soft);
 }
 .host-outdated-ic { display: inline-flex; flex: 0 0 auto; margin-top: 1px; }
 .host-outdated-spinner {
@@ -520,10 +527,11 @@ body {
   height: 15px;
   border-radius: 50%;
   border: 2px solid rgba(251, 191, 36, 0.3);
-  border-top-color: #fbbf24;
-  animation: host-outdated-spin 0.7s linear infinite;
+  border-top-color: var(--warn-soft);
+  animation: spin 0.7s linear infinite;
 }
-@keyframes host-outdated-spin { to { transform: rotate(360deg); } }
+/* Shared by every spinner (host banner, login card). */
+@keyframes spin { to { transform: rotate(360deg); } }
 .host-outdated-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .host-outdated-text { font-size: 12px; font-weight: 500; line-height: 1.4; }
 .host-outdated-cmd {
@@ -555,7 +563,7 @@ body {
   border: none;
   border-left: 1px solid rgba(245, 158, 11, 0.25);
   background: transparent;
-  color: #fbbf24;
+  color: var(--warn-soft);
   cursor: pointer;
   transition: background 0.15s;
 }
@@ -808,7 +816,7 @@ body {
 }
 .sys-note .sys-ic { display: inline-flex; flex: 0 0 auto; }
 .sys-note.warn {
-  color: #fbbf24;
+  color: var(--warn-soft);
   background: rgba(245, 158, 11, 0.12);
 }
 
@@ -955,9 +963,8 @@ code.inline {
   border-radius: 50%;
   border: 2px solid rgba(16, 185, 129, 0.3);
   border-top-color: var(--control-primary);
-  animation: login-spin 0.7s linear infinite;
+  animation: spin 0.7s linear infinite;
 }
-@keyframes login-spin { to { transform: rotate(360deg); } }
 .login-status {
   font-size: 12px;
   line-height: 18px;
@@ -966,11 +973,12 @@ code.inline {
 }
 .login-card.done .login-status { color: var(--text-primary); }
 .login-card.error .login-status { color: #f87171; }
-.login-open {
-  margin-top: 12px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+/* Shared emerald action button — login card actions and the onboarding
+   install-command row are the same control; keep them in one rule so the
+   styles can't drift apart again. */
+.login-open,
+.login-submit,
+.cmd-row button {
   height: 32px;
   padding: 0 12px;
   font-family: var(--font-family);
@@ -983,7 +991,16 @@ code.inline {
   cursor: pointer;
   transition: background 0.15s;
 }
-.login-open:hover { background: var(--control-primary); }
+.login-open:hover,
+.login-submit:hover:not(:disabled),
+.cmd-row button:hover { background: var(--control-primary); }
+
+.login-open {
+  margin-top: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 .login-open:active { transform: scale(0.97); }
 .login-fallback {
   display: block;
@@ -1021,21 +1038,7 @@ code.inline {
 .login-input::placeholder { color: var(--text-tertiary); }
 .login-input:focus { border-color: var(--control-primary); }
 .login-input:disabled { opacity: 0.5; }
-.login-submit {
-  flex: 0 0 auto;
-  height: 32px;
-  padding: 0 12px;
-  font-family: var(--font-family);
-  font-size: 12px;
-  font-weight: 600;
-  color: #fff;
-  background: rgba(16, 185, 129, 0.5);
-  border: 1px solid var(--control-primary);
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-.login-submit:hover:not(:disabled) { background: var(--control-primary); }
+.login-submit { flex: 0 0 auto; }
 .login-submit:active:not(:disabled) { transform: scale(0.97); }
 .login-submit:disabled { opacity: 0.5; cursor: default; }
 
@@ -1193,25 +1196,6 @@ code.inline {
   color: var(--text-tertiary);
 }
 
-/* thinking */
-.thinking {
-  margin: 4px 0 8px;
-  border-left: 2px solid var(--border-primary);
-  padding-left: 10px;
-}
-.thinking summary {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--text-tertiary);
-  list-style: none;
-}
-.thinking summary::-webkit-details-marker { display: none; }
-.thinking[open] summary { color: var(--text-secondary); margin-bottom: 4px; }
-.thinking .md { font-size: 12.5px; color: var(--text-secondary); }
-
 /* tool / skill calls — flat, no stroke frame (the bordered box is reserved for
    user messages). These read as a quiet inline row in the assistant stream. */
 .tool-card {
@@ -1264,13 +1248,14 @@ code.inline {
   color: var(--text-tertiary);
   transition: transform 0.15s ease, color 0.15s ease;
 }
-.tool-toggle.running { animation: spin-pulse 1s ease-in-out infinite; }
+.tool-toggle.running { animation: pulse 1s ease-in-out infinite; }
 .tool-toggle.done { color: var(--control-primary); }
 .tool-toggle.err { color: var(--other-red); }
 .tool-card.collapsed .tool-toggle { transform: rotate(-90deg); }
 .tool-card.collapsed .tool-detail,
 .tool-card.collapsed .tool-result { display: none; }
-@keyframes spin-pulse { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
+/* Shared opacity pulse (running tool chevron, turn-status spark). */
+@keyframes pulse { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
 
 .tool-detail { padding: 2px 0 2px 22px; }
 .tool-detail .code-block,
@@ -1401,7 +1386,7 @@ code.inline {
 .turn-status .ts-spark {
   display: inline-flex;
   color: var(--control-primary);
-  animation: ts-pulse 1.4s ease-in-out infinite;
+  animation: pulse 1.4s ease-in-out infinite;
 }
 .turn-status .ts-spark .lizard-mark { display: block; }
 .turn-status .ts-word {
@@ -1409,12 +1394,10 @@ code.inline {
   font-weight: 500;
 }
 .turn-status .ts-meta { color: var(--text-tertiary); }
-@keyframes ts-pulse { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
 
 /* Live-streaming assistant blocks reuse the normal markdown styling; the
    trailing caret signals tokens are still arriving. */
-.assistant-stream.streaming > .md::after,
-.thinking.streaming .thinking-stream::after {
+.assistant-stream.streaming > .md::after {
   content: "";
   display: inline-block;
   width: 7px;
@@ -1425,7 +1408,6 @@ code.inline {
   border-radius: 1px;
   animation: ts-caret 1s steps(2, start) infinite;
 }
-.thinking .thinking-stream { font-size: 12.5px; color: var(--text-secondary); }
 @keyframes ts-caret { 0%,100% { opacity: 0; } 50% { opacity: 1; } }
 
 /* composer — single unified box with an inline control row (Cursor-style) */
@@ -1617,24 +1599,6 @@ code.inline {
 }
 .composer-spacer { flex: 1 1 auto; }
 
-/* attach-current-tab button (globe) */
-.ctx-btn {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: 28px;
-  height: 28px;
-  border: none;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-.ctx-btn:hover { background: rgba(255, 255, 255, 0.1); color: var(--text-primary); }
-
 .send-btn,
 .stop-btn {
   flex: 0 0 auto;
@@ -1695,21 +1659,11 @@ code.inline {
   color: var(--text-primary);
 }
 .cmd-row code::-webkit-scrollbar { display: none; }
+/* (shape/colour comes from the shared emerald button rule above) */
 .cmd-row button {
   flex-shrink: 0;
   margin: 4px;
-  height: 32px;
-  padding: 0 12px;
-  border: 1px solid var(--control-primary);
-  border-radius: 8px;
-  background: rgba(16, 185, 129, 0.5);
-  color: #fff;
-  font-family: var(--font-family);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
 }
-.cmd-row button:hover { background: var(--control-primary); }
 .hint { font-size: 12px; line-height: 18px; font-weight: 500; color: var(--text-tertiary); margin: 16px 0 20px; }
 .status { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 500; color: var(--text-secondary); }
 .dot {
@@ -1721,7 +1675,9 @@ code.inline {
 @keyframes dot-pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
 
 /* =========================================================================
-   TERMINAL VIEW
+   TERMINAL VIEW — matches terminal.js's template. That module is deliberately
+   parked (panel.html doesn't load it; see the comment there), so these rules
+   are intentionally dormant, kept for when the terminal tab returns.
    ========================================================================= */
 #view-terminal { background: var(--bg-primary); }
 .screen { position: absolute; inset: 0; }

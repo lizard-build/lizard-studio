@@ -169,7 +169,7 @@
   let root = null, toolsEl = null;
   let pop = null; // single open popover: { kind, id?, el, backdrop, inner? }
   let tip = null; // shared hover tooltip element
-  let handleEl = null, minimized = false; // minimized-to-bottom handle
+  let handleEl = null; // minimized-to-bottom handle (state lives in RK.state.minimized)
 
   // Phosphor (regular) — matches the Lizard client icon set.
   // Restore glyph for the minimized handle: a bar with a caret pointing up.
@@ -202,13 +202,26 @@
     enableEscClear();
     enableTips();
     enableHotkeys();
+    // On viewport changes: an open popover is anchored to a now-stale rect —
+    // close it rather than track it; and re-clamp a custom bar position so the
+    // bar can't end up stranded off-screen in the smaller window.
+    window.addEventListener("resize", RK.raf(() => {
+      if (pop) closePop();
+      if (RK.state.toolbarPos) applyPos();
+    }), { passive: true });
     render();
   }
 
   function applyPos() {
     const p = RK.state.toolbarPos;
     if (p) {
-      root.style.left = p.x + "px"; root.style.top = p.y + "px"; root.style.bottom = "auto";
+      // Clamp the persisted position to the current viewport — a spot saved on
+      // a large monitor could otherwise sit entirely off-screen in a smaller
+      // window, with no way to grab the bar back (drag only clamps mid-drag).
+      const w = root.offsetWidth || 220, h = root.offsetHeight || 48;
+      const x = RK.clamp(p.x, 0, Math.max(0, window.innerWidth - w));
+      const y = RK.clamp(p.y, 0, Math.max(0, window.innerHeight - h));
+      root.style.left = x + "px"; root.style.top = y + "px"; root.style.bottom = "auto";
       root.style.transformOrigin = "top left"; root.style.setProperty("--rk-pos", "scale(var(--rk-z, 1))");
     }
   }
@@ -269,7 +282,6 @@
   // Shared by the user clicking minimize/restore here and by syncUI applying a
   // change made in another tab — the latter must not write back to storage.
   function applyMinimized(min, instant) {
-    minimized = min;
     RK.state.minimized = min;
     if (min) { closePop(); hideTip(); }
     setBarCollapsed(min, instant);
@@ -313,7 +325,11 @@
   }
 
   // ---- tool rendering ----------------------------------------------------
-  function render() {
+  // `changedId` (optional) names the tool whose state changed: an open
+  // settings popover is rebuilt only when it belongs to that tool (or when no
+  // id is given), so toggling an unrelated tool doesn't wipe focus/caret in a
+  // panel the user is interacting with.
+  function render(changedId) {
     if (!root) return;
     hideTip(); // the hovered button may be about to be replaced
     toolsEl.replaceChildren();
@@ -328,9 +344,11 @@
 
     // Keep a still-open settings popover live (e.g. eyedropper's "last picked").
     if (pop && pop.kind === "panel") {
-      const t = RK.tools[pop.id];
-      pop.inner.replaceChildren();
-      try { t.panel(pop.inner); } catch (e) { console.error("[RK panel]", pop.id, e); }
+      if (changedId == null || changedId === pop.id) {
+        const t = RK.tools[pop.id];
+        pop.inner.replaceChildren();
+        try { t.panel(pop.inner); } catch (e) { console.error("[RK panel]", pop.id, e); }
+      }
       const b = toolsEl.querySelector(`.rk-tool[data-tid="${pop.id}"]`);
       if (b) b.classList.add("settings-open");
     }
@@ -340,7 +358,7 @@
     const t = RK.tools[id];
     const on = RK.isActive(id);
     const btn = iconBtn(t.icon, t.name, "rk-tool" + (on ? " on" : ""),
-      () => { RK.toggle(id); render(); });
+      () => { RK.toggle(id); render(id); });
     btn.dataset.tid = id; // lets the tooltip surface this tool's hotkey
     if (on) btn.classList.add("on");
     // Tools with a settings panel open it on right-click (no separate gear).
@@ -431,7 +449,7 @@
       e.preventDefault();
       e.stopPropagation();
       RK.toggle(id);
-      render();
+      render(id);
     }, true);
   }
 
@@ -493,15 +511,12 @@
   }
 
   // The whole bar is a drag handle; interactive controls opt out so clicks work.
+  // The move/up listeners live only for the duration of a drag — they attach on
+  // mousedown and detach on mouseup, so the host page doesn't run our handler
+  // on every pointer move for the rest of its life.
   function enableDrag() {
     let d = null;
-    root.addEventListener("mousedown", (e) => {
-      if (e.target.closest(".rk-btn, .rk-pop")) return;
-      const r = root.getBoundingClientRect();
-      d = { sx: e.clientX, sy: e.clientY, ox: r.left, oy: r.top, moved: false };
-      e.preventDefault();
-    });
-    window.addEventListener("mousemove", (e) => {
+    const onMove = (e) => {
       if (!d) return;
       if (!d.moved && Math.abs(e.clientX - d.sx) < 4 && Math.abs(e.clientY - d.sy) < 4) return;
       if (!d.moved) { root.classList.add("dragging"); closePop(); hideTip(); }
@@ -511,8 +526,8 @@
       root.style.left = x + "px"; root.style.top = y + "px";
       root.style.bottom = "auto";
       root.style.transformOrigin = "top left"; root.style.setProperty("--rk-pos", "scale(var(--rk-z, 1))");
-    });
-    window.addEventListener("mouseup", () => {
+    };
+    const onUp = () => {
       if (!d) return;
       root.classList.remove("dragging");
       if (d.moved) {
@@ -521,6 +536,16 @@
         RK.persistUI();
       }
       d = null;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    root.addEventListener("mousedown", (e) => {
+      if (e.target.closest(".rk-btn, .rk-pop")) return;
+      const r = root.getBoundingClientRect();
+      d = { sx: e.clientX, sy: e.clientY, ox: r.left, oy: r.top, moved: false };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      e.preventDefault();
     });
   }
 
@@ -540,10 +565,11 @@
       if (RK.state.minimized) minimize(justBuilt); else restore(justBuilt);
       RK.persistUI();
     },
-    // Closing the toolbar also turns off every tool — nothing lingers on the page.
+    // Closing the toolbar also turns off every tool — nothing lingers on the
+    // page. RK.state.minimized is left as-is so the bar comes back in the
+    // collapsed/expanded state the user last chose.
     hide() {
       clearAll(); closePop();
-      minimized = false;
       setHandleVisible(false);
       setBarCollapsed(true);
       RK.state.visible = false;
@@ -558,7 +584,7 @@
     },
     reveal() {
       if (!RK.state.visible) return;
-      if (minimized) setHandleVisible(true, true);
+      if (RK.state.minimized) setHandleVisible(true, true);
       else setBarCollapsed(false, true);
     },
     // Mirror shell-state changes made in ANOTHER tab (core.js relays
@@ -585,7 +611,7 @@
     // Where the bar currently sits, so a replacement UI can dock in the same spot.
     // null while minimized/hidden — caller should fall back to its default dock.
     barRect() {
-      return root && RK.state.visible && !minimized ? root.getBoundingClientRect() : null;
+      return root && RK.state.visible && !RK.state.minimized ? root.getBoundingClientRect() : null;
     },
     render,
   };
