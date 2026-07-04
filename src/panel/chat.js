@@ -97,7 +97,9 @@
 
   // Minimum native-host protocol version this panel needs (the host reports
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
-  const EXPECTED_HOST_VERSION = 3;
+  // A stale host is first asked to update itself (`selfUpdate`, host v4+);
+  // the manual install.sh banner only shows when that goes unanswered.
+  const EXPECTED_HOST_VERSION = 5;
 
   let els = {};
   let port = null;
@@ -106,6 +108,10 @@
   let reconnectTimer = null;
   let mounted = false;
   let home = null;
+  // Grace timer for host self-update: set when a stale host is asked to update
+  // itself; if it fires the host never answered (too old) — show the manual
+  // install command instead.
+  let hostUpdateTimer = null;
 
   // Tab model: id -> chat. `order` is the visible tab order; `history` holds
   // closed conversations you can reopen.
@@ -243,6 +249,10 @@
       started: false,
       turnRunning: false,
       turnStatusText: "",
+      // Prompts submitted while a turn is running. Each entry is
+      // { text, contexts, attachments, el } — drained one at a time from
+      // endTurn() once the in-flight turn finishes.
+      queue: [],
       messagesEl,
       // Status pill node, appended to the end of messagesEl while a turn runs (or
       // a result summary is showing). Lives in the stream, not a pinned bar.
@@ -251,6 +261,9 @@
       currentAssistantBody: null,
       toolCards: new Map(),
       emittedToolIds: new Set(),
+      // Current run of consecutive tool cards, folded into one summary line
+      // ("Ran 5 commands, read 2 files"). Closed by text blocks and turn end.
+      toolGroup: null,
       // Live-streaming state (--include-partial-messages). streamBlocks maps a
       // content-block index to its in-progress DOM node; streamedMsgIds records
       // which assistant messages were rendered live so the final `assistant`
@@ -957,6 +970,7 @@
   }
 
   function addText(chat, body, text) {
+    closeToolGroup(chat);
     if (chat.pendingUsageCard) {
       chat.pendingUsageCard = false;
       const parsed = parseUsageText(text);
@@ -988,7 +1002,7 @@
     let out = "";
     for (const child of body.children) {
       if (!child.classList) continue;
-      if (child.classList.contains("tool-card") || child.classList.contains("msg-footer")) continue;
+      if (child.classList.contains("tool-card") || child.classList.contains("tool-group") || child.classList.contains("msg-footer")) continue;
       const t = child.innerText || child.textContent || "";
       if (t) out += (out ? "\n" : "") + t;
     }
@@ -1088,6 +1102,7 @@
         const body = ensureAssistantBody(chat, chat.streamMsgId);
         const cb = ev.content_block || {};
         if (cb.type === "text") {
+          closeToolGroup(chat);
           const node = el("div", "assistant-stream streaming");
           body.appendChild(node);
           chat.streamBlocks.set(ev.index, { type: "text", el: node, buf: "", raf: 0 });
@@ -1171,9 +1186,122 @@
     const resultEl = el("div", "tool-result hidden");
     card.appendChild(resultEl);
 
-    body.appendChild(card);
+    appendToolCard(chat, body, card, block.name);
     chat.toolCards.set(block.id, { card, resultEl, toggle, name: block.name });
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+  }
+
+  // ---- consecutive tool-call grouping (Claude Code-style) --------------------
+  // A run of back-to-back tool calls folds into one line — "Ran 5 commands,
+  // ran an agent, read 2 files ›" — expandable to the individual cards. While
+  // the run is live, only the newest card shows below the summary; once prose
+  // arrives (or the turn ends) the run collapses to the summary line alone.
+  function appendToolCard(chat, body, card, name) {
+    card.dataset.tool = name || "";
+    const last = body.lastElementChild;
+    let g = chat.toolGroup;
+    if (g && !g.closed && g.host === body && g.el === last) {
+      g.listEl.appendChild(card);
+      g.names.push(name || "");
+      updateToolGroupSummary(g);
+      return;
+    }
+    if (last && last.classList && last.classList.contains("tool-card")) {
+      // Second consecutive call — fold the lone previous card into a new group.
+      g = makeToolGroup(chat, body);
+      body.replaceChild(g.el, last);
+      g.listEl.appendChild(last);
+      g.names.push(last.dataset.tool || "");
+      g.listEl.appendChild(card);
+      g.names.push(name || "");
+      chat.toolGroup = g;
+      updateToolGroupSummary(g);
+      return;
+    }
+    chat.toolGroup = null;
+    body.appendChild(card);
+  }
+
+  function makeToolGroup(chat, body) {
+    const wrap = el("div", "tool-group collapsed running");
+    const head = el("button", "tool-group-head");
+    head.type = "button";
+    const summaryEl = el("span", "tool-group-summary");
+    head.appendChild(summaryEl);
+    const toggle = el("span", "tool-group-toggle");
+    toggle.innerHTML = ICON("caret-down", 14);
+    head.appendChild(toggle);
+    head.addEventListener("click", () => wrap.classList.toggle("collapsed"));
+    wrap.appendChild(head);
+    const listEl = el("div", "tool-group-list");
+    wrap.appendChild(listEl);
+    return { el: wrap, listEl, summaryEl, host: body, names: [], closed: false };
+  }
+
+  function updateToolGroupSummary(g) {
+    // Count calls per category, keeping first-appearance order.
+    const counts = new Map();
+    for (const n of g.names) {
+      const k = toolGroupKey(n);
+      counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    const parts = [];
+    for (const [k, c] of counts) parts.push(toolGroupPhrase(k, c));
+    const s = parts.join(", ");
+    g.summaryEl.textContent = s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  function toolGroupKey(name) {
+    switch (name) {
+      case "Bash": return "cmd";
+      case "Read": return "read";
+      case "Edit":
+      case "NotebookEdit": return "edit";
+      case "Write": return "write";
+      case "Glob":
+      case "Grep":
+      case "ToolSearch": return "search";
+      case "WebSearch": return "websearch";
+      case "WebFetch": return "fetch";
+      case "Task":
+      case "Agent": return "agent";
+      case "TodoWrite": return "plan";
+      case "Skill": return "skill";
+    }
+    const m = /^mcp__(.+?)__/.exec(name || "");
+    if (m) return "mcp:" + m[1];
+    return "tool";
+  }
+
+  function toolGroupPhrase(key, n) {
+    const one = n === 1;
+    switch (key) {
+      case "cmd": return one ? "ran a command" : `ran ${n} commands`;
+      case "read": return one ? "read a file" : `read ${n} files`;
+      case "edit": return one ? "made an edit" : `made ${n} edits`;
+      case "write": return one ? "wrote a file" : `wrote ${n} files`;
+      case "search": return one ? "ran a search" : `ran ${n} searches`;
+      case "websearch": return one ? "searched the web" : `searched the web ${n} times`;
+      case "fetch": return one ? "fetched a page" : `fetched ${n} pages`;
+      case "agent": return one ? "ran an agent" : `ran ${n} agents`;
+      case "plan": return one ? "updated the plan" : `updated the plan ${n} times`;
+      case "skill": return one ? "used a skill" : `used ${n} skills`;
+    }
+    if (key.startsWith("mcp:")) {
+      const server = key.slice(4).replace(/[_-]+/g, " ");
+      return one ? `used ${server}` : `used ${server} ${n} times`;
+    }
+    return one ? "used a tool" : `used ${n} tools`;
+  }
+
+  // End the current run: the live card folds away and only the summary line
+  // stays. Called when prose starts, the turn ends, or the session resets.
+  function closeToolGroup(chat) {
+    const g = chat && chat.toolGroup;
+    if (!g) return;
+    g.closed = true;
+    g.el.classList.remove("running");
+    chat.toolGroup = null;
   }
 
   function toolSummary(chat, name, input) {
@@ -1217,7 +1345,7 @@
       // the bare .code-block isn't matched by the collapsed-hide rule and the
       // command would stay visible under the head.
       const d = el("div", "tool-detail");
-      d.appendChild(R.codeBlock(input.command, "bash"));
+      d.appendChild(bashCommandBlock(input.command));
       return d;
     }
     if (name === "Write" && input.content != null) {
@@ -1233,6 +1361,34 @@
     return null;
   }
 
+  // Terminal-style rendering for a Bash tool call's command: a leading `$`
+  // prompt glyph plus a copy button pinned to the top-right of the block,
+  // matching how Claude Code's own CLI renders shell commands.
+  function bashCommandBlock(command) {
+    const wrap = el("div", "bash-block");
+    wrap.appendChild(el("span", "bash-prompt", "$"));
+    wrap.appendChild(R.codeBlock(command, "bash"));
+    const copyBtn = el("button", "bash-copy");
+    copyBtn.type = "button";
+    copyBtn.title = "Copy command";
+    copyBtn.setAttribute("aria-label", "Copy command");
+    copyBtn.innerHTML = ICON("copy", 12);
+    copyBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (!navigator.clipboard || !navigator.clipboard.writeText) return;
+      navigator.clipboard.writeText(command).then(() => {
+        copyBtn.classList.add("copied");
+        copyBtn.innerHTML = ICON("check", 12);
+        setTimeout(() => {
+          copyBtn.classList.remove("copied");
+          copyBtn.innerHTML = ICON("copy", 12);
+        }, 1200);
+      }).catch(() => {});
+    });
+    wrap.appendChild(copyBtn);
+    return wrap;
+  }
+
   function langFromPath(p) {
     if (!p) return "";
     const ext = p.split(".").pop().toLowerCase();
@@ -1246,6 +1402,11 @@
     entry.toggle.classList.remove("running");
     entry.toggle.classList.add("done");
     entry.toggle.classList.toggle("err", !!isError);
+    // A failure inside a folded run tints the group chevron so it isn't lost.
+    if (isError) {
+      const group = entry.card.closest(".tool-group");
+      if (group) group.classList.add("err");
+    }
     const text = normalizeResult(content);
     if (text.trim()) {
       entry.resultEl.classList.remove("hidden");
@@ -1768,6 +1929,7 @@
 
   function endTurn(chat, result) {
     chat.turnRunning = false;
+    closeToolGroup(chat);
     finalizeAssistant(chat, chat.currentAssistantBody, Date.now());
     chat.currentAssistantId = null;
     chat.currentAssistantBody = null;
@@ -1790,6 +1952,8 @@
       if (entry.toggle.classList.contains("running")) {
         entry.toggle.classList.remove("running");
         entry.toggle.classList.add("done", "err");
+        const group = entry.card.closest(".tool-group");
+        if (group) group.classList.add("err");
       }
     }
     if (result) chat.turnStatusText = "";
@@ -1797,6 +1961,9 @@
       setRunningUI(chat.turnRunning);
       renderTurnStatus(chat);
     }
+    // Send the next queued prompt, if any — keeps working even if the user
+    // has since switched to a different tab.
+    dispatchNextQueued(chat);
   }
 
   // ---- running-status pill --------------------------------------------------
@@ -1871,6 +2038,25 @@
     if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
   }
 
+  // ---- host-outdated banner ---------------------------------------------
+  // "updating": a stale host was asked to refresh itself — just say so while
+  // it restarts. "manual": the self-update went unanswered or failed (host
+  // too old, offline) — show the install command. "hidden": version is fine.
+  function setHostBanner(state) {
+    if (!els.hostBanner) return;
+    els.hostBanner.classList.toggle("hidden", state === "hidden");
+    els.hostBanner.classList.toggle("updating", state === "updating");
+    if (els.hostBannerText) {
+      els.hostBannerText.textContent =
+        state === "updating"
+          ? "Host is outdated — updating it automatically…"
+          : "Host is outdated — run this, then reload the extension:";
+    }
+    if (els.hostBannerIc) {
+      els.hostBannerIc.innerHTML = state === "updating" ? '<span class="host-outdated-spinner"></span>' : ICON("warning", 15);
+    }
+  }
+
   // ---- host transport -------------------------------------------------------
   function connect() {
     clearTimeout(reconnectTimer);
@@ -1918,19 +2104,36 @@
           if (a) systemNote(a, "Host is up but couldn't find the `claude` CLI. Install it: npm i -g @anthropic-ai/claude-code", "warn");
         }
         // The extension updates via git/store, but the native host runs from a
-        // copy in ~/.lizard-studio that only install.sh refreshes — so a stale
-        // host is easy to end up with and otherwise fails silently (missing
-        // tools, unknown ops). Hosts older than the version check don't send
-        // `version` at all, which reads as 0 and also triggers the warning.
-        if ((msg.version || 0) < EXPECTED_HOST_VERSION) {
-          const a = chats.get(activeId);
-          if (a) systemNote(a, "The native host is outdated for this extension version — some features won't work. Update it, then reload the extension:  curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash", "warn");
+        // copy in ~/.lizard-studio that install.sh seeds — so a stale host is
+        // easy to end up with and otherwise fails silently (missing tools,
+        // unknown ops). Ask a stale host to update itself: v4+ hosts refetch
+        // their files from GitHub and restart (the reconnect lands back here
+        // with a good version). Hosts too old to know the op ignore it, and
+        // the grace timer swaps the banner to the manual install command.
+        // Hosts older than the version check don't send `version` at all,
+        // which reads as 0 and takes the same path.
+        clearTimeout(hostUpdateTimer);
+        if ((msg.version || 0) >= EXPECTED_HOST_VERSION) {
+          setHostBanner("hidden");
+        } else {
+          setHostBanner("updating");
+          post({ type: "selfUpdate" });
+          hostUpdateTimer = setTimeout(() => setHostBanner("manual"), 8000);
         }
         // Start whichever tab is in front; others start when first shown.
         {
           const a = chats.get(activeId);
           if (a && !a.started) startChatSession(a);
           maybeReplay(a);
+        }
+        break;
+      case "interrupted":
+        // Stop hard-kills the process and resumes in a fresh one — end the
+        // turn right away instead of waiting on a `result` that isn't coming.
+        // The `started` event for the respawned process follows separately.
+        if (chat && chat.turnRunning) {
+          endTurn(chat, null);
+          systemNote(chat, "Stopped.");
         }
         break;
       case "started":
@@ -1948,6 +2151,15 @@
         break;
       case "transcript":
         if (chat) replayTranscript(chat, msg.events);
+        break;
+      case "selfUpdate":
+        // updated:true → the host is about to restart; keep "updating…" up
+        // until the reconnect's `ready` re-evaluates the version. Anything
+        // else (already current yet still stale, fetch failed) → manual.
+        if (!msg.updated) {
+          clearTimeout(hostUpdateTimer);
+          setHostBanner("manual");
+        }
         break;
       case "browser":
         // Not chat-scoped — claude is inspecting the live browser tab.
@@ -2122,6 +2334,7 @@
     chat.statusEl = null; // wiped with the stream; recreated on next render
     chat.permCards.clear(); // card nodes went with the innerHTML wipe
     chat.toolCards.clear();
+    chat.toolGroup = null; // its nodes went with the innerHTML wipe too
     chat.emittedToolIds.clear();
     chat.currentAssistantId = null;
     chat.currentAssistantBody = null;
@@ -2133,6 +2346,7 @@
     chat.streamBlocks.clear();
     chat.streamedMsgIds.clear();
     chat.streamMsgId = null;
+    chat.queue = []; // stale prompts from the wiped conversation shouldn't replay
     if (chat.id === activeId) {
       renderTurnStatus(chat);
       updateSetup();
@@ -2172,13 +2386,93 @@
     const hasContext = Array.isArray(chat.contexts) && chat.contexts.length > 0;
     const attachments = Array.isArray(chat.attachments) ? chat.attachments : [];
     const hasAttach = attachments.length > 0;
-    if ((!text && !hasContext && !hasAttach) || chat.turnRunning || !connected) return;
+    if ((!text && !hasContext && !hasAttach) || !connected) return;
     // Can't run an agent without a working directory — prompt for one instead of
     // silently falling back to $HOME.
     if (!chat.cwd) {
       post({ type: "pickFolder", id: chat.id }) || promptForFolder(chat);
       return;
     }
+    // A turn is already streaming — queue this one instead of dropping it.
+    // deliverPrompt() drains the queue from endTurn() once the turn finishes.
+    if (chat.turnRunning) {
+      queuePrompt(chat, text);
+      return;
+    }
+    els.input.value = "";
+    autosize();
+    await deliverPrompt(chat, text);
+  }
+
+  // Stashes a prompt (plus its context/attachments) on the chat and shows a
+  // dimmed bubble with a cancel affordance. Composer is cleared immediately so
+  // the user can keep typing further queued messages.
+  function queuePrompt(chat, text) {
+    if (!Array.isArray(chat.queue)) chat.queue = [];
+    const entry = {
+      text,
+      contexts: Array.isArray(chat.contexts) ? chat.contexts.slice() : [],
+      attachments: Array.isArray(chat.attachments) ? chat.attachments.slice() : [],
+    };
+    chat.queue.push(entry);
+    chat.contexts = [];
+    chat.attachments = [];
+    renderContextChips();
+    renderAttachmentThumbs();
+    els.input.value = "";
+    autosize();
+    entry.el = renderQueuedBubble(chat, entry);
+  }
+
+  function renderQueuedBubble(chat, entry) {
+    const row = el("div", "msg msg-user queued");
+    const bubble = el("div", "bubble");
+    if (entry.attachments.length) {
+      const thumbs = el("div", "bubble-thumbs");
+      for (const a of entry.attachments) {
+        const img = el("img", "bubble-thumb");
+        img.src = a.dataUrl;
+        thumbs.appendChild(img);
+      }
+      bubble.appendChild(thumbs);
+    }
+    if (entry.text) bubble.appendChild(R.markdown(entry.text));
+    row.appendChild(bubble);
+    const tag = el("div", "queued-tag");
+    tag.appendChild(el("span", null, "Queued — will send when the current turn finishes"));
+    const cancel = el("button", "queued-cancel");
+    cancel.type = "button";
+    cancel.innerHTML = ICON("x", 11);
+    cancel.title = "Remove from queue";
+    cancel.addEventListener("click", () => {
+      const idx = chat.queue.indexOf(entry);
+      if (idx !== -1) chat.queue.splice(idx, 1);
+      row.remove();
+    });
+    tag.appendChild(cancel);
+    row.appendChild(tag);
+    append(chat, row);
+    return row;
+  }
+
+  // Drains the next queued prompt (if any) once a turn finishes. Runs even if
+  // `chat` isn't the active tab — background chats keep working while queued.
+  function dispatchNextQueued(chat) {
+    if (!Array.isArray(chat.queue) || !chat.queue.length) return;
+    const entry = chat.queue.shift();
+    if (entry.el && entry.el.parentNode) entry.el.remove();
+    chat.contexts = entry.contexts;
+    chat.attachments = entry.attachments;
+    if (chat.id === activeId) {
+      renderContextChips();
+      renderAttachmentThumbs();
+    }
+    deliverPrompt(chat, entry.text);
+  }
+
+  async function deliverPrompt(chat, text) {
+    const hasContext = Array.isArray(chat.contexts) && chat.contexts.length > 0;
+    const attachments = Array.isArray(chat.attachments) ? chat.attachments : [];
     if (!chat.started) startChatSession(chat);
     // Silent, always-on context: what tabs are open right now, active one flagged.
     const tabsBlock = await buildTabsContextBlock(chat);
@@ -2213,10 +2507,10 @@
     post({ type: "prompt", id: chat.id, text: sentText, images });
     chat.contexts = [];
     chat.attachments = [];
-    renderContextChips();
-    renderAttachmentThumbs();
-    els.input.value = "";
-    autosize();
+    if (chat.id === activeId) {
+      renderContextChips();
+      renderAttachmentThumbs();
+    }
     chat.empty = false;
     chat.turnRunning = true;
     chat.turnStatusText = "";
@@ -2234,9 +2528,11 @@
       chat.title = (text || "New chat").replace(/\s+/g, " ").slice(0, 40);
       renderTabs();
     }
-    setRunningUI(true);
+    if (chat.id === activeId) {
+      setRunningUI(true);
+      startStatusTicker();
+    }
     renderTurnStatus(chat);
-    startStatusTicker();
     updateSetup();
     savePrefs();
   }
@@ -2250,8 +2546,9 @@
   function interrupt() {
     const chat = chats.get(activeId);
     if (!chat) return;
+    // The host hard-kills and resumes the session (see `interrupted` below) —
+    // no need for an "Interrupting…" note, the turn just stops.
     post({ type: "interrupt", id: chat.id });
-    systemNote(chat, "Interrupting…");
   }
 
   // ---- interactive login ----------------------------------------------------
@@ -2723,12 +3020,28 @@
     els.copyInstall = root.querySelector("#chat-copy-install");
     els.attachFileBtn = root.querySelector("#attach-file-btn");
     els.fileInput = root.querySelector("#file-input");
+    els.hostBanner = root.querySelector("#host-outdated-banner");
+    els.hostBannerText = root.querySelector("#host-outdated-text");
+    els.hostBannerCopy = root.querySelector("#host-outdated-copy");
+    els.hostBannerIc = root.querySelector("#host-outdated-ic");
 
     // Static icons.
     root.querySelector("#new-chat-btn").innerHTML = ICON("plus", 17);
     root.querySelector("#history-btn").innerHTML = ICON("history", 17);
     root.querySelector("#folder-ic").innerHTML = ICON("folder", 14);
     root.querySelector("#branch-ic").innerHTML = ICON("git-branch", 13);
+    els.hostBannerCopy.innerHTML = ICON("copy", 13);
+    els.hostBannerCopy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(els.hostBannerCopy.dataset.cmd);
+        els.hostBannerCopy.innerHTML = ICON("check", 13);
+        els.hostBannerCopy.classList.add("copied");
+        setTimeout(() => {
+          els.hostBannerCopy.innerHTML = ICON("copy", 13);
+          els.hostBannerCopy.classList.remove("copied");
+        }, 1500);
+      } catch (_) {}
+    });
     els.send.innerHTML = ICON("send", 16);
     els.stop.innerHTML = ICON("stop", 14);
     els.attachFileBtn.innerHTML = ICON("plus", 15);
@@ -2903,6 +3216,16 @@
       <div class="subbar-actions">
         <button id="new-chat-btn" class="icon-btn" title="New chat"></button>
         <button id="history-btn" class="icon-btn" title="Chat history"></button>
+      </div>
+    </div>
+    <div id="host-outdated-banner" class="host-outdated-banner hidden">
+      <span id="host-outdated-ic" class="host-outdated-ic"></span>
+      <div class="host-outdated-body">
+        <div id="host-outdated-text" class="host-outdated-text">Host is outdated — run this, then reload the extension:</div>
+        <div class="host-outdated-cmd">
+          <code id="host-outdated-code">curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash</code>
+          <button id="host-outdated-copy" class="host-outdated-copy-btn" title="Copy install command" data-cmd="curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash"></button>
+        </div>
       </div>
     </div>
     <div id="chat-stack" class="chat-stack"></div>

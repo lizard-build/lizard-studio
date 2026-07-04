@@ -501,6 +501,69 @@ body {
 .attach-file-btn:hover { background: rgba(255, 255, 255, 0.08); }
 .hidden-file-input { display: none; }
 
+/* ---- host-outdated banner: persistent above the chat stack, survives tab
+   switches (lives outside .chat-stack), until the host is reinstalled and the
+   extension reloaded. ---- */
+.host-outdated-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 6px 8px 0;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.1);
+  color: #fbbf24;
+}
+.host-outdated-ic { display: inline-flex; flex: 0 0 auto; margin-top: 1px; }
+.host-outdated-spinner {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 2px solid rgba(251, 191, 36, 0.3);
+  border-top-color: #fbbf24;
+  animation: host-outdated-spin 0.7s linear infinite;
+}
+@keyframes host-outdated-spin { to { transform: rotate(360deg); } }
+.host-outdated-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.host-outdated-text { font-size: 12px; font-weight: 500; line-height: 1.4; }
+.host-outdated-cmd {
+  display: flex;
+  align-items: stretch;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.host-outdated-cmd code {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.host-outdated-copy-btn {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  border: none;
+  border-left: 1px solid rgba(245, 158, 11, 0.25);
+  background: transparent;
+  color: #fbbf24;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.host-outdated-copy-btn:hover { background: rgba(245, 158, 11, 0.15); }
+.host-outdated-copy-btn.copied { color: var(--control-primary); }
+/* While the host self-updates there is nothing for the user to run. */
+.host-outdated-banner.updating .host-outdated-cmd { display: none; }
+
 /* ---- chat stack: one scrollable .chat-messages per tab, only active shown ---- */
 .chat-stack {
   position: relative;
@@ -643,6 +706,38 @@ body {
   padding: 8px 12px;
   color: var(--text-primary);
 }
+/* Prompt submitted while a turn is still streaming — shown dimmed until it's
+   actually dispatched (see dispatchNextQueued in chat.js). */
+.msg-user.queued .bubble {
+  opacity: 0.55;
+  border-style: dashed;
+}
+.queued-tag {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+.queued-cancel {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.queued-cancel:hover { color: var(--other-red); background: rgba(239, 68, 68, 0.12); }
 .msg-assistant {
   align-items: flex-start;
 }
@@ -659,13 +754,14 @@ body {
    directly on the copy button), but stays invisible and non-interactive until
    the message is hovered — no dead zone where the button isn't there yet.
    The copy button keeps a 24px hit/hover box for a comfortable click target,
-   but left-aligns its icon inside that box (rather than centering + correcting
-   with a magic negative margin) so the icon's own edge sits flush with the
-   text's left edge regardless of icon size. */
+   with the icon centered inside it. Pulled up slightly (negative margin,
+   rather than shrinking assistant-body's shared gap) so it sits closer to the
+   text than the gap between other message blocks. */
 .msg-footer {
   display: flex;
   align-items: center;
   gap: 2px;
+  margin-top: -4px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.12s;
@@ -678,7 +774,7 @@ body {
   appearance: none;
   display: inline-flex;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: center;
   width: 24px;
   height: 24px;
   padding: 0;
@@ -1187,6 +1283,43 @@ code.inline {
 .tool-detail { padding: 2px 0 2px 22px; }
 .tool-detail .code-block,
 .tool-detail .diff { margin: 0 0 6px; }
+
+/* Bash command: a terminal-style `$` prompt plus a hover-revealed copy button
+   pinned to the top-right corner, like Claude Code's own CLI rendering. */
+.bash-block { position: relative; }
+.bash-block .code-block { padding-left: 24px; padding-right: 30px; }
+.bash-prompt {
+  position: absolute;
+  left: 12px;
+  top: 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+.bash-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.15s, color 0.15s;
+}
+.bash-block:hover .bash-copy { opacity: 1; }
+.bash-copy:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.08); }
+.bash-copy.copied { opacity: 1; color: var(--control-primary); }
+
 .tool-result { padding: 0 0 4px 22px; }
 .tool-result .code-block { margin: 0; background: rgba(255, 255, 255, 0.05); }
 .tool-result.err .code-block { background: rgba(239, 68, 68, 0.1); }
@@ -1198,6 +1331,47 @@ code.inline {
   list-style: none;
 }
 .result-fold summary::-webkit-details-marker { display: none; }
+
+/* Consecutive tool calls fold into one summary line (Claude Code-style):
+   "Ran 5 commands, ran an agent, read 2 files ›". While the run is live the
+   newest card stays visible under the line; once it closes, only the summary
+   remains and clicking it reveals the individual cards. */
+.tool-group { overflow: hidden; }
+.tool-group-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 0;
+  max-width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+.tool-group-summary {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tool-group-head:hover .tool-group-summary { color: var(--text-primary); }
+.tool-group-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  transition: transform 0.15s ease, color 0.15s ease;
+}
+.tool-group-head:hover .tool-group-toggle { color: var(--text-primary); }
+.tool-group.collapsed .tool-group-toggle { transform: rotate(-90deg); }
+.tool-group.err .tool-group-toggle { color: var(--other-red); }
+.tool-group.collapsed .tool-group-list > .tool-card { display: none; }
+.tool-group.collapsed.running .tool-group-list > .tool-card:last-child { display: block; }
 
 /* diff */
 .diff {

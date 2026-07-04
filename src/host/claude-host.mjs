@@ -18,7 +18,7 @@
 // Protocol — panel -> host:
 //   { type:"start",   id, cwd, model?, effort?, permissionMode?, resume? }  spawn (or respawn) claude
 //   { type:"prompt",  id, text, images? }                          send one user turn (images: [{mediaType,data}])
-//   { type:"interrupt", id }                                       cancel the current turn
+//   { type:"interrupt", id }                                       hard-stop: kill + resume the session
 //   { type:"stop",    id }                                         kill the claude process
 //   { type:"close",   id }                                         kill + forget the session
 //   { type:"setMode", id, permissionMode }                         restart, resuming the session
@@ -37,6 +37,7 @@
 // Protocol — host -> panel:
 //   { type:"ready",   version, home, claudePath, ok }          sent once on connect (no id)
 //   { type:"started", id, pid, cwd, model, effort, permissionMode }
+//   { type:"interrupted", id }                                 the turn was hard-stopped; a respawn follows
 //   { type:"event",   id, data }                               one claude stream-json object
 //   { type:"exit",    id, code }
 //   { type:"folder",  id, path }                               null path == cancelled
@@ -53,7 +54,6 @@ import { existsSync, readFileSync, appendFileSync, readdirSync, mkdirSync, write
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir, userInfo } from "node:os";
-import { randomUUID } from "node:crypto";
 import net from "node:net";
 import https from "node:https";
 
@@ -87,11 +87,12 @@ process.on("unhandledRejection", (reason) => {
 });
 
 // Host protocol version, reported to the panel in the `ready` message. The
-// panel compares it against the version it expects and tells the user to
-// re-run install.sh when the runtime copy in ~/.lizard-studio is stale (the
-// extension updates via git/store, but the host copy only via install.sh).
+// panel compares it against the version it expects; when the runtime copy in
+// ~/.lizard-studio is stale it first asks us to update ourselves (see
+// selfUpdate below) and only falls back to the manual install.sh command if
+// that op isn't answered (hosts older than v4).
 // Bump this on EVERY host change the extension needs to know about.
-const HOST_VERSION = 3;
+const HOST_VERSION = 5;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -148,6 +149,46 @@ async function refreshBundledSkill() {
 // Fire-and-forget at startup; every claude spawn below just reads SKILL_DIR
 // synchronously off disk, so this never adds latency to a chat turn.
 refreshBundledSkill();
+
+// ---- host self-update -------------------------------------------------------
+// The extension updates via git/store, but this runtime copy only via
+// install.sh — so when the panel sees a stale HOST_VERSION it sends
+// `selfUpdate` and we refresh ourselves the same way the bundled skill does:
+// fetch from GitHub raw, atomic-swap on disk, then exit so Chrome relaunches
+// the new copy when the panel reconnects. host-config.json / launch.sh /
+// the browser manifests are machine-specific and never touched.
+const HOST_RAW_BASE = "https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host";
+const HOST_FILES = ["claude-host.mjs", "mcp-browser.mjs"];
+
+async function selfUpdate(id) {
+  try {
+    // Fetch everything before swapping anything, so the pair can't end up
+    // mismatched when the second request fails.
+    const fetched = [];
+    for (const name of HOST_FILES) {
+      fetched.push([name, await fetchText(`${HOST_RAW_BASE}/${name}`)]);
+    }
+    let changed = false;
+    for (const [name, text] of fetched) {
+      const dest = join(HERE, name);
+      if (existsSync(dest) && readFileSync(dest, "utf8") === text) continue;
+      const tmp = dest + ".tmp";
+      writeFileSync(tmp, text, "utf8");
+      renameSync(tmp, dest);
+      changed = true;
+    }
+    send({ type: "selfUpdate", id, updated: changed, restarting: changed });
+    log("selfUpdate:", changed ? "updated — restarting" : "already up to date");
+    if (changed) {
+      // Give the reply a beat to flush through stdout, then exit; the panel's
+      // reconnect relaunches the freshly written host.
+      setTimeout(() => shutdown(0), 150);
+    }
+  } catch (err) {
+    log("selfUpdate failed:", err && err.message);
+    send({ type: "selfUpdate", id, updated: false, error: String((err && err.message) || err) });
+  }
+}
 
 // install.sh writes resolved binary paths here, since Chrome launches native
 // hosts with a minimal PATH that usually misses /opt/homebrew, nvm, etc.
@@ -682,9 +723,16 @@ function sendPrompt(id, text, images) {
 }
 
 function interrupt(id) {
-  // The stream-json control channel cancels the in-flight turn without losing
-  // the session (matches the SDK's query.interrupt()).
-  writeToChild(id, { type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } });
+  // The stream-json control channel's cooperative interrupt only takes effect
+  // at the model's next checkpoint — it can be delayed behind an in-flight
+  // tool call, or even second-guessed by the model itself (it may decide the
+  // interruption was stale and keep going). "Stop" needs to actually stop, so
+  // kill the child outright and resume the same session in a fresh process —
+  // same mechanism already used for model/mode switches mid-conversation.
+  const s = sessions.get(id);
+  if (!s) return;
+  send({ type: "interrupted", id });
+  startClaude({ id, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.mode, resume: s.sessionId });
 }
 
 // ---- interactive login ------------------------------------------------------
@@ -985,6 +1033,9 @@ function handle(msg) {
       break;
     case "authCancel":
       authCancel();
+      break;
+    case "selfUpdate":
+      selfUpdate(id);
       break;
     default:
       // Unknown type — most likely a newer panel talking to an older host. Log
