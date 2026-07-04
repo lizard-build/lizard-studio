@@ -51,12 +51,13 @@
 
 import { spawn, execFile, execSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, appendFileSync, readdirSync, mkdirSync, writeFileSync, renameSync, statSync } from "node:fs";
+import { existsSync, readFileSync, appendFileSync, readdirSync, mkdirSync, writeFileSync, renameSync, statSync, createReadStream } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir, userInfo } from "node:os";
 import net from "node:net";
 import https from "node:https";
+import readline from "node:readline";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // Sibling MCP relay that exposes the browser tools to claude (see mcp-browser.mjs).
@@ -74,9 +75,11 @@ function log(...args) {
 }
 
 // Never let an unexpected throw take the whole host down — that surfaces in the
-// panel as "Native host has exited". Log it and keep running.
+// panel as "Native host has exited". Log it and keep running. (But don't try to
+// report over a dead stdout — that's how an EPIPE would loop back here.)
 process.on("uncaughtException", (err) => {
   log("UNCAUGHT", err && (err.stack || err.message));
+  if (process.stdout.destroyed) return;
   try {
     send({ type: "error", message: "Host error: " + (err && err.message) });
   } catch {
@@ -87,13 +90,50 @@ process.on("unhandledRejection", (reason) => {
   log("UNHANDLED_REJECTION", String(reason));
 });
 
+// EPIPE arrives as an async 'error' event on the stream — the try/catch around
+// stdout.write in send() never sees it. Chrome closing the pipe means the panel
+// is gone: shut down instead of letting spawned children stream into a dead fd.
+process.stdout.on("error", () => {
+  log("stdout error — panel gone, shutting down");
+  shutdown(0);
+});
+
+// Incremental NDJSON reader shared by the bridge socket, claude stdout and the
+// command harvest: feed(chunk) buffers, splits on newlines, JSON.parses every
+// non-empty line and hands it to onMsg (unparsable lines are skipped). maxBuf
+// caps a single pathological line so it can't grow without bound.
+function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
+  let buf = "";
+  return (chunk) => {
+    buf += chunk;
+    if (buf.length > maxBuf) {
+      log("lineJsonReader: dropping oversized line buffer (" + buf.length + " chars)");
+      buf = "";
+      return;
+    }
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      if (!line.trim()) continue;
+      let obj;
+      try {
+        obj = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      onMsg(obj);
+    }
+  };
+}
+
 // Host protocol version, reported to the panel in the `ready` message. The
 // panel compares it against the version it expects; when the runtime copy in
 // ~/.lizard-studio is stale it first asks us to update ourselves (see
 // selfUpdate below) and only falls back to the manual install.sh command if
 // that op isn't answered (hosts older than v4).
 // Bump this on EVERY host change the extension needs to know about.
-const HOST_VERSION = 7;
+const HOST_VERSION = 8;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -111,20 +151,28 @@ const SKILL_FILES = ["SKILL.md", "README.md", "skills.sh.json"];
 const SKILL_RAW_BASE = "https://raw.githubusercontent.com/lizard-build/skill/main";
 const SKILL_REFRESH_TTL_MS = 12 * 60 * 60 * 1000; // 12h — upstream is a thin, rarely-changing bootstrap
 
-function fetchText(url) {
+function fetchText(url, redirects = 1) {
   return new Promise((resolve, reject) => {
-    https
-      .get(url, { headers: { "User-Agent": "lizard-studio-host" } }, (res) => {
-        if (res.statusCode !== 200) {
-          res.resume();
-          return reject(new Error("HTTP " + res.statusCode + " for " + url));
-        }
-        let body = "";
-        res.setEncoding("utf8");
-        res.on("data", (c) => (body += c));
-        res.on("end", () => resolve(body));
-      })
-      .on("error", reject);
+    const req = https.get(url, { headers: { "User-Agent": "lizard-studio-host" }, timeout: 10000 }, (res) => {
+      // Follow a single redirect — raw.githubusercontent can 301 and a silent
+      // failure here would break self-update with no signal to the panel.
+      if (res.statusCode >= 301 && res.statusCode <= 308 && res.headers.location && redirects > 0) {
+        res.resume();
+        return resolve(fetchText(new URL(res.headers.location, url).href, redirects - 1));
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error("HTTP " + res.statusCode + " for " + url));
+      }
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => (body += c));
+      res.on("end", () => resolve(body));
+    });
+    // Without this a network blackhole leaves the promise pending forever —
+    // and with it the panel's whole stale-host recovery flow.
+    req.on("timeout", () => req.destroy(new Error("timeout fetching " + url)));
+    req.on("error", reject);
   });
 }
 
@@ -351,35 +399,22 @@ const BRIDGE_TOKEN = randomBytes(32).toString("hex");
 
 const bridgeServer = net.createServer((sock) => {
   sock.setEncoding("utf8");
-  let buf = "";
-  sock.on("data", (chunk) => {
-    buf += chunk;
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl);
-      buf = buf.slice(nl + 1);
-      if (!line.trim()) continue;
-      let m;
-      try {
-        m = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (m.token !== BRIDGE_TOKEN) {
-        log("bridge: dropping connection with bad/missing token");
-        sock.destroy();
-        return;
-      }
-      const reqId = m.reqId;
-      browserRequest(m.op, m.args, m.session).then((r) => {
-        try {
-          sock.write(JSON.stringify({ reqId, ...r }) + "\n");
-        } catch {
-          /* relay went away */
-        }
-      });
+  const feed = lineJsonReader((m) => {
+    if (m.token !== BRIDGE_TOKEN) {
+      log("bridge: dropping connection with bad/missing token");
+      sock.destroy();
+      return;
     }
+    const reqId = m.reqId;
+    browserRequest(m.op, m.args, m.session).then((r) => {
+      try {
+        sock.write(JSON.stringify({ reqId, ...r }) + "\n");
+      } catch {
+        /* relay went away */
+      }
+    });
   });
+  sock.on("data", feed);
   sock.on("error", () => {});
 });
 bridgeServer.on("error", (err) => log("bridge server error", err && err.message));
@@ -427,23 +462,41 @@ const BROWSER_HINT =
 
 // ---- Chrome native-messaging framing ---------------------------------------
 // Read loop: a 4-byte uint32 LE length, then that many bytes of UTF-8 JSON.
-let inbuf = Buffer.alloc(0);
+// Chunks accumulate in a list and are joined once per complete frame — the old
+// Buffer.concat on every data event re-copied the whole accumulated buffer per
+// chunk (O(n²) for a large frame). The length field is sanity-capped: this
+// framing has no resync point, so a corrupt/desynced header would otherwise
+// make the host buffer forever, silently swallowing every later message.
+const MAX_FRAME = 64 * 1024 * 1024;
+let inChunks = [];
+let inBuffered = 0;
 process.stdin.on("data", (chunk) => {
-  inbuf = Buffer.concat([inbuf, chunk]);
+  inChunks.push(chunk);
+  inBuffered += chunk.length;
   for (;;) {
-    if (inbuf.length < 4) return;
-    const len = inbuf.readUInt32LE(0);
-    if (inbuf.length < 4 + len) return;
-    const body = inbuf.subarray(4, 4 + len);
-    inbuf = inbuf.subarray(4 + len);
-    let msg;
-    try {
-      msg = JSON.parse(body.toString("utf8"));
-    } catch {
-      continue;
+    if (inBuffered < 4) return;
+    if (inChunks[0].length < 4) inChunks = [Buffer.concat(inChunks)];
+    const len = inChunks[0].readUInt32LE(0);
+    if (len > MAX_FRAME) {
+      log("framing desync: header claims " + len + " bytes — unrecoverable, shutting down");
+      shutdown(1);
+      return;
     }
-    log("recv", msg && msg.type);
-    handle(msg);
+    if (inBuffered < 4 + len) return;
+    if (inChunks.length > 1) inChunks = [Buffer.concat(inChunks)];
+    const frame = inChunks[0];
+    let msg = null;
+    try {
+      msg = JSON.parse(frame.subarray(4, 4 + len).toString("utf8"));
+    } catch {
+      /* skip unparsable frame */
+    }
+    inChunks = [frame.subarray(4 + len)];
+    inBuffered -= 4 + len;
+    if (msg) {
+      log("recv", msg && msg.type);
+      handle(msg);
+    }
   }
 });
 process.stdin.on("end", () => {
@@ -492,7 +545,7 @@ function truncateDeep(value, budget = 60000) {
 // a panel-supplied `id`. Each session tracks its own cwd / model / mode and its
 // resumable sessionId. Every host->panel message is tagged with the id so the
 // panel can route the stream back to the right tab.
-const sessions = new Map(); // id -> { id, child, cwd, model, effort, mode, sessionId, stdoutBuf, stderrBuf }
+const sessions = new Map(); // id -> { id, child, cwd, model, effort, mode, sessionId, stderrBuf, permPending }
 
 function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
   id = id || "default";
@@ -513,7 +566,6 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
     effort: effort || null,
     mode: permissionMode || "default",
     sessionId: resume || null,
-    stdoutBuf: "",
     stderrBuf: "",
     // Pending can_use_tool asks: request_id -> the tool's ORIGINAL input. Kept
     // here (not round-tripped through the panel) because host->panel messages
@@ -583,19 +635,7 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
   send({ type: "started", id, pid: proc.pid, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.mode });
   ensureCommands(id, s.cwd, s.model);
 
-  proc.stdout.on("data", (chunk) => {
-    s.stdoutBuf += chunk.toString("utf8");
-    let nl;
-    while ((nl = s.stdoutBuf.indexOf("\n")) >= 0) {
-      const line = s.stdoutBuf.slice(0, nl);
-      s.stdoutBuf = s.stdoutBuf.slice(nl + 1);
-      if (!line.trim()) continue;
-      let obj;
-      try {
-        obj = JSON.parse(line);
-      } catch {
-        continue; // not JSON (shouldn't happen in stream-json) — skip
-      }
+  const feedStdout = lineJsonReader((obj) => {
       // Control-protocol traffic (the SDK channel) is handled here, not
       // forwarded as a transcript event.
       if (obj.type === "control_request" && obj.request) {
@@ -625,20 +665,20 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
             /* child went away */
           }
         }
-        continue;
+        return;
       }
       if (obj.type === "control_cancel_request") {
         // The turn was interrupted (or claude moved on) — the ask is moot.
         s.permPending.delete(obj.request_id);
         send({ type: "permissionCancel", id, requestId: obj.request_id });
-        continue;
+        return;
       }
       if (obj.type === "system" && obj.subtype === "init" && obj.session_id) {
         s.sessionId = obj.session_id;
       }
       send({ type: "event", id, data: obj });
-    }
   });
+  proc.stdout.on("data", (chunk) => feedStdout(chunk.toString("utf8")));
 
   proc.stderr.on("data", (chunk) => {
     s.stderrBuf += chunk.toString("utf8");
@@ -670,6 +710,10 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
 function killSession(id) {
   const s = sessions.get(id);
   if (!s) return;
+  // Any ask still waiting on the user is moot once the process dies — tell the
+  // panel, or its dialog would hang for a process that can't hear the answer.
+  for (const requestId of s.permPending.keys()) send({ type: "permissionCancel", id, requestId });
+  s.permPending.clear();
   if (s.child) {
     const child = s.child;
     child._intentional = true;
@@ -703,7 +747,8 @@ function killAll() {
 // harvest it up front with a throwaway claude that we kill the instant init
 // arrives (before the model is ever queried, so it costs nothing). Cached per
 // cwd, since the command set is determined by the working directory.
-const commandCache = new Map(); // cwd -> string[]
+const commandCache = new Map();   // cwd -> string[]
+const harvestWaiters = new Map(); // cwd -> Set of tab ids awaiting an in-flight harvest
 
 function ensureCommands(id, cwd, model) {
   cwd = cwd || homedir();
@@ -711,10 +756,19 @@ function ensureCommands(id, cwd, model) {
     send({ type: "commands", id, list: commandCache.get(cwd) });
     return;
   }
-  harvestCommands(id, cwd, model);
+  // A harvest for this cwd is already running — two tabs opening in the same
+  // folder shouldn't each spawn a throwaway claude. Queue this tab for the
+  // in-flight harvest's result instead.
+  const waiting = harvestWaiters.get(cwd);
+  if (waiting) {
+    waiting.add(id);
+    return;
+  }
+  harvestWaiters.set(cwd, new Set([id]));
+  harvestCommands(cwd, model);
 }
 
-function harvestCommands(id, cwd, model) {
+function harvestCommands(cwd, model) {
   const args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-mode", "plan"];
   if (model) args.push("--model", model);
   if (existsSync(SKILL_MARKER)) args.push("--plugin-dir", SKILL_DIR);
@@ -723,14 +777,15 @@ function harvestCommands(id, cwd, model) {
     proc = spawn(CLAUDE, args, { cwd, env: CHILD_ENV, stdio: ["pipe", "pipe", "ignore"] });
   } catch (err) {
     log("harvest spawn failed", err.message);
+    harvestWaiters.delete(cwd);
     return;
   }
-  let buf = "";
   let done = false;
   const finish = () => {
     if (done) return;
     done = true;
     clearTimeout(timer);
+    harvestWaiters.delete(cwd); // timed-out/failed waiters are dropped, a later tab retries
     try {
       proc.kill("SIGKILL");
     } catch {
@@ -738,28 +793,18 @@ function harvestCommands(id, cwd, model) {
     }
   };
   const timer = setTimeout(finish, 9000);
-  proc.stdout.on("data", (chunk) => {
-    buf += chunk.toString("utf8");
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl);
-      buf = buf.slice(nl + 1);
-      if (!line.trim()) continue;
-      let o;
-      try {
-        o = JSON.parse(line);
-      } catch {
-        continue;
+  const feed = lineJsonReader((o) => {
+    if (done) return;
+    if (o.type === "system" && o.subtype === "init" && Array.isArray(o.slash_commands)) {
+      commandCache.set(cwd, o.slash_commands);
+      for (const wid of harvestWaiters.get(cwd) || []) {
+        send({ type: "commands", id: wid, list: o.slash_commands });
       }
-      if (o.type === "system" && o.subtype === "init" && Array.isArray(o.slash_commands)) {
-        commandCache.set(cwd, o.slash_commands);
-        send({ type: "commands", id, list: o.slash_commands });
-        log("harvested", o.slash_commands.length, "commands for", cwd);
-        finish();
-        return;
-      }
+      log("harvested", o.slash_commands.length, "commands for", cwd);
+      finish();
     }
   });
+  proc.stdout.on("data", (chunk) => feed(chunk.toString("utf8")));
   proc.on("error", (err) => {
     log("harvest error", err.message);
     finish();
@@ -980,45 +1025,52 @@ function loadTranscript(id, sessionId, cwd) {
     send({ type: "transcript", id, events: [], done: true, missing: true });
     return;
   }
-  let raw;
-  try {
-    raw = readFileSync(file, "utf8");
-  } catch (err) {
-    log("transcript read failed", err.message);
-    send({ type: "transcript", id, events: [], done: true });
-    return;
-  }
-  // Batch events under Chrome's native-message size cap (send() truncates over it).
+  // Streamed line-by-line — transcripts can reach tens of MB, and a
+  // readFileSync here would stall every active claude stream and pending
+  // permission answer while the whole file is read and split.
   let batch = [];
   let size = 0;
+  let failed = false;
   const flush = (done) => {
     if (!batch.length && !done) return;
     send({ type: "transcript", id, events: batch, done });
     batch = [];
     size = 0;
   };
-  for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
+  const stream = createReadStream(file, "utf8");
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  stream.on("error", (err) => {
+    log("transcript read failed", err.message);
+    failed = true;
+    send({ type: "transcript", id, events: [], done: true });
+    rl.close();
+  });
+  rl.on("line", (line) => {
+    if (failed || !line.trim()) return;
     let o;
     try {
       o = JSON.parse(line);
     } catch {
-      continue;
+      return;
     }
     // Keep only the visible conversation: real user/assistant turns. Skip
     // sub-agent sidechains and injected meta (system reminders, hooks).
-    if (o.isSidechain || o.isMeta) continue;
-    if ((o.type !== "user" && o.type !== "assistant") || !o.message) continue;
+    if (o.isSidechain || o.isMeta) return;
+    if ((o.type !== "user" && o.type !== "assistant") || !o.message) return;
     // Carry the JSONL line's `timestamp` so the panel can show a real "Xm ago"
     // on replay instead of resetting every message to "now" on each panel open.
     const ev = { type: o.type, message: o.message, timestamp: o.timestamp };
     const s = JSON.stringify(ev).length;
+    // Batch events under Chrome's native-message size cap (send() truncates over it).
     if (size + s > 700000) flush(false);
     batch.push(ev);
     size += s;
-  }
-  flush(true);
-  log("transcript replayed", file, "→ id", id);
+  });
+  rl.on("close", () => {
+    if (failed) return;
+    flush(true);
+    log("transcript replayed", file, "→ id", id);
+  });
 }
 
 // ---- message dispatch -------------------------------------------------------

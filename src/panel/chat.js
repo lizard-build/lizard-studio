@@ -99,7 +99,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 7;
+  const EXPECTED_HOST_VERSION = 8;
 
   let els = {};
   let port = null;

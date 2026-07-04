@@ -61,7 +61,9 @@ host_dirs() {
         "$HOME/.config/google-chrome/NativeMessagingHosts" \
         "$HOME/.config/chromium/NativeMessagingHosts" \
         "$HOME/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts" \
-        "$HOME/.config/microsoft-edge/NativeMessagingHosts"
+        "$HOME/.config/microsoft-edge/NativeMessagingHosts" \
+        "$HOME/.config/vivaldi/NativeMessagingHosts" \
+        "$HOME/.config/opera/NativeMessagingHosts"
       ;;
   esac
 }
@@ -90,45 +92,66 @@ if [[ -z "$NODE_BIN" ]]; then
   echo "error: 'node' not found on PATH. Install Node 18+ and re-run." >&2
   exit 1
 fi
+# The host is ESM and relies on Node 18+ behavior — an ancient system node
+# would install "successfully" and then die at launch with nothing but
+# "Native host has exited" to go on. Fail here with an actionable message.
+if ! "$NODE_BIN" -e 'process.exit(parseInt(process.versions.node, 10) >= 18 ? 0 : 1)'; then
+  echo "error: Node 18+ required (found $("$NODE_BIN" -v)). Upgrade node and re-run." >&2
+  exit 1
+fi
+# The launcher heredoc double-quotes these paths, which covers spaces — but
+# not quotes/backslashes. Refuse those outright rather than writing a broken
+# launcher that fails opaquely at browser launch.
+case "$NODE_BIN$RUNTIME_DIR" in
+  *\"* | *\\*)
+    echo "error: node or runtime path contains a quote/backslash — unsupported." >&2
+    exit 1
+    ;;
+esac
 if [[ -z "$CLAUDE_BIN" ]]; then
   echo "warning: 'claude' not found on PATH. Install it with:  npm i -g @anthropic-ai/claude-code" >&2
   echo "         The host will still install and look in common locations at runtime." >&2
 fi
 
-# Puts a host file that normally lives alongside this script into the runtime
-# dir — copied from the local checkout when we have one, otherwise fetched
-# straight from GitHub so `curl … | bash` works without a git clone.
-fetch_host_file() {
+# Stages a host file into the runtime dir as "<name>.tmp" — copied from the
+# local checkout when we have one, otherwise fetched from GitHub (with retries)
+# so `curl … | bash` works without a git clone.
+stage_host_file() {
   mkdir -p "$(dirname "$RUNTIME_DIR/$1")"
   if [[ -n "$HERE" && -f "$HERE/$1" ]]; then
-    cp "$HERE/$1" "$RUNTIME_DIR/$1"
+    cp "$HERE/$1" "$RUNTIME_DIR/$1.tmp"
   else
-    curl -fsSL "$RAW_BASE/$1" -o "$RUNTIME_DIR/$1"
+    curl -fsSL --retry 3 "$RAW_BASE/$1" -o "$RUNTIME_DIR/$1.tmp"
   fi
 }
 
 # 0) copy the (self-contained, dependency-free) host into the runtime dir so the
 #    manifest can point outside any TCC-protected folder. Re-copied every run so
 #    `git pull` (or re-running the curl one-liner) picks up host changes.
+#    Everything is staged first and only swapped into place once ALL files are
+#    in hand — an install interrupted mid-download (set -e aborts on a failed
+#    curl) must not leave a mismatched claude-host/mcp-browser pair behind.
+#    Files: the host, the browser MCP relay it hands to claude, and a bundled
+#    fallback copy of the lizard-build/skill bootstrap skill (the host refreshes
+#    the skill from upstream itself afterwards — see claude-host.mjs).
+HOST_FILES=(
+  claude-host.mjs
+  mcp-browser.mjs
+  skills/lizard/SKILL.md
+  skills/lizard/README.md
+  skills/lizard/skills.sh.json
+)
 mkdir -p "$RUNTIME_DIR"
-fetch_host_file claude-host.mjs
-# The browser MCP relay claude spawns to reach the live tab (see claude-host.mjs).
-fetch_host_file mcp-browser.mjs
-# Bundled fallback copy of the lizard-build/skill bootstrap skill, so claude has
-# it available (via --plugin-dir) from the very first run, offline included. The
-# host refreshes this from upstream itself afterwards — see claude-host.mjs.
-fetch_host_file skills/lizard/SKILL.md
-fetch_host_file skills/lizard/README.md
-fetch_host_file skills/lizard/skills.sh.json
+for f in "${HOST_FILES[@]}"; do stage_host_file "$f"; done
+for f in "${HOST_FILES[@]}"; do mv "$RUNTIME_DIR/$f.tmp" "$RUNTIME_DIR/$f"; done
 
 # 1) host config the runtime reads (Chrome launches us with a minimal PATH).
-cat > "$RUNTIME_DIR/host-config.json" <<JSON
-{
-  "nodePath": "$NODE_BIN",
-  "claudePath": "${CLAUDE_BIN:-claude}",
-  "home": "$HOME"
-}
-JSON
+#    Written via JSON.stringify so a path containing quotes/backslashes can't
+#    produce invalid JSON (which would silently degrade the host to discovery).
+"$NODE_BIN" -e '
+  const [node, claude, home, out] = process.argv.slice(1);
+  require("fs").writeFileSync(out, JSON.stringify({ nodePath: node, claudePath: claude, home }, null, 2) + "\n");
+' "$NODE_BIN" "${CLAUDE_BIN:-claude}" "$HOME" "$RUNTIME_DIR/host-config.json"
 
 # 2) launcher: a tiny wrapper so the manifest points at a stable executable that
 #    runs our .mjs with the resolved node, regardless of Chrome's PATH.
@@ -138,25 +161,29 @@ exec "$NODE_BIN" "$RUNTIME_DIR/claude-host.mjs" "\$@"
 SH
 chmod +x "$RUNTIME_DIR/launch.sh"
 
-# 3) native-messaging manifest, origin-locked to our extension.
-MANIFEST_JSON=$(cat <<JSON
-{
-  "name": "$HOST_NAME",
-  "description": "Lizard Claude Code chat host",
-  "path": "$RUNTIME_DIR/launch.sh",
-  "type": "stdio",
-  "allowed_origins": ["chrome-extension://$EXT_ID/"]
-}
-JSON
-)
+# 3) native-messaging manifest, origin-locked to our extension. One master copy
+#    (JSON.stringify — same quoting rationale as the config) is copied into
+#    every browser's host dir.
+MANIFEST_MASTER="$RUNTIME_DIR/$HOST_NAME.json"
+"$NODE_BIN" -e '
+  const [name, path, origin, out] = process.argv.slice(1);
+  require("fs").writeFileSync(out, JSON.stringify({
+    name,
+    description: "Lizard Claude Code chat host",
+    path,
+    type: "stdio",
+    allowed_origins: [origin],
+  }, null, 2) + "\n");
+' "$HOST_NAME" "$RUNTIME_DIR/launch.sh" "chrome-extension://$EXT_ID/" "$MANIFEST_MASTER"
 
 count=0
 while IFS= read -r dir; do
   parent="$(dirname "$dir")"
-  # Only install where the browser itself is present, plus always Chrome.
-  if [[ -d "$parent" || "$dir" == *"/Google/Chrome/"* ]]; then
+  # Only install where the browser itself is present (its profile dir exists) —
+  # no more force-creating Chrome's dir on machines that don't have Chrome.
+  if [[ -d "$parent" ]]; then
     mkdir -p "$dir"
-    printf '%s\n' "$MANIFEST_JSON" > "$dir/$HOST_NAME.json"
+    cp "$MANIFEST_MASTER" "$dir/$HOST_NAME.json"
     echo "  installed -> $dir/$HOST_NAME.json"
     count=$((count + 1))
   fi

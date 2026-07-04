@@ -286,8 +286,20 @@ function connect() {
   sock.on("close", () => {
     connected = false;
     sock = null;
+    // Fail everything in flight immediately — the host is gone, and letting
+    // each request sit until its own timeout would stall claude for up to 30s
+    // per tool call against a definitively dead connection.
+    for (const resolve of pending.values()) {
+      resolve({ ok: false, error: "browser bridge disconnected (is the Lizard side panel open?)" });
+    }
+    pending.clear();
   });
 }
+
+// Slow page loads can legitimately exceed the default — give navigation-ish
+// ops more headroom instead of reporting a spurious timeout while the page
+// actually finishes loading.
+const OP_TIMEOUT_MS = { navigate: 45000, reload: 45000, screenshot: 45000 };
 
 function callHost(op, args) {
   return new Promise((resolve) => {
@@ -297,15 +309,18 @@ function callHost(op, args) {
     const payload = JSON.stringify({ reqId, op, args, session: SESSION, token: TOKEN }) + "\n";
     let tries = 0;
     const trySend = () => {
+      if (!pending.has(reqId)) return; // already failed via close/timeout
       if (connected && sock) {
         try {
           sock.write(payload);
         } catch {
           /* ignore */
         }
-      } else if (tries++ < 120) {
+      } else if (tries++ < 25) {
+        // Exponential backoff (50ms → 1s) — a dead host shouldn't be hammered
+        // with a fresh socket + error + close cycle every 50ms per request.
         connect();
-        setTimeout(trySend, 50);
+        setTimeout(trySend, Math.min(1000, 50 * Math.pow(1.5, tries)));
       }
     };
     trySend();
@@ -314,7 +329,7 @@ function callHost(op, args) {
         pending.delete(reqId);
         resolve({ ok: false, error: "browser bridge timed out (is the Lizard side panel open?)" });
       }
-    }, 30000);
+    }, OP_TIMEOUT_MS[op] || 30000);
   });
 }
 
@@ -440,7 +455,12 @@ async function uploadFile(args) {
 
   for (let off = 0; off < b64.length; off += UPLOAD_CHUNK_CHARS) {
     const chunk = await callHost("upload_chunk", { uploadId, data: b64.slice(off, off + UPLOAD_CHUNK_CHARS) });
-    if (!chunk || chunk.ok === false) return chunk || { ok: false, error: "upload_chunk failed" };
+    if (!chunk || chunk.ok === false) {
+      // Best-effort: free the staged buffer on the extension side right away
+      // instead of leaving a partial multi-MB upload for the gc sweep.
+      callHost("upload_abort", { uploadId });
+      return chunk || { ok: false, error: "upload_chunk failed" };
+    }
   }
 
   return callHost("upload_commit", { uploadId, selector: args.selector, tabId: args.tabId });
@@ -450,8 +470,14 @@ function toolResult(name, data) {
   if (name === "browser_screenshot" && data && data.dataUrl) {
     return { content: [{ type: "image", data: String(data.dataUrl).replace(/^data:image\/png;base64,/, ""), mimeType: "image/png" }] };
   }
-  const text = typeof data === "string" ? data : JSON.stringify(data, null, 2);
-  return { content: [{ type: "text", text: (text || "").slice(0, 100000) }] };
+  const full = (typeof data === "string" ? data : JSON.stringify(data, null, 2)) || "";
+  // Mark truncation explicitly — a silently cut DOM/JSON reads as complete and
+  // the model never knows to ask for a scoped selector or a smaller limit.
+  const text =
+    full.length > 100000
+      ? full.slice(0, 100000) + "\n…[truncated " + (full.length - 100000) + " chars — narrow with a selector or a smaller limit]"
+      : full;
+  return { content: [{ type: "text", text }] };
 }
 
 connect();
