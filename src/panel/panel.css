@@ -939,40 +939,35 @@ code.inline {
   padding: 14px 16px 16px;
   max-width: 90%;
 }
+.login-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
 .login-title {
   font-size: 14px;
   line-height: 20px;
   font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 4px;
 }
+.login-icon { display: inline-flex; flex: 0 0 auto; color: var(--control-primary); }
+.login-spinner {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid rgba(16, 185, 129, 0.3);
+  border-top-color: var(--control-primary);
+  animation: login-spin 0.7s linear infinite;
+}
+@keyframes login-spin { to { transform: rotate(360deg); } }
 .login-status {
   font-size: 12px;
   line-height: 18px;
   font-weight: 500;
   color: var(--text-secondary);
 }
-.login-card.waiting .login-status::before {
-  content: "";
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--control-primary);
-  margin-right: 7px;
-  vertical-align: 1px;
-  animation: dot-pulse 1.6s ease-in-out infinite;
-}
-.login-card.done .login-status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-primary);
-}
-.login-check {
-  display: inline-flex;
-  color: var(--control-primary);
-}
+.login-card.done .login-status { color: var(--text-primary); }
 .login-card.error .login-status { color: #f87171; }
 .login-open {
   margin-top: 12px;
@@ -1371,7 +1366,6 @@ code.inline {
 .tool-group.collapsed .tool-group-toggle { transform: rotate(-90deg); }
 .tool-group.err .tool-group-toggle { color: var(--other-red); }
 .tool-group.collapsed .tool-group-list > .tool-card { display: none; }
-.tool-group.collapsed.running .tool-group-list > .tool-card:last-child { display: block; }
 
 /* diff */
 .diff {

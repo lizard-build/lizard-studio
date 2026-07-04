@@ -727,6 +727,14 @@
   const CTX_MARK_END = "‌‌‌";
   const CTX_MARK_RE = new RegExp(`${CTX_MARK_START}[\\s\\S]*?${CTX_MARK_END}\\n*`, "g");
 
+  // The CLI itself injects synthetic "user" turns to tell the model about
+  // out-of-band events (e.g. a background task finishing/being killed) — these
+  // are wire-format noise for the model, not something the human typed, and
+  // the live event path already ignores them (only tool_result is handled for
+  // "user" events there). Strip them here too so replaying an on-disk
+  // transcript doesn't redisplay them as a fake user message.
+  const SYNTHETIC_USER_TAG_RE = /<(task-notification|system-reminder|local-command-stdout|local-command-stderr)>[\s\S]*?<\/\1>\n*/g;
+
   // ---- auto tab context -------------------------------------------------
   // Lightweight, always-on context: title + URL for every open tab, with the
   // active one flagged, so the model knows what the user has open without an
@@ -1197,34 +1205,21 @@
   }
 
   // ---- consecutive tool-call grouping (Claude Code-style) --------------------
-  // A run of back-to-back tool calls folds into one line — "Ran 5 commands,
-  // ran an agent, read 2 files ›" — expandable to the individual cards. While
-  // the run is live, only the newest card shows below the summary; once prose
-  // arrives (or the turn ends) the run collapses to the summary line alone.
+  // Every tool call — even a lone one — folds into a collapsed summary line
+  // ("Ran a command ›", "Used browser 3 times ›"); raw tool cards (command
+  // text, JSON input) never show until the user clicks to expand. A run of
+  // back-to-back calls shares one group; prose (or the turn ending) closes it.
   function appendToolCard(chat, body, card, name) {
     card.dataset.tool = name || "";
-    const last = body.lastElementChild;
     let g = chat.toolGroup;
-    if (g && !g.closed && g.host === body && g.el === last) {
-      g.listEl.appendChild(card);
-      g.names.push(name || "");
-      updateToolGroupSummary(g);
-      return;
-    }
-    if (last && last.classList && last.classList.contains("tool-card")) {
-      // Second consecutive call — fold the lone previous card into a new group.
+    if (!g || g.closed || g.host !== body) {
       g = makeToolGroup(chat, body);
-      body.replaceChild(g.el, last);
-      g.listEl.appendChild(last);
-      g.names.push(last.dataset.tool || "");
-      g.listEl.appendChild(card);
-      g.names.push(name || "");
+      body.appendChild(g.el);
       chat.toolGroup = g;
-      updateToolGroupSummary(g);
-      return;
     }
-    chat.toolGroup = null;
-    body.appendChild(card);
+    g.listEl.appendChild(card);
+    g.names.push(name || "");
+    updateToolGroupSummary(g);
   }
 
   function makeToolGroup(chat, body) {
@@ -2302,7 +2297,7 @@
       if (ev.type === "user") {
         const content = ev.message.content;
         if (typeof content === "string") {
-          const stripped = content.replace(CTX_MARK_RE, "").trim();
+          const stripped = content.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
           if (stripped) userBubble(chat, stripped, null);
         } else if (Array.isArray(content)) {
           const texts = [];
@@ -2311,7 +2306,7 @@
             if (b.type === "tool_result") fillToolResult(chat, b.tool_use_id, b.content, b.is_error);
             else if (b.type === "text" && b.text) texts.push(b.text);
           }
-          const stripped = texts.join("\n\n").replace(CTX_MARK_RE, "").trim();
+          const stripped = texts.join("\n\n").replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
           if (stripped) userBubble(chat, stripped, null);
         }
       } else if (ev.type === "assistant") {
@@ -2569,7 +2564,13 @@
   function startLogin(chat) {
     if (chat.loginCard) { chat.loginCard.remove(); chat.loginCard = null; }
     const card = el("div", "login-card");
-    card.appendChild(el("div", "login-title", "Sign in to Claude"));
+    const titleRow = el("div", "login-title-row");
+    const icon = el("span", "login-icon");
+    icon.innerHTML = '<span class="login-spinner"></span>';
+    titleRow.appendChild(icon);
+    titleRow.appendChild(el("span", "login-title", "Sign in to Claude"));
+    card.appendChild(titleRow);
+    card._icon = icon;
     const status = el("div", "login-status", "Starting sign-in…");
     card.appendChild(status);
     card._status = status;
@@ -2586,11 +2587,13 @@
     if (!card) return;
     card.classList.add("waiting");
     card._status.textContent = "Click Authorize in the tab that just opened — you'll be signed in automatically.";
+    // The CLI opens the URL itself (`open`/`xdg-open`) as soon as it prints it —
+    // don't also open it here, that's what caused two sign-in tabs. This button
+    // is a fallback for when the CLI's own open fails (e.g. no GUI, remote host).
     const openTab = () => {
       try { chrome.tabs.create({ url }); }
       catch (_) { window.open(url, "_blank"); }
     };
-    openTab(); // open the sign-in page right away
     const open = el("button", "login-open", "Open sign-in page");
     open.type = "button";
     open.addEventListener("click", openTab);
@@ -2641,13 +2644,11 @@
       card.classList.remove("waiting");
       if (card._controls) { for (const c of card._controls) c.remove(); card._controls = null; }
       card.classList.add(ok ? "done" : "error");
-      card._status.textContent = "";
       if (ok) {
-        const ic = el("span", "login-check");
-        ic.innerHTML = ICON("check", 13);
-        card._status.appendChild(ic);
-        card._status.appendChild(el("span", null, "Signed in. You're all set."));
+        card._icon.innerHTML = ICON("check", 13);
+        card._status.textContent = "Signed in. You're all set.";
       } else {
+        card._icon.remove();
         card._status.textContent = failText;
       }
     } else {
