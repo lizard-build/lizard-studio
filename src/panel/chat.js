@@ -112,6 +112,11 @@
   // itself; if it fires the host never answered (too old) — show the manual
   // install command instead.
   let hostUpdateTimer = null;
+  // Set once a stale host confirms it's about to restart itself (selfUpdate
+  // `updated:true`). The disconnect that follows is expected — suppress the
+  // "host not installed" onboarding flash for that one disconnect instead of
+  // showing it for the ~1s it takes to reconnect.
+  let expectHostRestart = false;
 
   // Tab model: id -> chat. `order` is the visible tab order; `history` holds
   // closed conversations you can reopen.
@@ -2080,7 +2085,11 @@
           endTurn(c, null);
         }
       }
-      showOnboarding(lastErr && lastErr.message);
+      if (expectHostRestart) {
+        expectHostRestart = false;
+      } else {
+        showOnboarding(lastErr && lastErr.message);
+      }
       scheduleReconnect();
     });
   }
@@ -2156,7 +2165,9 @@
         // updated:true → the host is about to restart; keep "updating…" up
         // until the reconnect's `ready` re-evaluates the version. Anything
         // else (already current yet still stale, fetch failed) → manual.
-        if (!msg.updated) {
+        if (msg.updated) {
+          expectHostRestart = true;
+        } else {
           clearTimeout(hostUpdateTimer);
           setHostBanner("manual");
         }
