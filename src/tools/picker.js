@@ -97,7 +97,8 @@
 
   let catcher = null, wrap = null, canvas = null, ctx = null, pill = null,
       sw = null, valEl = null, readCv = null, readCtx = null,
-      curHex = "#000000", onMove = null, onKey = null, onScroll = null;
+      curHex = "#000000", onMove = null, onKey = null, onScroll = null,
+      recaptureTimer = 0;
 
   function buildLoupe() {
     RK.ensureOverlay();
@@ -192,6 +193,7 @@
       window.removeEventListener("resize", onScroll, true);
     }
     if (onKey) window.removeEventListener("keydown", onKey, true);
+    clearTimeout(recaptureTimer);
     if (catcher) catcher.remove();
     if (wrap) wrap.remove();
     catcher = wrap = canvas = ctx = pill = sw = valEl = readCv = readCtx = null;
@@ -297,8 +299,13 @@
     });
     catcher.addEventListener("mousemove", onMove, true);
     // A snapshot drifts out of date once the page scrolls/resizes — refresh it
-    // (capture() self-throttles via captureBusy and keeps the old shot on a miss).
-    onScroll = RK.raf(() => { capture(); });
+    // once the movement settles. Chrome caps captureVisibleTab at ~2 calls/sec,
+    // so recapturing per scroll frame just streams quota errors while the loupe
+    // samples stale pixels anyway; one capture at scroll-end is what helps.
+    onScroll = () => {
+      clearTimeout(recaptureTimer);
+      recaptureTimer = setTimeout(capture, 180);
+    };
     window.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", onScroll, true);
 

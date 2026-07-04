@@ -99,7 +99,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 6;
+  const EXPECTED_HOST_VERSION = 7;
 
   let els = {};
   let port = null;
@@ -1022,6 +1022,25 @@
     return out.trim();
   }
 
+  // Shared copy-button behavior: write getText() to the clipboard and flash
+  // the icon to a check. Used by message footers, bash blocks and the
+  // host-outdated banner — keep the feedback identical everywhere.
+  function wireCopyButton(btn, getText, size) {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const text = getText();
+      if (!text || !navigator.clipboard || !navigator.clipboard.writeText) return;
+      navigator.clipboard.writeText(text).then(() => {
+        btn.classList.add("copied");
+        btn.innerHTML = ICON("check", size);
+        setTimeout(() => {
+          btn.classList.remove("copied");
+          btn.innerHTML = ICON("copy", size);
+        }, 1200);
+      }).catch(() => {});
+    });
+  }
+
   function messageFooter(getText, ts) {
     const footer = el("div", "msg-footer");
     const copyBtn = el("button", "msg-action");
@@ -1029,18 +1048,7 @@
     copyBtn.title = "Copy";
     copyBtn.setAttribute("aria-label", "Copy message");
     copyBtn.innerHTML = ICON("copy", 13);
-    copyBtn.addEventListener("click", () => {
-      const text = getText();
-      if (!text || !navigator.clipboard || !navigator.clipboard.writeText) return;
-      navigator.clipboard.writeText(text).then(() => {
-        copyBtn.classList.add("copied");
-        copyBtn.innerHTML = ICON("check", 13);
-        setTimeout(() => {
-          copyBtn.classList.remove("copied");
-          copyBtn.innerHTML = ICON("copy", 13);
-        }, 1200);
-      }).catch(() => {});
-    });
+    wireCopyButton(copyBtn, getText, 13);
     const time = el("span", "msg-time");
     time.dataset.ts = String(ts);
     time.textContent = relTime(ts);
@@ -1423,18 +1431,7 @@
     copyBtn.title = "Copy command";
     copyBtn.setAttribute("aria-label", "Copy command");
     copyBtn.innerHTML = ICON("copy", 12);
-    copyBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (!navigator.clipboard || !navigator.clipboard.writeText) return;
-      navigator.clipboard.writeText(command).then(() => {
-        copyBtn.classList.add("copied");
-        copyBtn.innerHTML = ICON("check", 12);
-        setTimeout(() => {
-          copyBtn.classList.remove("copied");
-          copyBtn.innerHTML = ICON("copy", 12);
-        }, 1200);
-      }).catch(() => {});
-    });
+    wireCopyButton(copyBtn, () => command, 12);
     wrap.appendChild(copyBtn);
     return wrap;
   }
@@ -2803,6 +2800,32 @@
     // The composer pill already reflects the active model — no transcript note.
   }
 
+  // Shared row builder for the model/effort pickers — identical structure,
+  // the model rows just carry the Claude logo.
+  function renderPickerMenu(menu, title, items, currentId, onPick, withLogo) {
+    menu.innerHTML = "";
+    menu.appendChild(el("div", "model-head", title));
+    for (const it of items) {
+      const isCur = it.id === currentId;
+      const row = el("div", "model-item" + (isCur ? " current" : ""));
+      if (withLogo) {
+        const logo = el("span", "model-item-logo");
+        logo.innerHTML = window.RKClaudeHTML(15);
+        row.appendChild(logo);
+      }
+      row.appendChild(el("span", "model-item-label", it.label));
+      const ic = el("span", "model-item-ic");
+      if (isCur) ic.innerHTML = ICON("check", 13);
+      row.appendChild(ic);
+      row.addEventListener("click", () => {
+        menu.classList.add("hidden");
+        const c = chats.get(activeId);
+        if (c) onPick(c, it.id);
+      });
+      menu.appendChild(row);
+    }
+  }
+
   function toggleModelMenu() {
     if (!els.modelMenu.classList.contains("hidden")) return hideModelMenu();
     renderModelMenu();
@@ -2810,25 +2833,7 @@
   }
   function renderModelMenu() {
     const chat = chats.get(activeId);
-    els.modelMenu.innerHTML = "";
-    els.modelMenu.appendChild(el("div", "model-head", "Model"));
-    for (const m of MODELS) {
-      const isCur = chat && chat.model === m.id;
-      const row = el("div", "model-item" + (isCur ? " current" : ""));
-      const logo = el("span", "model-item-logo");
-      logo.innerHTML = window.RKClaudeHTML(15);
-      row.appendChild(logo);
-      row.appendChild(el("span", "model-item-label", m.label));
-      const ic = el("span", "model-item-ic");
-      if (isCur) ic.innerHTML = ICON("check", 13);
-      row.appendChild(ic);
-      row.addEventListener("click", () => {
-        hideModelMenu();
-        const c = chats.get(activeId);
-        if (c) applyModel(c, m.id);
-      });
-      els.modelMenu.appendChild(row);
-    }
+    renderPickerMenu(els.modelMenu, "Model", MODELS, chat && chat.model, applyModel, true);
   }
   function hideModelMenu() {
     els.modelMenu.classList.add("hidden");
@@ -2856,22 +2861,7 @@
   }
   function renderEffortMenu() {
     const chat = chats.get(activeId);
-    els.effortMenu.innerHTML = "";
-    els.effortMenu.appendChild(el("div", "model-head", "Effort"));
-    for (const e of EFFORTS) {
-      const isCur = chat && chat.effort === e.id;
-      const row = el("div", "model-item" + (isCur ? " current" : ""));
-      row.appendChild(el("span", "model-item-label", e.label));
-      const ic = el("span", "model-item-ic");
-      if (isCur) ic.innerHTML = ICON("check", 13);
-      row.appendChild(ic);
-      row.addEventListener("click", () => {
-        hideEffortMenu();
-        const c = chats.get(activeId);
-        if (c) applyEffort(c, e.id);
-      });
-      els.effortMenu.appendChild(row);
-    }
+    renderPickerMenu(els.effortMenu, "Effort", EFFORTS, chat && chat.effort, applyEffort, false);
   }
   function hideEffortMenu() {
     els.effortMenu.classList.add("hidden");
@@ -3120,17 +3110,7 @@
     root.querySelector("#folder-ic").innerHTML = ICON("folder", 14);
     root.querySelector("#branch-ic").innerHTML = ICON("git-branch", 13);
     els.hostBannerCopy.innerHTML = ICON("copy", 13);
-    els.hostBannerCopy.addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(els.hostBannerCopy.dataset.cmd);
-        els.hostBannerCopy.innerHTML = ICON("check", 13);
-        els.hostBannerCopy.classList.add("copied");
-        setTimeout(() => {
-          els.hostBannerCopy.innerHTML = ICON("copy", 13);
-          els.hostBannerCopy.classList.remove("copied");
-        }, 1500);
-      } catch (_) {}
-    });
+    wireCopyButton(els.hostBannerCopy, () => els.hostBannerCopy.dataset.cmd, 13);
     els.send.innerHTML = ICON("send", 16);
     els.stop.innerHTML = ICON("stop", 14);
     els.attachFileBtn.innerHTML = ICON("plus", 15);
@@ -3148,11 +3128,6 @@
       e.stopPropagation();
       toggleHistory();
     });
-    document.addEventListener("click", (e) => {
-      if (!els.historyMenu.contains(e.target) && e.target !== els.historyBtn) {
-        els.historyMenu.classList.add("hidden");
-      }
-    });
     els.folder.addEventListener("click", () => {
       const chat = chats.get(activeId);
       if (chat) post({ type: "pickFolder", id: chat.id }) || promptForFolder(chat);
@@ -3161,36 +3136,33 @@
       e.stopPropagation();
       toggleBranchMenu();
     });
-    document.addEventListener("click", (e) => {
-      if (els.branchMenu && !els.branchMenu.contains(e.target) && e.target !== els.branch && !els.branch.contains(e.target)) {
-        els.branchMenu.classList.add("hidden");
-      }
-    });
     els.mode.addEventListener("click", (e) => {
       e.stopPropagation();
       toggleModeMenu();
-    });
-    document.addEventListener("click", (e) => {
-      if (els.modeMenu && !els.modeMenu.contains(e.target) && e.target !== els.mode && !els.mode.contains(e.target)) {
-        els.modeMenu.classList.add("hidden");
-      }
     });
     els.modelBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       toggleModelMenu();
     });
-    document.addEventListener("click", (e) => {
-      if (els.modelMenu && !els.modelMenu.contains(e.target) && !els.modelBtn.contains(e.target)) {
-        els.modelMenu.classList.add("hidden");
-      }
-    });
     els.effortBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       toggleEffortMenu();
     });
+    // One delegated close-on-outside-click for every dropdown, instead of one
+    // permanent document listener per menu. Toggle buttons stopPropagation, so
+    // any click that reaches here and is outside a menu closes it.
+    const dropdownPairs = [
+      [els.historyMenu, els.historyBtn],
+      [els.branchMenu, els.branch],
+      [els.modeMenu, els.mode],
+      [els.modelMenu, els.modelBtn],
+      [els.effortMenu, els.effortBtn],
+    ];
     document.addEventListener("click", (e) => {
-      if (els.effortMenu && !els.effortMenu.contains(e.target) && !els.effortBtn.contains(e.target)) {
-        els.effortMenu.classList.add("hidden");
+      for (const [menu, btn] of dropdownPairs) {
+        if (!menu || menu.classList.contains("hidden")) continue;
+        if (menu.contains(e.target) || (btn && btn.contains(e.target))) continue;
+        menu.classList.add("hidden");
       }
     });
     els.input.addEventListener("input", () => {
@@ -3570,220 +3542,232 @@
     });
   }
 
+  // ---- browser op dispatch ---------------------------------------------------
+  // One handler per op, split into three tiers by what they need resolved
+  // before running: nothing (GLOBAL_OPS), a target tab (TAB_OPS), or a tab
+  // plus an attached DevTools session (CDP_OPS). handleBrowserOp resolves the
+  // tier's prerequisites, then dispatches. Handlers return opOk()/opErr().
+  const opOk = (data) => ({ ok: true, data });
+  const opErr = (error) => ({ ok: false, data: null, error });
+
+  // An explicit tabId always wins and (re-)pins the Claude session to it.
+  // Otherwise reuse the tab this session already pinned; only fall back to
+  // (and pin) the live active tab if nothing's pinned yet or the pinned tab
+  // is gone.
+  async function resolveBrowserTab(args, session) {
+    if (args.tabId != null) {
+      const tab = await getTab(Number(args.tabId));
+      if (!tab || tab.id == null) return { error: "No tab with id " + args.tabId + " — call browser_tabs for the current list." };
+      if (session) pinnedTabBySession.set(session, tab.id);
+      return { tab };
+    }
+    const pinnedId = session ? pinnedTabBySession.get(session) : null;
+    let tab = pinnedId != null ? await getTab(pinnedId) : null;
+    if (!tab || tab.id == null) {
+      tab = await activeTab();
+      if (!tab || tab.id == null) return { error: "No active browser tab." };
+      if (session) pinnedTabBySession.set(session, tab.id);
+    }
+    return { tab };
+  }
+
+  const GLOBAL_OPS = {
+    async tabs({ session }) {
+      const [tabs, current] = await Promise.all([listTabs(), activeTab()]);
+      return opOk({
+        activeTabId: current ? current.id : null,
+        workingTabId: session ? pinnedTabBySession.get(session) ?? null : null,
+        tabs: tabs.map((t) => ({ tabId: t.id, windowId: t.windowId, title: t.title, url: t.url, active: !!t.active, pinned: !!t.pinned, audible: !!t.audible })),
+      });
+    },
+    async tab_open({ args, session }) {
+      const url = String(args.url || "");
+      if (!/^https?:\/\//i.test(url)) return opErr("Provide an absolute http(s) URL.");
+      const t = await new Promise((resolve) => {
+        chrome.tabs.create({ url, active: args.active !== false }, (nt) => resolve(chrome.runtime.lastError ? null : nt));
+      });
+      if (!t) return opErr("Couldn't open a new tab.");
+      if (session) pinnedTabBySession.set(session, t.id);
+      return opOk({ tabId: t.id, windowId: t.windowId, url });
+    },
+    // File-upload staging (no tab needed until commit).
+    async upload_begin({ args }) {
+      gcUploads();
+      const uploadId = "u" + nextUploadId++;
+      uploads.set(uploadId, { name: String(args.name || "file"), mime: String(args.mime || "application/octet-stream"), size: args.size || 0, parts: [], ts: Date.now() });
+      return opOk({ uploadId });
+    },
+    async upload_chunk({ args }) {
+      const u = uploads.get(args.uploadId);
+      if (!u) return opErr("Unknown or expired uploadId — start over with a new browser_upload_file call.");
+      u.parts.push(String(args.data || ""));
+      u.ts = Date.now();
+      return opOk({ received: u.parts.length });
+    },
+  };
+
+  // info and dom share one reader (format decides the payload).
+  async function pageContextOp({ op, args, tab }) {
+    const format = op === "info" ? "info" : args.format === "html" ? "html" : "text";
+    const resp = await sendToTab(tab.id, { type: "RK_PAGE_CONTEXT", format, selector: args.selector });
+    if (!resp || !resp.ok) {
+      return opErr((resp && resp.error) || "Couldn't read this tab — open a normal web page (chrome:// and the Web Store are off-limits) and reload it so the helper is present.");
+    }
+    if (op === "info") return opOk({ url: resp.url, title: resp.title, selection: resp.selection || "" });
+    return opOk({ url: resp.url, title: resp.title, format, content: format === "html" ? resp.html : resp.text, truncated: !!resp.truncated });
+  }
+
+  const TAB_OPS = {
+    info: pageContextOp,
+    dom: pageContextOp,
+    async tab_activate({ tab }) {
+      await new Promise((resolve) => chrome.tabs.update(tab.id, { active: true }, () => { void chrome.runtime.lastError; resolve(); }));
+      await new Promise((resolve) => chrome.windows.update(tab.windowId, { focused: true }, () => { void chrome.runtime.lastError; resolve(); }));
+      return opOk({ activated: true, tabId: tab.id, title: tab.title, url: tab.url });
+    },
+    async tab_close({ args, session, tab }) {
+      if (args.tabId == null) return opErr("tabId is required to close a tab.");
+      detachCdp(tab.id);
+      const closed = await new Promise((resolve) => {
+        chrome.tabs.remove(tab.id, () => resolve(!chrome.runtime.lastError));
+      });
+      if (!closed) return opErr("Couldn't close tab " + tab.id + ".");
+      if (session && pinnedTabBySession.get(session) === tab.id) pinnedTabBySession.delete(session);
+      return opOk({ closed: true, tabId: tab.id });
+    },
+    async upload_commit({ args, tab }) {
+      const u = uploads.get(args.uploadId);
+      if (!u) return opErr("Unknown or expired uploadId — start over with a new browser_upload_file call.");
+      uploads.delete(args.uploadId);
+      const resp = await sendToTab(tab.id, {
+        type: "RK_UPLOAD_FILE",
+        selector: args.selector || null,
+        name: u.name,
+        mime: u.mime,
+        b64: u.parts.join(""),
+      });
+      if (!resp || !resp.ok) {
+        return opErr((resp && resp.error) || "Couldn't reach this tab — open a normal web page (chrome:// and the Web Store are off-limits) and reload it so the helper is present.");
+      }
+      return opOk({ attached: u.name, size: u.size, mime: u.mime, via: resp.via, target: resp.target });
+    },
+    async screenshot({ tab }) {
+      // captureVisibleTab only sees the tab shown in the window — for background
+      // tabs (or when that fails) capture via CDP without activating the tab.
+      let dataUrl = tab.active ? await captureTab(tab.windowId) : null;
+      if (!dataUrl) {
+        try {
+          await ensureAttached(tab.id);
+          const r = await dbgSend(tab.id, "Page.captureScreenshot", { format: "png" });
+          if (r && r.data) dataUrl = "data:image/png;base64," + r.data;
+        } catch (_) {}
+      }
+      if (!dataUrl) return opErr("Screenshot failed (tab not capturable).");
+      return opOk({ dataUrl });
+    },
+  };
+
+  const CDP_OPS = {
+    async eval({ args, tab }) {
+      const r = await dbgSend(tab.id, "Runtime.evaluate", {
+        expression: String(args.expression || ""),
+        returnByValue: true,
+        awaitPromise: true,
+        userGesture: true,
+        timeout: 5000,
+      });
+      if (r && r.exceptionDetails) {
+        const d = r.exceptionDetails;
+        return opOk({ error: (d.exception && (d.exception.description || d.exception.value)) || d.text || "evaluation error" });
+      }
+      const val = r && r.result ? (r.result.value !== undefined ? r.result.value : r.result.description) : null;
+      return opOk({ result: val });
+    },
+    async console({ args, sess }) {
+      const limit = Math.max(1, Math.min(args.limit || 100, 500));
+      return opOk({
+        note: sess.console.length ? undefined : "No console output captured yet — capture began when the tools attached. Call browser_reload (or re-run the code), then call again.",
+        entries: sess.console.slice(-limit),
+      });
+    },
+    async network({ args, sess }) {
+      const limit = Math.max(1, Math.min(args.limit || 80, 300));
+      return opOk({
+        note: sess.network.length ? undefined : "No requests captured yet — capture began when the tools attached. Call browser_reload (or re-trigger the request), then call again.",
+        requests: sess.network.slice(-limit).map((r) => ({ url: r.url, method: r.method, status: r.status, type: r.type, mimeType: r.mimeType, failed: r.failed || undefined })),
+      });
+    },
+    async snapshot({ args, tab }) {
+      const snap = await axSnapshot(tab.id, args.interactiveOnly !== false);
+      return opOk(snap);
+    },
+    async navigate({ args, tab, sess }) {
+      const url = String(args.url || "");
+      if (!/^https?:\/\//i.test(url)) return opErr("Provide an absolute http(s) URL.");
+      const loaded = waitForCdpEvent(tab.id, "Page.loadEventFired", 20000);
+      await dbgSend(tab.id, "Page.navigate", { url });
+      await loaded;
+      const info = await dbgSend(tab.id, "Runtime.evaluate", { expression: "({url:location.href,title:document.title})", returnByValue: true });
+      sess.refs.clear();
+      return opOk(info && info.result ? info.result.value : { url });
+    },
+    async reload({ args, tab, sess }) {
+      const loaded = waitForCdpEvent(tab.id, "Page.loadEventFired", 20000);
+      await dbgSend(tab.id, "Page.reload", { ignoreCache: !!args.hardReload });
+      await loaded;
+      const info = await dbgSend(tab.id, "Runtime.evaluate", { expression: "({url:location.href,title:document.title})", returnByValue: true });
+      sess.refs.clear();
+      return opOk(info && info.result ? info.result.value : { reloaded: true });
+    },
+    async click({ args, tab }) {
+      const pt = await targetCenter(tab.id, args);
+      if (!pt) return opErr("Target not found (ref/selector didn't resolve or is off-screen).");
+      await mouseClick(tab.id, pt.x, pt.y, !!args.double);
+      return opOk({ clicked: true, x: Math.round(pt.x), y: Math.round(pt.y) });
+    },
+    async type({ args, tab }) {
+      if (args.ref || args.selector) {
+        const ok = await focusTarget(tab.id, args);
+        if (!ok) return opErr("Target not found to type into.");
+      }
+      await dbgSend(tab.id, "Input.insertText", { text: String(args.text || "") });
+      if (args.submit) await pressKey(tab.id, "Enter");
+      return opOk({ typed: String(args.text || "").length });
+    },
+    async fill({ args, tab }) {
+      const r = await setValue(tab.id, args, String(args.value || ""));
+      if (!r) return opErr("Target not found to fill.");
+      return opOk({ filled: true });
+    },
+    async key({ args, tab }) {
+      await pressKey(tab.id, String(args.key || ""));
+      return opOk({ pressed: args.key });
+    },
+  };
+
   async function handleBrowserOp(msg) {
     const op = msg.op;
     const args = msg.args || {};
-    const done = (ok, data, error) => post({ type: "browserResult", bid: msg.bid, ok, data, error });
+    const done = (r) => post({ type: "browserResult", bid: msg.bid, ok: r.ok, data: r.data, error: r.error });
     try {
-      if (!(chrome.tabs && chrome.tabs.query)) return done(false, null, "Browser tab access unavailable.");
+      if (!(chrome.tabs && chrome.tabs.query)) return done(opErr("Browser tab access unavailable."));
       const session = msg.session || null;
-
-      if (op === "tabs") {
-        const [tabs, current] = await Promise.all([listTabs(), activeTab()]);
-        return done(true, {
-          activeTabId: current ? current.id : null,
-          workingTabId: session ? pinnedTabBySession.get(session) ?? null : null,
-          tabs: tabs.map((t) => ({ tabId: t.id, windowId: t.windowId, title: t.title, url: t.url, active: !!t.active, pinned: !!t.pinned, audible: !!t.audible })),
-        });
-      }
-
-      if (op === "tab_open") {
-        const url = String(args.url || "");
-        if (!/^https?:\/\//i.test(url)) return done(false, null, "Provide an absolute http(s) URL.");
-        const t = await new Promise((resolve) => {
-          chrome.tabs.create({ url, active: args.active !== false }, (nt) => resolve(chrome.runtime.lastError ? null : nt));
-        });
-        if (!t) return done(false, null, "Couldn't open a new tab.");
-        if (session) pinnedTabBySession.set(session, t.id);
-        return done(true, { tabId: t.id, windowId: t.windowId, url });
-      }
-
-      // File-upload staging (no tab needed until commit).
-      if (op === "upload_begin") {
-        gcUploads();
-        const uploadId = "u" + nextUploadId++;
-        uploads.set(uploadId, { name: String(args.name || "file"), mime: String(args.mime || "application/octet-stream"), size: args.size || 0, parts: [], ts: Date.now() });
-        return done(true, { uploadId });
-      }
-      if (op === "upload_chunk") {
-        const u = uploads.get(args.uploadId);
-        if (!u) return done(false, null, "Unknown or expired uploadId — start over with a new browser_upload_file call.");
-        u.parts.push(String(args.data || ""));
-        u.ts = Date.now();
-        return done(true, { received: u.parts.length });
-      }
-
-      // Everything below targets one tab. An explicit tabId always wins and
-      // (re-)pins this Claude session to it. Otherwise reuse the tab this
-      // session already pinned; only fall back to (and pin) the live active
-      // tab if nothing's pinned yet or the pinned tab is gone.
-      let tab;
-      if (args.tabId != null) {
-        tab = await getTab(Number(args.tabId));
-        if (!tab || tab.id == null) return done(false, null, "No tab with id " + args.tabId + " — call browser_tabs for the current list.");
-        if (session) pinnedTabBySession.set(session, tab.id);
-      } else {
-        const pinnedId = session ? pinnedTabBySession.get(session) : null;
-        tab = pinnedId != null ? await getTab(pinnedId) : null;
-        if (!tab || tab.id == null) {
-          tab = await activeTab();
-          if (!tab || tab.id == null) return done(false, null, "No active browser tab.");
-          if (session) pinnedTabBySession.set(session, tab.id);
+      const handler = GLOBAL_OPS[op] || TAB_OPS[op] || CDP_OPS[op];
+      if (!handler) return done(opErr("Unknown browser op: " + op));
+      const ctx = { op, args, session, tab: null, sess: null };
+      if (!GLOBAL_OPS[op]) {
+        const r = await resolveBrowserTab(args, session);
+        if (r.error) return done(opErr(r.error));
+        ctx.tab = r.tab;
+        if (CDP_OPS[op]) {
+          await ensureAttached(ctx.tab.id);
+          bumpIdle(ctx.tab.id);
+          ctx.sess = cdpSessions.get(ctx.tab.id);
         }
       }
-
-      if (op === "tab_activate") {
-        await new Promise((resolve) => chrome.tabs.update(tab.id, { active: true }, () => { void chrome.runtime.lastError; resolve(); }));
-        await new Promise((resolve) => chrome.windows.update(tab.windowId, { focused: true }, () => { void chrome.runtime.lastError; resolve(); }));
-        return done(true, { activated: true, tabId: tab.id, title: tab.title, url: tab.url });
-      }
-
-      if (op === "tab_close") {
-        if (args.tabId == null) return done(false, null, "tabId is required to close a tab.");
-        detachCdp(tab.id);
-        const closed = await new Promise((resolve) => {
-          chrome.tabs.remove(tab.id, () => resolve(!chrome.runtime.lastError));
-        });
-        if (!closed) return done(false, null, "Couldn't close tab " + tab.id + ".");
-        if (session && pinnedTabBySession.get(session) === tab.id) pinnedTabBySession.delete(session);
-        return done(true, { closed: true, tabId: tab.id });
-      }
-
-      if (op === "info" || op === "dom") {
-        const format = op === "info" ? "info" : args.format === "html" ? "html" : "text";
-        const resp = await sendToTab(tab.id, { type: "RK_PAGE_CONTEXT", format, selector: args.selector });
-        if (!resp || !resp.ok) {
-          return done(false, null, (resp && resp.error) || "Couldn't read this tab — open a normal web page (chrome:// and the Web Store are off-limits) and reload it so the helper is present.");
-        }
-        if (op === "info") return done(true, { url: resp.url, title: resp.title, selection: resp.selection || "" });
-        return done(true, { url: resp.url, title: resp.title, format, content: format === "html" ? resp.html : resp.text, truncated: !!resp.truncated });
-      }
-
-      if (op === "upload_commit") {
-        const u = uploads.get(args.uploadId);
-        if (!u) return done(false, null, "Unknown or expired uploadId — start over with a new browser_upload_file call.");
-        uploads.delete(args.uploadId);
-        const resp = await sendToTab(tab.id, {
-          type: "RK_UPLOAD_FILE",
-          selector: args.selector || null,
-          name: u.name,
-          mime: u.mime,
-          b64: u.parts.join(""),
-        });
-        if (!resp || !resp.ok) {
-          return done(false, null, (resp && resp.error) || "Couldn't reach this tab — open a normal web page (chrome:// and the Web Store are off-limits) and reload it so the helper is present.");
-        }
-        return done(true, { attached: u.name, size: u.size, mime: u.mime, via: resp.via, target: resp.target });
-      }
-
-      if (op === "screenshot") {
-        // captureVisibleTab only sees the tab shown in the window — for background
-        // tabs (or when that fails) capture via CDP without activating the tab.
-        let dataUrl = tab.active ? await captureTab(tab.windowId) : null;
-        if (!dataUrl) {
-          try {
-            await ensureAttached(tab.id);
-            const r = await dbgSend(tab.id, "Page.captureScreenshot", { format: "png" });
-            if (r && r.data) dataUrl = "data:image/png;base64," + r.data;
-          } catch (_) {}
-        }
-        if (!dataUrl) return done(false, null, "Screenshot failed (tab not capturable).");
-        return done(true, { dataUrl });
-      }
-
-      // console / network / eval need the DevTools Protocol.
-      await ensureAttached(tab.id);
-      bumpIdle(tab.id);
-      const sess = cdpSessions.get(tab.id);
-
-      if (op === "eval") {
-        const r = await dbgSend(tab.id, "Runtime.evaluate", {
-          expression: String(args.expression || ""),
-          returnByValue: true,
-          awaitPromise: true,
-          userGesture: true,
-          timeout: 5000,
-        });
-        if (r && r.exceptionDetails) {
-          const d = r.exceptionDetails;
-          return done(true, { error: (d.exception && (d.exception.description || d.exception.value)) || d.text || "evaluation error" });
-        }
-        const val = r && r.result ? (r.result.value !== undefined ? r.result.value : r.result.description) : null;
-        return done(true, { result: val });
-      }
-
-      if (op === "console") {
-        const limit = Math.max(1, Math.min(args.limit || 100, 500));
-        return done(true, {
-          note: sess.console.length ? undefined : "No console output captured yet — capture began when the tools attached. Call browser_reload (or re-run the code), then call again.",
-          entries: sess.console.slice(-limit),
-        });
-      }
-
-      if (op === "network") {
-        const limit = Math.max(1, Math.min(args.limit || 80, 300));
-        return done(true, {
-          note: sess.network.length ? undefined : "No requests captured yet — capture began when the tools attached. Call browser_reload (or re-trigger the request), then call again.",
-          requests: sess.network.slice(-limit).map((r) => ({ url: r.url, method: r.method, status: r.status, type: r.type, mimeType: r.mimeType, failed: r.failed || undefined })),
-        });
-      }
-
-      if (op === "snapshot") {
-        const snap = await axSnapshot(tab.id, args.interactiveOnly !== false);
-        return done(true, snap);
-      }
-
-      if (op === "navigate") {
-        const url = String(args.url || "");
-        if (!/^https?:\/\//i.test(url)) return done(false, null, "Provide an absolute http(s) URL.");
-        const loaded = waitForCdpEvent(tab.id, "Page.loadEventFired", 20000);
-        await dbgSend(tab.id, "Page.navigate", { url });
-        await loaded;
-        const info = await dbgSend(tab.id, "Runtime.evaluate", { expression: "({url:location.href,title:document.title})", returnByValue: true });
-        sess.refs.clear();
-        return done(true, info && info.result ? info.result.value : { url });
-      }
-
-      if (op === "reload") {
-        const loaded = waitForCdpEvent(tab.id, "Page.loadEventFired", 20000);
-        await dbgSend(tab.id, "Page.reload", { ignoreCache: !!args.hardReload });
-        await loaded;
-        const info = await dbgSend(tab.id, "Runtime.evaluate", { expression: "({url:location.href,title:document.title})", returnByValue: true });
-        sess.refs.clear();
-        return done(true, info && info.result ? info.result.value : { reloaded: true });
-      }
-
-      if (op === "click") {
-        const pt = await targetCenter(tab.id, args);
-        if (!pt) return done(false, null, "Target not found (ref/selector didn't resolve or is off-screen).");
-        await mouseClick(tab.id, pt.x, pt.y, !!args.double);
-        return done(true, { clicked: true, x: Math.round(pt.x), y: Math.round(pt.y) });
-      }
-
-      if (op === "type") {
-        if (args.ref || args.selector) {
-          const ok = await focusTarget(tab.id, args);
-          if (!ok) return done(false, null, "Target not found to type into.");
-        }
-        await dbgSend(tab.id, "Input.insertText", { text: String(args.text || "") });
-        if (args.submit) await pressKey(tab.id, "Enter");
-        return done(true, { typed: String(args.text || "").length });
-      }
-
-      if (op === "fill") {
-        const r = await setValue(tab.id, args, String(args.value || ""));
-        if (!r) return done(false, null, "Target not found to fill.");
-        return done(true, { filled: true });
-      }
-
-      if (op === "key") {
-        await pressKey(tab.id, String(args.key || ""));
-        return done(true, { pressed: args.key });
-      }
-
-      return done(false, null, "Unknown browser op: " + op);
+      done(await handler(ctx));
     } catch (e) {
-      done(false, null, String((e && e.message) || e));
+      done(opErr(String((e && e.message) || e)));
     }
   }
 

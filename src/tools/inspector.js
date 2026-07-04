@@ -148,12 +148,57 @@
   }
 
   // ---- render ------------------------------------------------------------
+  // The selector chip and computed-style card are rebuilt (and measured — a
+  // forced layout) only when the hovered element or its size changes; a plain
+  // mouse move just repositions them from cached measurements. The box-model
+  // bands and size labels are cheap and re-drawn every frame, since they must
+  // track the rects through scroll reflows.
+  let cache = null;   // { el, w, h, chip, chipW, card, cardW, cardH }
+  let tagsBox = null; // per-frame container for the size labels
+
+  function dropCache() {
+    if (!cache) return;
+    cache.chip.remove();
+    if (cache.card) cache.card.remove();
+    cache = null;
+  }
+
+  function positionChip(border) {
+    // Chip sits top-left of the border box, above it when there's room.
+    cache.chip.style.left = RK.clamp(border.x, 4, window.innerWidth - cache.chipW - 4) + "px";
+    cache.chip.style.top = (border.y > 26 ? border.y - 24 : border.y + 4) + "px";
+  }
+
+  function positionCard() {
+    // Card follows the cursor, flipping to whichever side fits.
+    const { cardW, cardH } = cache;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const off = 16;
+    let x = mouse.x + off;
+    if (x + cardW > vw - 8) x = mouse.x - cardW - off;
+    let y = mouse.y + off;
+    if (y + cardH > vh - 8) y = mouse.y - cardH - off;
+    cache.card.style.left = RK.clamp(x, 8, Math.max(8, vw - cardW - 8)) + "px";
+    cache.card.style.top = RK.clamp(y, 8, Math.max(8, vh - cardH - 8)) + "px";
+  }
+
   function render(hit, e) {
     last = hit;
     if (e) mouse = { x: e.clientX, y: e.clientY };
     const g = RK.layer(ID); g.replaceChildren();
-    const hg = RK.htmlLayer(ID); hg.replaceChildren();
-    if (!hit) return;
+    const hg = RK.htmlLayer(ID);
+    if (!tagsBox || tagsBox.parentNode !== hg) {
+      // (Re)claim the layer: deactivation wipes it, dropping our nodes.
+      hg.replaceChildren();
+      tagsBox = RK.h("div");
+      hg.appendChild(tagsBox);
+      cache = null;
+    }
+    tagsBox.replaceChildren();
+    if (!hit) {
+      dropCache();
+      return;
+    }
 
     const { margin, border, padding, content, m, p } = hit.rects;
 
@@ -167,42 +212,37 @@
 
     // Margin size labels (outer edges).
     const bcx = border.x + border.w / 2, bcy = border.y + border.h / 2;
-    sizeTag(hg, bcx, margin.y + m.t / 2, m.t, "margin");
-    sizeTag(hg, bcx, border.y + border.h + m.b / 2, m.b, "margin");
-    sizeTag(hg, margin.x + m.l / 2, bcy, m.l, "margin");
-    sizeTag(hg, border.x + border.w + m.r / 2, bcy, m.r, "margin");
+    sizeTag(tagsBox, bcx, margin.y + m.t / 2, m.t, "margin");
+    sizeTag(tagsBox, bcx, border.y + border.h + m.b / 2, m.b, "margin");
+    sizeTag(tagsBox, margin.x + m.l / 2, bcy, m.l, "margin");
+    sizeTag(tagsBox, border.x + border.w + m.r / 2, bcy, m.r, "margin");
 
     // Padding size labels (inner edges).
     const ccx = content.x + content.w / 2, ccy = content.y + content.h / 2;
-    sizeTag(hg, ccx, padding.y + p.t / 2, p.t, "padding");
-    sizeTag(hg, ccx, content.y + content.h + p.b / 2, p.b, "padding");
-    sizeTag(hg, padding.x + p.l / 2, ccy, p.l, "padding");
-    sizeTag(hg, content.x + content.w + p.r / 2, ccy, p.r, "padding");
+    sizeTag(tagsBox, ccx, padding.y + p.t / 2, p.t, "padding");
+    sizeTag(tagsBox, ccx, content.y + content.h + p.b / 2, p.b, "padding");
+    sizeTag(tagsBox, padding.x + p.l / 2, ccy, p.l, "padding");
+    sizeTag(tagsBox, content.x + content.w + p.r / 2, ccy, p.r, "padding");
 
-    // Selector chip — top-left of the border box, above it when there's room.
-    const chip = RK.h("div", { style: {
-      position: "fixed", background: "#2D62F6", color: "#fff",
-      font: "600 11px/1.4 'Inter', system-ui, sans-serif", padding: "3px 8px",
-      borderRadius: "6px", whiteSpace: "nowrap", maxWidth: "min(420px, calc(100vw - 16px))",
-      overflow: "hidden", textOverflow: "ellipsis", boxShadow: "0 4px 14px rgba(0,0,0,.4)",
-    } }, selectorOf(hit.el));
-    hg.appendChild(chip);
-    const cw = chip.offsetWidth;
-    chip.style.left = RK.clamp(border.x, 4, window.innerWidth - cw - 4) + "px";
-    chip.style.top = (border.y > 26 ? border.y - 24 : border.y + 4) + "px";
-
-    // Computed-style card — follows the cursor, flipping to whichever side fits.
-    const card = buildCard(hit.el);
-    if (!card) return;
-    hg.appendChild(card);
-    const cardW = card.offsetWidth, cardH = card.offsetHeight, vw = window.innerWidth, vh = window.innerHeight;
-    const off = 16;
-    let x = mouse.x + off;
-    if (x + cardW > vw - 8) x = mouse.x - cardW - off;
-    let y = mouse.y + off;
-    if (y + cardH > vh - 8) y = mouse.y - cardH - off;
-    card.style.left = RK.clamp(x, 8, Math.max(8, vw - cardW - 8)) + "px";
-    card.style.top = RK.clamp(y, 8, Math.max(8, vh - cardH - 8)) + "px";
+    if (!cache || cache.el !== hit.el || cache.w !== border.w || cache.h !== border.h) {
+      dropCache();
+      const chip = RK.h("div", { style: {
+        position: "fixed", background: "#2D62F6", color: "#fff",
+        font: "600 11px/1.4 'Inter', system-ui, sans-serif", padding: "3px 8px",
+        borderRadius: "6px", whiteSpace: "nowrap", maxWidth: "min(420px, calc(100vw - 16px))",
+        overflow: "hidden", textOverflow: "ellipsis", boxShadow: "0 4px 14px rgba(0,0,0,.4)",
+      } }, selectorOf(hit.el));
+      hg.appendChild(chip);
+      const card = buildCard(hit.el);
+      if (card) hg.appendChild(card);
+      cache = {
+        el: hit.el, w: border.w, h: border.h,
+        chip, chipW: chip.offsetWidth,
+        card, cardW: card ? card.offsetWidth : 0, cardH: card ? card.offsetHeight : 0,
+      };
+    }
+    positionChip(border);
+    if (cache.card) positionCard();
   }
 
   // ---- click → send element as chat context ------------------------------
@@ -314,6 +354,8 @@
       if (unsub) unsub();
       unsub = null;
       last = null;
+      cache = null;   // nodes themselves go with RK.clearLayer on deactivate
+      tagsBox = null;
       bindClicks(false);
     },
   });

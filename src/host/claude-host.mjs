@@ -93,7 +93,7 @@ process.on("unhandledRejection", (reason) => {
 // selfUpdate below) and only falls back to the manual install.sh command if
 // that op isn't answered (hosts older than v4).
 // Bump this on EVERY host change the extension needs to know about.
-const HOST_VERSION = 6;
+const HOST_VERSION = 7;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -211,23 +211,79 @@ const CONFIG = loadConfig();
 // shells out to (git, rg, node) can be missing. Spawning an interactive login
 // shell and reading its `env` recovers the full PATH the user actually has.
 // (Technique adapted from 21st-dev/1Code, Apache-2.0, and the `shell-env` pkg.)
+//
+// That shell can take seconds with a heavy .zshrc (nvm, compinit), and it used
+// to run synchronously on EVERY host start, delaying the panel's `ready`. The
+// result is now cached on disk: startup reads the cache instantly and, when
+// it's aging, refreshes it in the background for the next launch — only the
+// very first run still pays for the blocking capture.
+const ENV_DELIM = "__RK_ENV__";
+const ENV_SCRIPT = `echo -n "${ENV_DELIM}"; env; echo -n "${ENV_DELIM}"; exit`;
+const SHELL_ENV_CACHE = join(HERE, "shell-env.json");
+const SHELL_ENV_TTL_MS = 24 * 60 * 60 * 1000; // hard expiry — recapture synchronously
+const SHELL_ENV_REFRESH_MS = 60 * 60 * 1000;  // soft expiry — refresh in background
+
+function shellEnvOpts(shell, timeout) {
+  return {
+    encoding: "utf8",
+    timeout,
+    env: { HOME: homedir(), USER: userInfo().username, SHELL: shell, DISABLE_AUTO_UPDATE: "true" },
+  };
+}
+
+function parseShellEnv(out) {
+  const section = String(out || "").split(ENV_DELIM)[1] || "";
+  const env = {};
+  for (const line of section.split("\n")) {
+    const i = line.indexOf("=");
+    if (i > 0) env[line.slice(0, i)] = line.slice(i + 1);
+  }
+  return env;
+}
+
+function writeShellEnvCache(shell, env) {
+  try {
+    const tmp = SHELL_ENV_CACHE + ".tmp";
+    writeFileSync(tmp, JSON.stringify({ shell, ts: Date.now(), env }), "utf8");
+    renameSync(tmp, SHELL_ENV_CACHE);
+  } catch {
+    /* cache is best-effort */
+  }
+}
+
+function refreshShellEnvCache(shell) {
+  try {
+    execFile(shell, ["-ilc", ENV_SCRIPT], shellEnvOpts(shell, 15000), (err, stdout) => {
+      if (err) return;
+      const env = parseShellEnv(stdout);
+      if (Object.keys(env).length) writeShellEnvCache(shell, env);
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
 function getShellEnv() {
   if (process.platform === "win32") return { ...process.env };
-  const DELIM = "__RK_ENV__";
   const shell = process.env.SHELL || "/bin/zsh";
   try {
-    const out = execSync(`${shell} -ilc 'echo -n "${DELIM}"; env; echo -n "${DELIM}"; exit'`, {
-      encoding: "utf8",
-      timeout: 5000,
-      env: { HOME: homedir(), USER: userInfo().username, SHELL: shell, DISABLE_AUTO_UPDATE: "true" },
-    });
-    const section = out.split(DELIM)[1] || "";
-    const env = {};
-    for (const line of section.split("\n")) {
-      const i = line.indexOf("=");
-      if (i > 0) env[line.slice(0, i)] = line.slice(i + 1);
+    const cached = JSON.parse(readFileSync(SHELL_ENV_CACHE, "utf8"));
+    const age = Date.now() - (cached.ts || 0);
+    if (cached.shell === shell && cached.env && Object.keys(cached.env).length && age < SHELL_ENV_TTL_MS) {
+      if (age > SHELL_ENV_REFRESH_MS) refreshShellEnvCache(shell);
+      return { ...cached.env };
     }
-    return Object.keys(env).length ? env : { ...process.env };
+  } catch {
+    /* no or invalid cache — capture synchronously below */
+  }
+  try {
+    const out = execSync(`${shell} -ilc '${ENV_SCRIPT}'`, shellEnvOpts(shell, 5000));
+    const env = parseShellEnv(out);
+    if (Object.keys(env).length) {
+      writeShellEnvCache(shell, env);
+      return env;
+    }
+    return { ...process.env };
   } catch {
     return { ...process.env };
   }
@@ -615,12 +671,24 @@ function killSession(id) {
   const s = sessions.get(id);
   if (!s) return;
   if (s.child) {
-    s.child._intentional = true;
+    const child = s.child;
+    child._intentional = true;
     try {
-      s.child.kill("SIGTERM");
+      child.kill("SIGTERM");
     } catch {
       /* ignore */
     }
+    // A claude wedged in a tool call can ignore SIGTERM and linger as an
+    // orphan burning CPU/tokens — escalate if it hasn't exited shortly.
+    const hard = setTimeout(() => {
+      // exitCode/signalCode stay null until the process actually terminates
+      // (`killed` only says a signal was *sent* — our own SIGTERM sets it).
+      if (child.exitCode == null && child.signalCode == null) {
+        try { child.kill("SIGKILL"); } catch { /* ignore */ }
+      }
+    }, 2500);
+    hard.unref?.();
+    child.once("exit", () => clearTimeout(hard));
   }
   sessions.delete(id);
 }

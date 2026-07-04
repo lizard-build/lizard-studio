@@ -3,5 +3,6 @@
 src/host/host-config.json
 src/host/launch.sh
 src/host/host.log
+src/host/shell-env.json
 
 .DS_Store
