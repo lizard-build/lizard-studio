@@ -107,12 +107,15 @@ function toggleSidePanel(tab) {
 
 // declarativeNetRequest session rule that strips framing headers from sub-frame
 // requests, so Responsive mode's iframe can load sites that set X-Frame-Options
-// or CSP frame-ancestors. Installed only while the tool is active.
-const RF_RULE_ID = 1;
-function setResponsiveRule(on) {
-  const removeRuleIds = [RF_RULE_ID];
+// or CSP frame-ancestors. Scoped to the requesting tab only — the rule must not
+// weaken CSP anywhere else in the browser. One rule per tab (id = base + tabId)
+// so several tabs can run the tool independently.
+const RF_RULE_BASE = 1000;
+function setResponsiveRule(on, tabId) {
+  if (tabId == null) return;
+  const ruleId = RF_RULE_BASE + tabId;
   const addRules = on ? [{
-    id: RF_RULE_ID,
+    id: ruleId,
     priority: 1,
     action: {
       type: "modifyHeaders",
@@ -122,11 +125,21 @@ function setResponsiveRule(on) {
         { header: "content-security-policy-report-only", operation: "remove" },
       ],
     },
-    condition: { resourceTypes: ["sub_frame"] },
+    condition: { resourceTypes: ["sub_frame"], tabIds: [tabId] },
   }] : [];
-  chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds, addRules })
+  chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId], addRules })
     .catch((err) => console.error("[RK] DNR updateSessionRules", err));
 }
+
+// The content script asks for removal when the tool turns off, but if the tab
+// closes, crashes, or navigates away while Responsive mode is on, that message
+// never arrives — clean up here so the CSP-stripping rule can't outlive its tab.
+// Both listeners wake the service worker, so this holds across SW recycles.
+chrome.tabs.onRemoved.addListener((tabId) => setResponsiveRule(false, tabId));
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  // A top-level navigation resets the content script (tool state is gone).
+  if (info.status === "loading") setResponsiveRule(false, tabId);
+});
 
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (!msg) return;
@@ -136,10 +149,10 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
       panelPorts.forEach((p) => p.postMessage({ cmd: "close" }));
       break;
     case "RK_RESPONSIVE_ON":
-      setResponsiveRule(true);
+      setResponsiveRule(true, sender.tab && sender.tab.id);
       break;
     case "RK_RESPONSIVE_OFF":
-      setResponsiveRule(false);
+      setResponsiveRule(false, sender.tab && sender.tab.id);
       break;
     case "RK_PICK_ELEMENT":
       // Selector tool clicked an element — hand it to the side-panel chat as

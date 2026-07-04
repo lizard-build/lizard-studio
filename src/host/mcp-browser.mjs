@@ -16,7 +16,14 @@ import { readFileSync, statSync } from "node:fs";
 import { basename } from "node:path";
 
 const PORT = parseInt(process.env.RK_BRIDGE_PORT || "0", 10);
+const TOKEN = process.env.RK_BRIDGE_TOKEN || "";
 const SESSION = process.env.RK_BRIDGE_SESSION || "default";
+
+// Exit when the parent claude process goes away (its death ends our stdin).
+// Without this the open TCP socket to the host keeps the event loop alive and
+// every interrupt/model-switch would leak an orphaned relay process.
+process.stdin.on("end", () => process.exit(0));
+process.stdin.on("close", () => process.exit(0));
 
 // Every tab-scoped tool accepts this: omit to use the user's active tab.
 const TAB_ID = {
@@ -287,7 +294,7 @@ function callHost(op, args) {
     connect();
     const reqId = nextReq++;
     pending.set(reqId, resolve);
-    const payload = JSON.stringify({ reqId, op, args, session: SESSION }) + "\n";
+    const payload = JSON.stringify({ reqId, op, args, session: SESSION, token: TOKEN }) + "\n";
     let tries = 0;
     const trySend = () => {
       if (connected && sock) {

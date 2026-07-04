@@ -4,8 +4,9 @@
 //
 // Most sites block being framed (X-Frame-Options / CSP frame-ancestors). While
 // this tool is active the service worker installs a session declarativeNetRequest
-// rule that strips those headers from sub_frame requests only; it's removed the
-// moment the tool turns off (see background.js, RK_RESPONSIVE_ON/OFF).
+// rule that strips those headers from sub_frame requests in THIS TAB only; it's
+// removed when the tool turns off, the tab closes, or the tab navigates away
+// (see background.js, RK_RESPONSIVE_ON/OFF).
 (function () {
   const RK = window.RK;
   const ID = "responsive";

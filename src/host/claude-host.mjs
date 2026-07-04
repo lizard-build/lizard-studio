@@ -50,6 +50,7 @@
 //   { type:"error",   id, message }
 
 import { spawn, execFile, execSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, appendFileSync, readdirSync, mkdirSync, writeFileSync, renameSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -92,7 +93,7 @@ process.on("unhandledRejection", (reason) => {
 // selfUpdate below) and only falls back to the manual install.sh command if
 // that op isn't answered (hosts older than v4).
 // Bump this on EVERY host change the extension needs to know about.
-const HOST_VERSION = 5;
+const HOST_VERSION = 6;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -286,6 +287,12 @@ let bridgePort = 0;
 const browserPending = new Map(); // bid -> { resolve, timer }
 let nextBid = 1;
 
+// Shared secret for the bridge. The server binds to 127.0.0.1, but that alone
+// doesn't authenticate the client — any local process could connect and drive
+// the user's tabs (including browser_eval). Only our own MCP relays receive the
+// token (via env at spawn), and every request must carry it.
+const BRIDGE_TOKEN = randomBytes(32).toString("hex");
+
 const bridgeServer = net.createServer((sock) => {
   sock.setEncoding("utf8");
   let buf = "";
@@ -301,6 +308,11 @@ const bridgeServer = net.createServer((sock) => {
         m = JSON.parse(line);
       } catch {
         continue;
+      }
+      if (m.token !== BRIDGE_TOKEN) {
+        log("bridge: dropping connection with bad/missing token");
+        sock.destroy();
+        return;
       }
       const reqId = m.reqId;
       browserRequest(m.op, m.args, m.session).then((r) => {
@@ -485,7 +497,7 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
   if (bridgePort && existsSync(MCP_RELAY)) {
     const mcp = JSON.stringify({
       mcpServers: {
-        browser: { command: NODE, args: [MCP_RELAY], env: { RK_BRIDGE_PORT: String(bridgePort), RK_BRIDGE_SESSION: id } },
+        browser: { command: NODE, args: [MCP_RELAY], env: { RK_BRIDGE_PORT: String(bridgePort), RK_BRIDGE_TOKEN: BRIDGE_TOKEN, RK_BRIDGE_SESSION: id } },
       },
     });
     args.push("--mcp-config", mcp);
@@ -961,16 +973,19 @@ function handle(msg) {
       break;
     case "setMode": {
       const s = sessions.get(id);
+      send({ type: "interrupted", id });
       startClaude({ id, cwd: s && s.cwd, model: s && s.model, effort: s && s.effort, permissionMode: msg.permissionMode, resume: s && s.sessionId });
       break;
     }
     case "setModel": {
       const s = sessions.get(id);
+      send({ type: "interrupted", id });
       startClaude({ id, cwd: s && s.cwd, model: msg.model, effort: s && s.effort, permissionMode: s && s.mode, resume: s && s.sessionId });
       break;
     }
     case "setEffort": {
       const s = sessions.get(id);
+      send({ type: "interrupted", id });
       startClaude({ id, cwd: s && s.cwd, model: s && s.model, effort: msg.effort, permissionMode: s && s.mode, resume: s && s.sessionId });
       break;
     }

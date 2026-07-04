@@ -715,11 +715,8 @@ body {
 .queued-tag {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 6px;
+  justify-content: flex-end;
   margin-top: 4px;
-  font-size: 11px;
-  color: var(--text-tertiary);
 }
 .queued-cancel {
   appearance: none;

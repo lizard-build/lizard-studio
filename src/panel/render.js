@@ -273,36 +273,56 @@
   }
 
   // ---- line diff (for Edit tool) -------------------------------------------
-  // Minimal LCS so additions/removals line up sensibly.
+  // Minimal LCS so additions/removals line up sensibly. The DP matrix is
+  // O(n·m) cells, so strip the common prefix/suffix first (a real edit usually
+  // collapses to a small window) and above a hard cap skip the alignment — a
+  // multi-thousand-line replacement would otherwise allocate tens of millions
+  // of cells synchronously mid-render and freeze the panel.
+  const DIFF_MAX_LINES = 600; // per side, after prefix/suffix trimming
   function lineDiff(oldStr, newStr) {
     const a = String(oldStr || "").split("\n");
     const b = String(newStr || "").split("\n");
-    const n = a.length;
-    const m = b.length;
-    const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
-    for (let x = n - 1; x >= 0; x--) {
-      for (let y = m - 1; y >= 0; y--) {
-        dp[x][y] = a[x] === b[y] ? dp[x + 1][y + 1] + 1 : Math.max(dp[x + 1][y], dp[x][y + 1]);
-      }
-    }
+    let pfx = 0;
+    while (pfx < a.length && pfx < b.length && a[pfx] === b[pfx]) pfx++;
+    let sfx = 0;
+    while (sfx < a.length - pfx && sfx < b.length - pfx && a[a.length - 1 - sfx] === b[b.length - 1 - sfx]) sfx++;
+    const ca = a.slice(pfx, a.length - sfx);
+    const cb = b.slice(pfx, b.length - sfx);
+
     const rows = [];
-    let x = 0;
-    let y = 0;
-    while (x < n && y < m) {
-      if (a[x] === b[y]) {
-        rows.push({ t: " ", text: a[x] });
-        x++;
-        y++;
-      } else if (dp[x + 1][y] >= dp[x][y + 1]) {
-        rows.push({ t: "-", text: a[x] });
-        x++;
-      } else {
-        rows.push({ t: "+", text: b[y] });
-        y++;
+    for (let k = 0; k < pfx; k++) rows.push({ t: " ", text: a[k] });
+    if (ca.length > DIFF_MAX_LINES || cb.length > DIFF_MAX_LINES) {
+      // Too big to align line-by-line — show one removed block, one added block.
+      for (const text of ca) rows.push({ t: "-", text });
+      for (const text of cb) rows.push({ t: "+", text });
+    } else {
+      const n = ca.length;
+      const m = cb.length;
+      const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+      for (let x = n - 1; x >= 0; x--) {
+        for (let y = m - 1; y >= 0; y--) {
+          dp[x][y] = ca[x] === cb[y] ? dp[x + 1][y + 1] + 1 : Math.max(dp[x + 1][y], dp[x][y + 1]);
+        }
       }
+      let x = 0;
+      let y = 0;
+      while (x < n && y < m) {
+        if (ca[x] === cb[y]) {
+          rows.push({ t: " ", text: ca[x] });
+          x++;
+          y++;
+        } else if (dp[x + 1][y] >= dp[x][y + 1]) {
+          rows.push({ t: "-", text: ca[x] });
+          x++;
+        } else {
+          rows.push({ t: "+", text: cb[y] });
+          y++;
+        }
+      }
+      while (x < n) rows.push({ t: "-", text: ca[x++] });
+      while (y < m) rows.push({ t: "+", text: cb[y++] });
     }
-    while (x < n) rows.push({ t: "-", text: a[x++] });
-    while (y < m) rows.push({ t: "+", text: b[y++] });
+    for (let k = sfx; k > 0; k--) rows.push({ t: " ", text: a[a.length - k] });
 
     const pre = document.createElement("pre");
     pre.className = "diff";

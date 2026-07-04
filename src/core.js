@@ -23,8 +23,25 @@
   };
 
   // ---- tiny event bus ----------------------------------------------------
-  RK.on = (evt, fn) => { (RK._listeners[evt] ||= []).push(fn); };
-  RK.emit = (evt, payload) => { (RK._listeners[evt] || []).forEach((fn) => fn(payload)); };
+  // on() returns an unsubscribe function. Subscriptions made while a tool's
+  // enable() runs are tied to that activation and removed automatically on
+  // deactivate — tools subscribe in enable() with no removal of their own, so
+  // without this every toggle cycle stacked another permanent closure (and a
+  // handler without an isActive guard kept drawing after its tool was off).
+  let activationBag = null; // set by RK.activate around enable()
+  const toolSubs = {};      // id -> unsubscribe functions from that activation
+  RK.on = (evt, fn) => {
+    const list = (RK._listeners[evt] ||= []);
+    list.push(fn);
+    const off = () => {
+      const i = list.indexOf(fn);
+      if (i !== -1) list.splice(i, 1);
+    };
+    if (activationBag) activationBag.push(off);
+    return off;
+  };
+  // Iterate a copy so an unsubscribe during dispatch can't skip a listener.
+  RK.emit = (evt, payload) => { (RK._listeners[evt] || []).slice().forEach((fn) => fn(payload)); };
 
   // ---- page-context provider --------------------------------------------
   // The side-panel chat asks for the live page so the user can attach "the
@@ -453,7 +470,11 @@
     if (!t || RK.isActive(id)) return;
     RK.ensureOverlay();
     RK.state.active[id] = true;
+    // Everything the tool subscribes via RK.on inside enable() lands in this
+    // bag and is unsubscribed in deactivate below.
+    activationBag = toolSubs[id] = [];
     try { t.enable && t.enable(); } catch (e) { console.error("[RK]", id, e); }
+    finally { activationBag = null; }
     RK.emit("toolchange", { id, active: true });
     RK.save();
   };
@@ -463,6 +484,8 @@
     if (!t || !RK.isActive(id)) return;
     RK.state.active[id] = false;
     try { t.disable && t.disable(); } catch (e) { console.error("[RK]", id, e); }
+    (toolSubs[id] || []).forEach((off) => off());
+    delete toolSubs[id];
     RK.clearLayer(id);
     RK.emit("toolchange", { id, active: false });
     RK.save();

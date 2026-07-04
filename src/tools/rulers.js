@@ -9,10 +9,13 @@
   const TICK = "rgba(233,237,244,0.45)";
   const LABEL = "rgba(233,237,244,0.85)";
 
-  let mmHandler = null, hx = null, vy = null;
+  let mmHandler = null, hx = null, vy = null, scaleG = null;
 
+  // Redraws only the scale sub-group — the cursor crosshair lives in its own
+  // sibling group, so a window resize doesn't wipe it mid-hover.
   function drawScale() {
-    const g = RK.layer(ID);
+    const g = scaleG;
+    if (!g) return;
     g.replaceChildren();
     const w = window.innerWidth, h = window.innerHeight;
 
@@ -61,10 +64,12 @@
   }
 
   function enable() {
+    const g = RK.layer(ID);
+    scaleG = RK.svg("g");
+    g.appendChild(scaleG);
     drawScale();
     RK.on("resize", drawScale);
 
-    const g = RK.layer(ID);
     const cursor = makeCursor();
     g.appendChild(cursor);
     hx = cursor.querySelector(".hx");
@@ -89,6 +94,7 @@
   function disable() {
     if (mmHandler) window.removeEventListener("mousemove", mmHandler);
     mmHandler = null;
+    scaleG = hx = vy = null; // nodes go with RK.clearLayer on deactivate
   }
 
   RK.register({

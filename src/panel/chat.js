@@ -99,7 +99,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 5;
+  const EXPECTED_HOST_VERSION = 6;
 
   let els = {};
   let port = null;
@@ -2129,6 +2129,8 @@
           const a = chats.get(activeId);
           if (a && !a.started) startChatSession(a);
           maybeReplay(a);
+          // Deliver anything queued while the host was down or restarting.
+          if (a && a.started && !a.turnRunning) dispatchNextQueued(a);
         }
         break;
       case "interrupted":
@@ -2137,7 +2139,6 @@
         // The `started` event for the respawned process follows separately.
         if (chat && chat.turnRunning) {
           endTurn(chat, null);
-          systemNote(chat, "Stopped.");
         }
         break;
       case "started":
@@ -2263,8 +2264,9 @@
       if (chat.id === activeId) updateSetup();
       return;
     }
-    chat.started = true;
-    post({
+    // post() fails if the port died since the last connected check — leave
+    // `started` false in that case so the reconnect's `ready` handler retries.
+    chat.started = post({
       type: "start",
       id: chat.id,
       cwd: chat.cwd,
@@ -2392,7 +2394,7 @@
     const hasContext = Array.isArray(chat.contexts) && chat.contexts.length > 0;
     const attachments = Array.isArray(chat.attachments) ? chat.attachments : [];
     const hasAttach = attachments.length > 0;
-    if ((!text && !hasContext && !hasAttach) || !connected) return;
+    if (!text && !hasContext && !hasAttach) return;
     // Can't run an agent without a working directory — prompt for one instead of
     // silently falling back to $HOME.
     if (!chat.cwd) {
@@ -2400,8 +2402,11 @@
       return;
     }
     // A turn is already streaming — queue this one instead of dropping it.
-    // deliverPrompt() drains the queue from endTurn() once the turn finishes.
-    if (chat.turnRunning) {
+    // Same when the host is down or still restarting (mid self-update): the
+    // prompt shows as a queued bubble and delivers when the session is back,
+    // instead of the Enter press being silently swallowed. The queue drains
+    // from endTurn() and from the reconnect's `ready` handler.
+    if (chat.turnRunning || !connected || !hostReady) {
       queuePrompt(chat, text);
       return;
     }
@@ -2445,7 +2450,6 @@
     if (entry.text) bubble.appendChild(R.markdown(entry.text));
     row.appendChild(bubble);
     const tag = el("div", "queued-tag");
-    tag.appendChild(el("span", null, "Queued — will send when the current turn finishes"));
     const cancel = el("button", "queued-cancel");
     cancel.type = "button";
     cancel.innerHTML = ICON("x", 11);
@@ -2509,8 +2513,29 @@
     const wrappedExtra = extra ? CTX_MARK_START + extra + CTX_MARK_END : "";
     const sentText = /^\//.test(text) ? text + (wrappedExtra ? "\n\n" + wrappedExtra : "") : wrappedExtra + (text || fallback);
     const images = attachments.map((a) => ({ mediaType: a.mediaType, data: a.base64 }));
+    // If the port died since the connected check, post() reports it and nothing
+    // reached the host. Requeue the prompt (visible, cancellable) instead of
+    // entering a running state whose spinner would never stop — endTurn() or
+    // the reconnect's `ready` handler re-delivers it.
+    if (!post({ type: "prompt", id: chat.id, text: sentText, images })) {
+      const entry = {
+        text,
+        contexts: Array.isArray(chat.contexts) ? chat.contexts.slice() : [],
+        attachments: attachments.slice(),
+      };
+      if (!Array.isArray(chat.queue)) chat.queue = [];
+      chat.queue.unshift(entry); // it was next in line — keep it ahead of later queued prompts
+      entry.el = renderQueuedBubble(chat, entry);
+      chat.contexts = [];
+      chat.attachments = [];
+      if (chat.id === activeId) {
+        renderContextChips();
+        renderAttachmentThumbs();
+      }
+      systemNote(chat, "Host disconnected — message queued until it reconnects.", "warn");
+      return;
+    }
     userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments);
-    post({ type: "prompt", id: chat.id, text: sentText, images });
     chat.contexts = [];
     chat.attachments = [];
     if (chat.id === activeId) {
@@ -2671,7 +2696,9 @@
     lastMode = m.id;
     savePrefs();
     syncComposer();
-    if (chat.started) post({ type: "setMode", id: chat.id, permissionMode: chat.mode });
+    // A failed post means the host never saw the change — mark the session
+    // not-started so the next (re)start spawns with the mode shown in the UI.
+    if (chat.started && !post({ type: "setMode", id: chat.id, permissionMode: chat.mode })) chat.started = false;
     // The composer pill already reflects the active mode — no transcript note.
   }
 
@@ -2722,7 +2749,7 @@
     lastModel = m.id;
     savePrefs();
     syncComposer();
-    if (chat.started) post({ type: "setModel", id: chat.id, model: chat.model });
+    if (chat.started && !post({ type: "setModel", id: chat.id, model: chat.model })) chat.started = false;
     // The composer pill already reflects the active model — no transcript note.
   }
 
@@ -2769,7 +2796,7 @@
     lastEffort = e.id;
     savePrefs();
     syncComposer();
-    if (chat.started) post({ type: "setEffort", id: chat.id, effort: chat.effort });
+    if (chat.started && !post({ type: "setEffort", id: chat.id, effort: chat.effort })) chat.started = false;
   }
 
   function toggleEffortMenu() {
