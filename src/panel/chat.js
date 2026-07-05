@@ -101,7 +101,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 9;
+  const EXPECTED_HOST_VERSION = 10;
 
   let els = {};
   let port = null;
@@ -1200,24 +1200,9 @@
     return out.trim();
   }
 
-  // Shared copy-button behavior: write getText() to the clipboard and flash
-  // the icon to a check. Used by message footers, bash blocks and the
-  // host-outdated banner — keep the feedback identical everywhere.
-  function wireCopyButton(btn, getText, size) {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const text = getText();
-      if (!text || !navigator.clipboard || !navigator.clipboard.writeText) return;
-      navigator.clipboard.writeText(text).then(() => {
-        btn.classList.add("copied");
-        btn.innerHTML = ICON("check", size);
-        setTimeout(() => {
-          btn.classList.remove("copied");
-          btn.innerHTML = ICON("copy", size);
-        }, 1200);
-      }).catch(() => {});
-    });
-  }
+  // Shared copy-button behavior lives in render.js next to codeBlock, which
+  // wires its own copy overlay — same flash-to-check feedback everywhere.
+  const wireCopyButton = R.wireCopyButton;
 
   function messageFooter(getText, ts) {
     const footer = el("div", "msg-footer");
@@ -1668,19 +1653,12 @@
   }
 
   // Terminal-style rendering for a Bash tool call's command: a leading `$`
-  // prompt glyph plus a copy button pinned to the top-right of the block,
-  // matching how Claude Code's own CLI renders shell commands.
+  // prompt glyph, matching how Claude Code's own CLI renders shell commands.
+  // The copy button comes with codeBlock itself.
   function bashCommandBlock(command) {
     const wrap = el("div", "bash-block");
     wrap.appendChild(el("span", "bash-prompt", "$"));
     wrap.appendChild(R.codeBlock(command, "bash"));
-    const copyBtn = el("button", "bash-copy");
-    copyBtn.type = "button";
-    copyBtn.title = "Copy command";
-    copyBtn.setAttribute("aria-label", "Copy command");
-    copyBtn.innerHTML = ICON("copy", 12);
-    wireCopyButton(copyBtn, () => command, 12);
-    wrap.appendChild(copyBtn);
     return wrap;
   }
 

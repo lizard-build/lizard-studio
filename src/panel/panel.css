@@ -968,6 +968,34 @@ code.inline {
 .code-block::-webkit-scrollbar { height: 8px; }
 .code-block::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 4px; }
 
+/* Hover-revealed copy button pinned to the top-right of every code block.
+   It overlays the content (no reserved padding) — the wrapper exists because
+   the <pre> is the scroll container, so a button inside it would scroll away.
+   The wrapper has no padding/border: the pre's margins collapse through it,
+   so spacing rules keep targeting .code-block. */
+.code-wrap { position: relative; }
+.code-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: var(--bg-secondary);
+  color: var(--text-tertiary);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.15s, color 0.15s;
+}
+.code-wrap:hover .code-copy { opacity: 1; }
+.code-copy:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.1); }
+.code-copy.copied { opacity: 1; color: var(--control-primary); }
+
 /* /login card */
 .login-card {
   margin: 4px 0;
@@ -1293,10 +1321,10 @@ code.inline {
 .tool-detail .code-block,
 .tool-detail .diff { margin: 0 0 6px; }
 
-/* Bash command: a terminal-style `$` prompt plus a hover-revealed copy button
-   pinned to the top-right corner, like Claude Code's own CLI rendering. */
+/* Bash command: a terminal-style `$` prompt, like Claude Code's own CLI
+   rendering. The copy button comes from the shared .code-wrap overlay. */
 .bash-block { position: relative; }
-.bash-block .code-block { padding-left: 24px; padding-right: 30px; }
+.bash-block .code-block { padding-left: 24px; }
 .bash-prompt {
   position: absolute;
   left: 12px;
@@ -1307,27 +1335,6 @@ code.inline {
   color: var(--text-tertiary);
   pointer-events: none;
 }
-.bash-copy {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 22px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--text-tertiary);
-  border-radius: 6px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s, background 0.15s, color 0.15s;
-}
-.bash-block:hover .bash-copy { opacity: 1; }
-.bash-copy:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.08); }
-.bash-copy.copied { opacity: 1; color: var(--control-primary); }
 
 .tool-result { padding: 0 0 4px 22px; }
 .tool-result .code-block { margin: 0; background: rgba(255, 255, 255, 0.05); }

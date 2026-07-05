@@ -92,13 +92,46 @@
       .replace(/\b([A-Za-z_$][\w$]*)(?=\s*\()/g, '<span class="tok-fn">$1</span>');
   }
 
+  // Shared copy-button behavior: write getText() to the clipboard and flash
+  // the icon to a check. Used by code blocks, message footers and the
+  // host-outdated banner — keep the feedback identical everywhere.
+  function wireCopyButton(btn, getText, size) {
+    const ICON = window.RKIconHTML;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const text = getText();
+      if (!text || !navigator.clipboard || !navigator.clipboard.writeText) return;
+      navigator.clipboard.writeText(text).then(() => {
+        btn.classList.add("copied");
+        btn.innerHTML = ICON("check", size);
+        setTimeout(() => {
+          btn.classList.remove("copied");
+          btn.innerHTML = ICON("copy", size);
+        }, 1200);
+      }).catch(() => {});
+    });
+  }
+
   function codeBlock(code, lang) {
+    // The <pre> is the horizontal scroll container, so the copy button lives
+    // on a relative wrapper — pinned inside the pre it would scroll away.
+    const wrap = document.createElement("div");
+    wrap.className = "code-wrap";
     const pre = document.createElement("pre");
     pre.className = "code-block";
     const codeEl = document.createElement("code");
     codeEl.innerHTML = highlight(escapeHtml(code), lang);
     pre.appendChild(codeEl);
-    return pre;
+    wrap.appendChild(pre);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "code-copy";
+    btn.title = "Copy";
+    btn.setAttribute("aria-label", "Copy code");
+    btn.innerHTML = window.RKIconHTML("copy", 12);
+    wireCopyButton(btn, () => code, 12);
+    wrap.appendChild(btn);
+    return wrap;
   }
 
   // ---- inline markdown ------------------------------------------------------
@@ -361,5 +394,5 @@
     return pre;
   }
 
-  window.RKRender = { escapeHtml, markdown, codeBlock, lineDiff, inlineMarkdown };
+  window.RKRender = { escapeHtml, markdown, codeBlock, lineDiff, inlineMarkdown, wireCopyButton };
 })();
