@@ -1293,6 +1293,11 @@
         let advanced = false;
         for (;;) {
           const end = nextWordEnd(blk.buf, blk.shown);
+          // Nothing left to reveal (shown has caught up to buf.length) —
+          // without this, once done a fully-revealed block would spin here
+          // forever: end===shown forever, cost 0 is never > carry, so the
+          // loop never breaks.
+          if (end === blk.shown) break;
           // A word is revealed only once its end is known — trailing
           // whitespace in the buffer, or the block being complete.
           if (end === blk.buf.length && !blk.done) break;
