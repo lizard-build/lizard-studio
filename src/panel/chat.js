@@ -59,11 +59,13 @@
     { id: "bypassPermissions", label: "Bypass permissions", short: "Bypass", hint: "Allows everything without asking. Use with care.", cls: "mode-bypass" },
   ];
 
+  // Listed most- to least-capable — Fable 5 is the top tier (above Opus),
+  // then Opus, Sonnet, Haiku fastest/smallest.
   const MODELS = [
+    { id: "claude-fable-5", label: "Fable 5" },
     { id: "claude-opus-4-8", label: "Opus 4.8" },
     { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
-    { id: "claude-fable-5", label: "Fable 5" },
   ];
   const DEFAULT_MODEL = "claude-opus-4-8";
 
