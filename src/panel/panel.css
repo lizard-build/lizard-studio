@@ -737,8 +737,12 @@ body {
   outline: none;
   background: transparent;
   color: var(--text-primary);
-  font: inherit;
-  line-height: inherit;
+  font-family: inherit;
+  /* Match .md exactly (font-size/line-height) — "inherit" pulled the bubble's
+     unset line-height ("normal", ~1.2) instead, so text visibly compressed
+     the moment you clicked to edit. */
+  font-size: 14px;
+  line-height: 1.55;
   padding: 0;
   margin: 0;
 }
