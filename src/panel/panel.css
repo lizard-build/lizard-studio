@@ -715,15 +715,15 @@ body {
   color: var(--text-primary);
 }
 /* Click-to-edit affordance on a sent message — a rewindable bubble hints at
-   it with a pointer cursor and a faint highlight on hover, then swaps its
+   it with a pointer cursor and a brighter border on hover, then swaps its
    markdown for a matching textarea while being edited (see beginEdit in
    chat.js). Enter commits (rewinds + resends), Escape/blur reverts. */
 .bubble.editable {
   cursor: pointer;
-  transition: background 0.15s;
+  transition: border-color 0.15s;
 }
 .bubble.editable:hover {
-  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.22);
 }
 .bubble.editing {
   cursor: default;
