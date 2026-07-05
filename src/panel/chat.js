@@ -1474,15 +1474,13 @@
       entry.resultEl.classList.remove("hidden");
       entry.resultEl.classList.toggle("err", !!isError);
       const lines = text.split("\n");
+      // Expanding the card is the one fold the user needs — a long result
+      // just gets a (non-interactive) line-count label above it, always
+      // shown in full, instead of a second nested collapse to click through.
       if (lines.length > 16 || text.length > 1400) {
-        const det = el("details", "result-fold");
-        const sum = el("summary", null, `Output · ${lines.length} lines`);
-        det.appendChild(sum);
-        det.appendChild(R.codeBlock(text, ""));
-        entry.resultEl.appendChild(det);
-      } else {
-        entry.resultEl.appendChild(R.codeBlock(text, ""));
+        entry.resultEl.appendChild(el("div", "result-label", `Output · ${lines.length} lines`));
       }
+      entry.resultEl.appendChild(R.codeBlock(text, ""));
     }
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
     // A tool id gets exactly one result — drop the entry so a long agent

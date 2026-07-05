@@ -1300,14 +1300,11 @@ code.inline {
 .tool-result { padding: 0 0 4px 22px; }
 .tool-result .code-block { margin: 0; background: rgba(255, 255, 255, 0.05); }
 .tool-result.err .code-block { background: rgba(239, 68, 68, 0.1); }
-.result-fold summary {
-  cursor: pointer;
+.result-label {
   font-size: 11px;
   color: var(--text-tertiary);
   padding: 4px 0;
-  list-style: none;
 }
-.result-fold summary::-webkit-details-marker { display: none; }
 
 /* Consecutive tool calls fold into one summary line (Claude Code-style):
    "Ran 5 commands, ran an agent, read 2 files ›". While the run is live the
