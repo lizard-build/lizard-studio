@@ -228,12 +228,26 @@
   function scrollToBottom(chat) {
     chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
   }
-  function append(chat, node) {
+  // opts.raw skips the queued-bubble anchor below — the one caller that
+  // wants it is renderQueuedBubble itself (a newly queued message should
+  // stack after ones already waiting, not jump above them).
+  function append(chat, node, opts) {
     const stick = atBottom(chat);
-    // The running/summary status pill lives at the very bottom of the stream, so
-    // new content is inserted *before* it to keep it last (see renderTurnStatus).
-    if (chat.statusEl && chat.statusEl.parentNode === chat.messagesEl) {
-      chat.messagesEl.insertBefore(node, chat.statusEl);
+    // The running/summary status pill lives at the very bottom of the stream,
+    // so new content is inserted *before* it to keep it last (see
+    // renderTurnStatus). Bubbles waiting in the queue must stay pinned at the
+    // very bottom too — below anything the still-running turn produces after
+    // they were queued (more tool calls, another assistant message, a
+    // permission ask) — so live content anchors above the OLDEST pending
+    // queued bubble when one exists, not just above the pill.
+    let anchor = null;
+    if (!(opts && opts.raw) && Array.isArray(chat.queue)) {
+      const pending = chat.queue.find((e) => e.el && e.el.parentNode === chat.messagesEl);
+      if (pending) anchor = pending.el;
+    }
+    if (!anchor && chat.statusEl && chat.statusEl.parentNode === chat.messagesEl) anchor = chat.statusEl;
+    if (anchor) {
+      chat.messagesEl.insertBefore(node, anchor);
     } else {
       chat.messagesEl.appendChild(node);
     }
@@ -2494,7 +2508,10 @@
     entry.el = renderQueuedBubble(chat, entry);
   }
 
-  function renderQueuedBubble(chat, entry) {
+  // opts.atFront: this entry was unshifted back to the head of the queue (the
+  // failed-post requeue path in deliverPrompt) — anchor it before whichever
+  // bubble was previously frontmost instead of stacking it after everything.
+  function renderQueuedBubble(chat, entry, opts) {
     const row = el("div", "msg msg-user queued");
     row.appendChild(buildBubble(entry.text, entry.attachments));
     const tag = el("div", "queued-tag");
@@ -2509,7 +2526,7 @@
     });
     tag.appendChild(cancel);
     row.appendChild(tag);
-    append(chat, row);
+    append(chat, row, { raw: !(opts && opts.atFront) });
     return row;
   }
 
@@ -2573,7 +2590,7 @@
       };
       if (!Array.isArray(chat.queue)) chat.queue = [];
       chat.queue.unshift(entry); // it was next in line — keep it ahead of later queued prompts
-      entry.el = renderQueuedBubble(chat, entry);
+      entry.el = renderQueuedBubble(chat, entry, { atFront: true });
       chat.contexts = [];
       chat.attachments = [];
       if (chat.id === activeId) {
