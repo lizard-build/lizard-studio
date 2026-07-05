@@ -744,6 +744,7 @@
     userBubble(chat, newText, attachments, { real: true });
     chat.turnRunning = true;
     chat.turnStatusText = "";
+    chat.compacting = false;
     chat.turnStartedAt = Date.now();
     chat.turnTokens = 0;
     chat.curMsgTokens = 0;
@@ -2200,6 +2201,13 @@
           if (chat.id === activeId) syncComposer();
           requestBranches(chat);
           savePrefs();
+        } else if (d.subtype === "status" && d.status === "compacting") {
+          // /compact runs a real summarization call with no assistant text or
+          // tool card of its own — pin the spinner word so a long compact
+          // doesn't just read as a random-word stall (see tickStatus).
+          chat.compacting = true;
+          chat.statusWord = "Compacting";
+          chat.statusWordAt = Date.now();
         }
         break;
       // Incremental tokens from --include-partial-messages: render assistant
@@ -2229,10 +2237,15 @@
         break;
       }
       case "user": {
+        // /compact (and other synthetic turns) emit a `user` event whose
+        // content is a plain string, not a block array — iterating it with
+        // for..of would walk individual characters instead of blocks.
         const content = (d.message && d.message.content) || [];
-        for (const block of content) {
-          if (block.type === "tool_result") {
-            fillToolResult(chat, block.tool_use_id, block.content, block.is_error);
+        if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block.type === "tool_result") {
+              fillToolResult(chat, block.tool_use_id, block.content, block.is_error);
+            }
           }
         }
         break;
@@ -2250,6 +2263,7 @@
 
   function endTurn(chat, result) {
     chat.turnRunning = false;
+    chat.compacting = false;
     closeToolGroup(chat);
     finalizeAssistant(chat, chat.currentAssistantBody, Date.now());
     chat.currentAssistantId = null;
@@ -2347,7 +2361,7 @@
     const chat = chats.get(activeId);
     if (chat && chat.turnRunning) {
       const now = Date.now();
-      if (!chat.statusWord || now - chat.statusWordAt > 1800) {
+      if (!chat.compacting && (!chat.statusWord || now - chat.statusWordAt > 1800)) {
         chat.statusWord = randStatusWord();
         chat.statusWordAt = now;
       }
@@ -2852,6 +2866,7 @@
     chat.empty = false;
     chat.turnRunning = true;
     chat.turnStatusText = "";
+    chat.compacting = false;
     // Reset the running-status metrics for this turn.
     chat.turnStartedAt = Date.now();
     chat.turnTokens = 0;
