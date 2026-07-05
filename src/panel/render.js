@@ -113,6 +113,17 @@
     html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, t, u) => {
       return `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`;
     });
+    // Bare URLs the model didn't wrap in [text](url) syntax. Walk the string
+    // matching either a full tag or a bare URL; tags (including hrefs already
+    // built above) pass through untouched so we never double-wrap.
+    html = html.replace(/(<[^>]+>)|(https?:\/\/[^\s<]+)/g, (m, tag, url) => {
+      if (tag) return tag;
+      // Trailing sentence punctuation isn't part of the URL — peel it off.
+      const trail = url.match(/[).,!?;:]+$/);
+      const clean = trail ? url.slice(0, -trail[0].length) : url;
+      const rest = trail ? trail[0] : "";
+      return `<a href="${clean}" target="_blank" rel="noopener noreferrer">${clean}</a>${rest}`;
+    });
     return html;
   }
 

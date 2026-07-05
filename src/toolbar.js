@@ -9,6 +9,18 @@
     ["layout", "Layout"],
   ];
 
+  // Display order within each group — independent of script/registration
+  // order (distance.js must load before selector.js for RK._hoverSubscribe,
+  // but that's not the order we want it to appear on the bar). Tools not
+  // listed here fall in after the ones that are, in registration order.
+  const DISPLAY_ORDER = ["selector", "annotate", "picker", "distance", "rulers", "guides", "grid", "responsive"];
+  function byDisplayOrder(ids) {
+    return ids.slice().sort((a, b) => {
+      const ia = DISPLAY_ORDER.indexOf(a), ib = DISPLAY_ORDER.indexOf(b);
+      return (ia === -1 ? DISPLAY_ORDER.length : ia) - (ib === -1 ? DISPLAY_ORDER.length : ib);
+    });
+  }
+
   const CSS = `
     .rk-bar, .rk-bar * { box-sizing: border-box; }
     .rk-bar {
@@ -335,7 +347,7 @@
     toolsEl.replaceChildren();
     let first = true;
     GROUPS.forEach(([gid]) => {
-      const ids = RK.order.filter((id) => RK.tools[id].group === gid);
+      const ids = byDisplayOrder(RK.order.filter((id) => RK.tools[id].group === gid));
       if (!ids.length) return;
       if (!first) toolsEl.appendChild(RK.h("div", { class: "rk-div" }));
       first = false;
@@ -415,9 +427,9 @@
   const HOTKEYS = "1234567890";
   function orderedToolIds() {
     const out = [];
-    GROUPS.forEach(([gid]) => RK.order.forEach((id) => {
-      if (RK.tools[id].group === gid) out.push(id);
-    }));
+    GROUPS.forEach(([gid]) => {
+      byDisplayOrder(RK.order.filter((id) => RK.tools[id].group === gid)).forEach((id) => out.push(id));
+    });
     return out;
   }
   function hotkeyForId(id) {
