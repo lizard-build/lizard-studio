@@ -1093,6 +1093,18 @@
     if (blk.raf) return;
     blk.raf = requestAnimationFrame(() => {
       blk.raf = 0;
+      // A text content block can open (content_block_start) well before it
+      // has any real characters — some turns emit a block that stays
+      // whitespace-only for a while, or turns out empty altogether. body is a
+      // flex column with a `gap`, so merely being IN the DOM opens an empty
+      // gap before any visible text exists. Stay out of the DOM until there's
+      // something to show; once real content lands it never goes away again
+      // (buf only grows), so this is a one-way, one-time transition.
+      if (!blk.buf.trim()) return;
+      if (!blk.appended) {
+        blk.appended = true;
+        blk.body.appendChild(blk.el);
+      }
       if (!blk.md) {
         // One shared .md container so CSS (first/last-child margins, the
         // streaming caret) sees the same shape a one-shot render produces.
@@ -1169,10 +1181,12 @@
         const cb = ev.content_block || {};
         if (cb.type === "text") {
           closeToolGroup(chat);
+          // Not appended to `body` yet — flushStreamBlock does that lazily on
+          // the first non-whitespace content, so an empty/whitespace-only
+          // block never opens a flex-gap gap for content nobody can see.
           const node = el("div", "assistant-stream streaming");
-          body.appendChild(node);
           chat.streamBlocks.set(ev.index, {
-            type: "text", el: node, buf: "", raf: 0,
+            type: "text", el: node, body, buf: "", raf: 0, appended: false,
             // incremental-render state (see flushStreamBlock/advanceStreamScan)
             md: null, live: null, stable: 0, scan: 0, safe: 0, cand: -1, fenceOpen: false, prevList: false,
           });
@@ -1198,11 +1212,13 @@
         const blk = chat.streamBlocks.get(ev.index);
         if (!blk) break;
         if (blk.raf) { cancelAnimationFrame(blk.raf); blk.raf = 0; }
-        if (blk.type === "text") {
+        if (blk.type === "text" && blk.buf.trim()) {
+          if (!blk.appended) blk.body.appendChild(blk.el);
           blk.el.replaceChildren(R.markdown(blk.buf));
           blk.el.classList.remove("streaming");
-          if (!blk.buf.trim()) blk.el.remove();
         }
+        // else: ended up empty/whitespace-only — it was never put in the DOM
+        // (or was, pre-fix; either way there's nothing to remove/finalize).
         chat.streamBlocks.delete(ev.index);
         break;
       }
