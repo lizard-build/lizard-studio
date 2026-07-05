@@ -32,11 +32,11 @@
       "run_at": "document_idle",
       "js": [
         "src/core.js",
-        "src/tools/inspector.js",
+        "src/tools/distance.js",
+        "src/tools/selector.js",
         "src/tools/annotate.js",
         "src/tools/picker.js",
         "src/tools/rulers.js",
-        "src/tools/inspect.js",
         "src/tools/guides.js",
         "src/tools/grid.js",
         "src/tools/responsive.js",
