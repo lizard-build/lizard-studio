@@ -452,7 +452,7 @@
     window.addEventListener("keydown", (e) => {
       if (!RK.state.visible) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.key.length !== 1 || e.key < "0" || e.key > "9") return;
+      if (!e.key || e.key.length !== 1 || e.key < "0" || e.key > "9") return;
       // Don't steal digits while the user is typing — in a page field or in
       // one of our own settings panels (focus lives inside the shadow root).
       if (isTypingTarget(e.target)) return;
