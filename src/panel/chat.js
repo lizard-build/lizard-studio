@@ -667,7 +667,7 @@
     rewindBtn.type = "button";
     rewindBtn.title = "Rewind to here";
     rewindBtn.setAttribute("aria-label", "Rewind conversation to this message");
-    rewindBtn.innerHTML = ICON("history", 13);
+    rewindBtn.innerHTML = ICON("rewind", 13);
     rewindBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       rewindTo(chat, turnIndex, text, attachments);
