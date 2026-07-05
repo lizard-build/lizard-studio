@@ -148,7 +148,10 @@
 
   RK.register({
     id: ID, name: "Guides (drag from edges)", group: "layout",
-    icon: `<svg viewBox="0 0 256 256" fill="currentColor"><path d="M232,120h-8.34A96.14,96.14,0,0,0,136,32.34V24a8,8,0,0,0-16,0v8.34A96.14,96.14,0,0,0,32.34,120H24a8,8,0,0,0,0,16h8.34A96.14,96.14,0,0,0,120,223.66V232a8,8,0,0,0,16,0v-8.34A96.14,96.14,0,0,0,223.66,136H232a8,8,0,0,0,0-16Zm-96,87.6V200a8,8,0,0,0-16,0v7.6A80.15,80.15,0,0,1,48.4,136H56a8,8,0,0,0,0-16H48.4A80.15,80.15,0,0,1,120,48.4V56a8,8,0,0,0,16,0V48.4A80.15,80.15,0,0,1,207.6,120H200a8,8,0,0,0,0,16h7.6A80.15,80.15,0,0,1,136,207.6ZM128,88a40,40,0,1,0,40,40A40,40,0,0,0,128,88Zm0,64a24,24,0,1,1,24-24A24,24,0,0,1,128,152Z"/></svg>`,
+    // Two guide lines crossing off-center, broken at the intersection — the
+    // way guides look on a canvas (vs. the old crosshair, which read as a
+    // second "selector" target).
+    icon: `<svg viewBox="0 0 256 256" fill="currentColor"><rect x="88" y="24" width="16" height="120" rx="8"/><rect x="88" y="176" width="16" height="56" rx="8"/><rect x="24" y="152" width="56" height="16" rx="8"/><rect x="112" y="152" width="120" height="16" rx="8"/></svg>`,
     enable, disable,
   });
 })();
