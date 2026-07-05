@@ -13,7 +13,8 @@
   // order (distance.js must load before selector.js for RK._hoverSubscribe,
   // but that's not the order we want it to appear on the bar). Tools not
   // listed here fall in after the ones that are, in registration order.
-  const DISPLAY_ORDER = ["selector", "annotate", "picker", "distance", "rulers", "guides", "grid", "responsive"];
+  // NB: the Selector tool's id is "inspect" (see tools/selector.js).
+  const DISPLAY_ORDER = ["inspect", "annotate", "picker", "distance", "rulers", "guides", "grid", "responsive"];
   function byDisplayOrder(ids) {
     return ids.slice().sort((a, b) => {
       const ia = DISPLAY_ORDER.indexOf(a), ib = DISPLAY_ORDER.indexOf(b);
