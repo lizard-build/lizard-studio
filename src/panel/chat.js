@@ -1172,6 +1172,20 @@
     return Math.floor(h / 24) + "d ago";
   }
 
+  // Full absolute timestamp ("Jul 5, 2026, 1:40 PM GMT+4") — set as the
+  // `.msg-time` span's title so hovering the relative time ("3m ago") shows
+  // exactly when that was, via the browser's native tooltip.
+  function fullTime(ts) {
+    return new Date(ts).toLocaleString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short",
+    });
+  }
+
   // Visible prose of an assistant message — markdown / live-stream text blocks,
   // minus tool cards and the footer itself. Read at click time so copy reflects
   // the finished message regardless of when the footer was attached.
@@ -1216,6 +1230,7 @@
     const time = el("span", "msg-time");
     time.dataset.ts = String(ts);
     time.textContent = relTime(ts);
+    time.title = fullTime(ts);
     footer.appendChild(copyBtn);
     footer.appendChild(time);
     return footer;
