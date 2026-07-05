@@ -108,7 +108,7 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  max-width: 160px;
+  max-width: 140px;
   flex: 0 0 auto;
   min-width: 0;
   appearance: none;
