@@ -101,7 +101,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 8;
+  const EXPECTED_HOST_VERSION = 9;
 
   let els = {};
   let port = null;
@@ -255,6 +255,9 @@
       slashCommands: [],
       started: false,
       turnRunning: false,
+      // A model/mode/effort switch made while a turn was running — applied
+      // (via restartSessionNow) once endTurn() sees the reply is done.
+      restartPending: false,
       turnStatusText: "",
       // Prompts submitted while a turn is running. Each entry is
       // { text, contexts, attachments, el } — drained one at a time from
@@ -2026,6 +2029,10 @@
       setRunningUI(chat.turnRunning);
       renderTurnStatus(chat);
     }
+    // A model/mode/effort switch made mid-turn was deferred so it wouldn't
+    // hard-kill the reply that was still streaming — apply it now that the
+    // turn is actually done, before anything queued goes out under it.
+    if (chat.restartPending) restartSessionNow(chat);
     // Send the next queued prompt, if any — keeps working even if the user
     // has since switched to a different tab.
     dispatchNextQueued(chat);
@@ -2731,15 +2738,41 @@
   }
 
   // ---- composer / header controls -------------------------------------------
+  // Model/mode/effort changes restart the underlying claude process — it
+  // can't hot-swap those for a live conversation. Restarting right away would
+  // hard-kill an in-flight turn (the same mechanism Stop uses), silently
+  // cutting off a reply that was still streaming even though the user only
+  // meant the change to apply going forward. So: restart immediately while
+  // idle (matches switching folders, same as before); while a turn is
+  // running, defer and let endTurn() flush it once the reply is actually done.
+  function scheduleSessionRestart(chat) {
+    if (!chat.started) return; // no live process yet — the next start already reads chat.model/effort/mode
+    if (chat.turnRunning) {
+      chat.restartPending = true;
+      return;
+    }
+    restartSessionNow(chat);
+  }
+
+  // Sends the full current trio (not just whatever just changed) — this may
+  // be flushing several deferred switches made in any order while the turn
+  // that just finished was running.
+  function restartSessionNow(chat) {
+    chat.restartPending = false;
+    // A failed post means the host never saw the change — mark the session
+    // not-started so the next (re)start spawns with the values shown in the UI.
+    if (!post({ type: "restartSession", id: chat.id, model: chat.model, effort: chat.effort, permissionMode: chat.mode })) {
+      chat.started = false;
+    }
+  }
+
   function applyMode(chat, modeId) {
     const m = MODES.find((x) => x.id === modeId) || MODES[0];
     chat.mode = m.id;
     lastMode = m.id;
     savePrefs();
     syncComposer();
-    // A failed post means the host never saw the change — mark the session
-    // not-started so the next (re)start spawns with the mode shown in the UI.
-    if (chat.started && !post({ type: "setMode", id: chat.id, permissionMode: chat.mode })) chat.started = false;
+    scheduleSessionRestart(chat);
     // The composer pill already reflects the active mode — no transcript note.
   }
 
@@ -2790,7 +2823,7 @@
     lastModel = m.id;
     savePrefs();
     syncComposer();
-    if (chat.started && !post({ type: "setModel", id: chat.id, model: chat.model })) chat.started = false;
+    scheduleSessionRestart(chat);
     // The composer pill already reflects the active model — no transcript note.
   }
 
@@ -2845,7 +2878,7 @@
     lastEffort = e.id;
     savePrefs();
     syncComposer();
-    if (chat.started && !post({ type: "setEffort", id: chat.id, effort: chat.effort })) chat.started = false;
+    scheduleSessionRestart(chat);
   }
 
   function toggleEffortMenu() {

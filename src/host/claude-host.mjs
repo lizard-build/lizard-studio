@@ -21,9 +21,11 @@
 //   { type:"interrupt", id }                                       hard-stop: kill + resume the session
 //   { type:"stop",    id }                                         kill the claude process
 //   { type:"close",   id }                                         kill + forget the session
-//   { type:"setMode", id, permissionMode }                         restart, resuming the session
-//   { type:"setModel", id, model }                                 restart, resuming the session
-//   { type:"setEffort", id, effort }                                restart, resuming the session
+//   { type:"restartSession", id, model, effort, permissionMode }   restart with the given trio, resuming
+//                                                                 the session (mode/model/effort switches —
+//                                                                 the panel defers sending this until any
+//                                                                 in-flight turn finishes, so it never
+//                                                                 hard-kills a reply that's still streaming)
 //   { type:"loadTranscript", id, sessionId, cwd }                  replay a past session's messages
 //   { type:"pickFolder", id }                                      native folder chooser
 //   { type:"gitBranches", id, cwd }                                list local branches + current
@@ -133,7 +135,7 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // selfUpdate below) and only falls back to the manual install.sh command if
 // that op isn't answered (hosts older than v4).
 // Bump this on EVERY host change the extension needs to know about.
-const HOST_VERSION = 8;
+const HOST_VERSION = 9;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -1091,22 +1093,13 @@ function handle(msg) {
     case "close":
       killSession(id);
       break;
-    case "setMode": {
+    case "restartSession": {
+      // The panel sends the full desired trio (not just whatever changed) —
+      // it may be flushing several deferred switches (model + mode, say) made
+      // in whatever order while a turn was running, all at once.
       const s = sessions.get(id);
       send({ type: "interrupted", id });
-      startClaude({ id, cwd: s && s.cwd, model: s && s.model, effort: s && s.effort, permissionMode: msg.permissionMode, resume: s && s.sessionId });
-      break;
-    }
-    case "setModel": {
-      const s = sessions.get(id);
-      send({ type: "interrupted", id });
-      startClaude({ id, cwd: s && s.cwd, model: msg.model, effort: s && s.effort, permissionMode: s && s.mode, resume: s && s.sessionId });
-      break;
-    }
-    case "setEffort": {
-      const s = sessions.get(id);
-      send({ type: "interrupted", id });
-      startClaude({ id, cwd: s && s.cwd, model: s && s.model, effort: msg.effort, permissionMode: s && s.mode, resume: s && s.sessionId });
+      startClaude({ id, cwd: s && s.cwd, model: msg.model, effort: msg.effort, permissionMode: msg.permissionMode, resume: s && s.sessionId });
       break;
     }
     case "loadTranscript":
