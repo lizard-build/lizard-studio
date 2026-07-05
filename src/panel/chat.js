@@ -948,9 +948,23 @@
     const row = el("div", "msg msg-assistant");
     const body = el("div", "assistant-body");
     row.appendChild(body);
-    append(chat, row);
+    // NOT attached to chat.messagesEl yet — see attachAssistantRow. A brand
+    // new assistant turn often starts with nothing visible (still "thinking",
+    // or waiting on a tool call's arguments to finish streaming); .chat-messages
+    // is a flex column with its own gap, so an empty row would already open
+    // one purely by existing, same as the inner stream-block issue this
+    // mirrors. row.parentNode stays null until real content actually lands.
     chat.currentAssistantBody = body;
     return body;
+  }
+
+  // Attaches the assistant row to the transcript — called the first time
+  // real (visible) content lands in its body: a tool card, non-empty text, or
+  // a streamed block whose buffer just stopped being empty/whitespace-only.
+  // A no-op once already attached.
+  function attachAssistantRow(chat, body) {
+    const row = body.parentElement;
+    if (row && !row.parentNode) append(chat, row);
   }
 
   // ---- /usage card ------------------------------------------------------
@@ -1001,6 +1015,7 @@
   }
 
   function addText(chat, body, text) {
+    attachAssistantRow(chat, body);
     closeToolGroup(chat);
     if (chat.pendingUsageCard) {
       chat.pendingUsageCard = false;
@@ -1122,6 +1137,7 @@
       if (!blk.buf.trim()) return;
       if (!blk.appended) {
         blk.appended = true;
+        attachAssistantRow(chat, blk.body); // same lazy-attach, one level up
         blk.body.appendChild(blk.el);
       }
       if (!blk.md) {
@@ -1232,7 +1248,10 @@
         if (!blk) break;
         if (blk.raf) { cancelAnimationFrame(blk.raf); blk.raf = 0; }
         if (blk.type === "text" && blk.buf.trim()) {
-          if (!blk.appended) blk.body.appendChild(blk.el);
+          if (!blk.appended) {
+            attachAssistantRow(chat, blk.body);
+            blk.body.appendChild(blk.el);
+          }
           blk.el.replaceChildren(R.markdown(blk.buf));
           blk.el.classList.remove("streaming");
         }
@@ -1258,6 +1277,7 @@
   }
 
   function toolCard(chat, body, block) {
+    attachAssistantRow(chat, body);
     // Known tools get a dedicated icon; MCP tool calls (mcp__server__tool) get the
     // server mark; anything else falls back to the generic code mark — never the
     // meaningless dots-vertical.
