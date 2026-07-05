@@ -705,6 +705,15 @@ body {
 .msg-user {
   justify-content: flex-start;
 }
+/* Wraps the bubble + its copy/rewind/time footer in a column so the footer
+   lands below the bubble instead of beside it (.msg-user itself is a flex
+   row, shared with the queued-tag layout further down). */
+.user-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
 .msg-user .bubble {
   width: 100%;
   min-width: 0;
@@ -772,6 +781,16 @@ body {
   transition: opacity 0.12s;
 }
 .msg-assistant:hover .msg-footer {
+  opacity: 1;
+  pointer-events: auto;
+}
+/* User message variant — same footer, right-aligned under the bubble, and
+   shown on hover of the whole row (not just the footer itself). */
+.msg-footer-user {
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+.msg-user:hover .msg-footer {
   opacity: 1;
   pointer-events: auto;
 }

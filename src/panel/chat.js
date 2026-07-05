@@ -321,6 +321,12 @@
       // "/extra-usage") command; consumed by the next assistant text block to
       // render a progress-bar card instead of the raw CLI text.
       pendingUsageCard: false,
+      // Counts real human turns rendered so far (live sends + replayed
+      // history), 1-based. Stamped onto each rewindable user row so its
+      // rewind button can tell the host which turn to truncate back to —
+      // this has to match the host's own count of "real" user lines in the
+      // on-disk transcript (see rewindSession in claude-host.mjs).
+      turnIndexCounter: 0,
     };
   }
 
@@ -619,10 +625,101 @@
     return bubble;
   }
 
-  function userBubble(chat, text, attachments) {
+  // opts.real: this bubble stands for an actual human turn sent to (or replayed
+  // from) the claude session — gets a numbered, rewindable footer. Local-only
+  // bubbles (e.g. the synthetic "/login" one) pass no opts and stay plain.
+  function userBubble(chat, text, attachments, opts) {
     const row = el("div", "msg msg-user");
-    row.appendChild(buildBubble(text, attachments));
+    const wrap = el("div", "user-body");
+    wrap.appendChild(buildBubble(text, attachments));
+    row.appendChild(wrap);
+    if (opts && opts.real) {
+      const turnIndex = ++chat.turnIndexCounter;
+      row.dataset.turnIndex = String(turnIndex);
+      const footer = userMessageFooter(chat, turnIndex, text, attachments, opts.ts || Date.now());
+      wrap.appendChild(footer);
+      const timeNode = footer.querySelector(".msg-time");
+      row.addEventListener("mouseenter", () => {
+        const t = Number(timeNode.dataset.ts);
+        if (t) timeNode.textContent = relTime(t);
+      });
+    }
     append(chat, row);
+    return row;
+  }
+
+  // Copy + rewind + relative time footer for a sent user message. Mirrors
+  // messageFooter's assistant version but right-aligned, and adds a rewind
+  // button (Claude Code desktop-style): truncates the visible conversation
+  // back to just before this message, refills the composer with it for
+  // editing, and tells the host to cut the on-disk transcript at the same
+  // point and resume the session — so the model actually forgets what got
+  // rewound, not just the UI.
+  function userMessageFooter(chat, turnIndex, text, attachments, ts) {
+    const footer = el("div", "msg-footer msg-footer-user");
+    const copyBtn = el("button", "msg-action");
+    copyBtn.type = "button";
+    copyBtn.title = "Copy";
+    copyBtn.setAttribute("aria-label", "Copy message");
+    copyBtn.innerHTML = ICON("copy", 13);
+    wireCopyButton(copyBtn, () => text, 13);
+    const rewindBtn = el("button", "msg-action");
+    rewindBtn.type = "button";
+    rewindBtn.title = "Rewind to here";
+    rewindBtn.setAttribute("aria-label", "Rewind conversation to this message");
+    rewindBtn.innerHTML = ICON("history", 13);
+    rewindBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      rewindTo(chat, turnIndex, text, attachments);
+    });
+    const time = el("span", "msg-time");
+    time.dataset.ts = String(ts);
+    time.textContent = relTime(ts);
+    footer.appendChild(copyBtn);
+    footer.appendChild(rewindBtn);
+    footer.appendChild(time);
+    return footer;
+  }
+
+  // Truncates the rendered transcript back to (and including) the given
+  // human turn, puts its text/attachments back in the composer, and asks the
+  // host to cut the real session transcript at the same point. Only ever
+  // called from a row in the currently active chat (the button lives in its
+  // DOM), so no tab-switch handling is needed.
+  function rewindTo(chat, turnIndex, text, attachments) {
+    const rows = Array.from(chat.messagesEl.children);
+    const startIdx = rows.findIndex((r) => r.dataset && r.dataset.turnIndex === String(turnIndex));
+    if (startIdx === -1) return;
+    for (let i = rows.length - 1; i >= startIdx; i--) rows[i].remove();
+    chat.turnIndexCounter = turnIndex - 1;
+    chat.currentAssistantId = null;
+    chat.currentAssistantBody = null;
+    chat.streamBlocks.clear();
+    chat.streamedMsgIds.clear();
+    chat.streamMsgId = null;
+    chat.toolGroup = null;
+    chat.turnRunning = false;
+    chat.turnStatusText = "";
+    chat.statusEl = null; // went with the removed rows (or is about to be stale)
+    clearPermCards(chat);
+    // Tool cards that lived in the truncated region are dead weight — anything
+    // still tracked whose node just got removed from the DOM.
+    for (const [toolUseId, entry] of chat.toolCards) {
+      if (!entry.card || !entry.card.isConnected) {
+        chat.toolCards.delete(toolUseId);
+        chat.emittedToolIds.delete(toolUseId);
+      }
+    }
+    if (chat.id === activeId) {
+      setRunningUI(false);
+      renderTurnStatus(chat);
+      els.input.value = text;
+      chat.attachments = Array.isArray(attachments) ? attachments.slice() : [];
+      renderAttachmentThumbs();
+      autosize();
+      els.input.focus();
+    }
+    post({ type: "rewind", id: chat.id, turnIndex });
   }
 
   // ---- page-element context (from the Selector tool) ------------------------
@@ -2399,9 +2496,10 @@
       if (!ev || !ev.message) continue;
       if (ev.type === "user") {
         const content = ev.message.content;
+        const ts = ev.timestamp ? Date.parse(ev.timestamp) || Date.now() : Date.now();
         if (typeof content === "string") {
           const stripped = content.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
-          if (stripped) userBubble(chat, stripped, null);
+          if (stripped) userBubble(chat, stripped, null, { real: true, ts });
         } else if (Array.isArray(content)) {
           const texts = [];
           for (const b of content) {
@@ -2410,7 +2508,7 @@
             else if (b.type === "text" && b.text) texts.push(b.text);
           }
           const stripped = texts.join("\n\n").replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
-          if (stripped) userBubble(chat, stripped, null);
+          if (stripped) userBubble(chat, stripped, null, { real: true, ts });
         }
       } else if (ev.type === "assistant") {
         const body = ensureAssistantBody(chat, ev.message.id);
@@ -2627,7 +2725,7 @@
       systemNote(chat, "Host disconnected — message queued until it reconnects.", "warn");
       return;
     }
-    userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments);
+    userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments, { real: true });
     chat.contexts = [];
     chat.attachments = [];
     if (chat.id === activeId) {

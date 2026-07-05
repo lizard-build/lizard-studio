@@ -27,6 +27,9 @@
 //                                                                 in-flight turn finishes, so it never
 //                                                                 hard-kills a reply that's still streaming)
 //   { type:"loadTranscript", id, sessionId, cwd }                  replay a past session's messages
+//   { type:"rewind", id, turnIndex }                                truncate the transcript back to
+//                                                                 just before the turnIndex-th human
+//                                                                 turn, then kill + resume the session
 //   { type:"pickFolder", id }                                      native folder chooser
 //   { type:"gitBranches", id, cwd }                                list local branches + current
 //   { type:"checkoutBranch", id, cwd, branch }                     git checkout <branch>
@@ -1075,6 +1078,52 @@ function loadTranscript(id, sessionId, cwd) {
   });
 }
 
+// ---- rewind ------------------------------------------------------------------
+// The panel's rewind button on a past user message truncates that message
+// (and everything after it) both visually and in the actual session: we cut
+// the on-disk JSONL transcript back to just before the target human turn,
+// then kill and resume the claude process against the trimmed file, so the
+// next prompt truly doesn't remember what got rewound — not just hidden in
+// the UI. Counts turns the same way loadTranscript filters them for replay
+// (real user text, not sidechains/meta/tool-result-only turns), so turnIndex
+// lines up with the panel's own count of rendered user bubbles.
+function rewindSession(id, turnIndex) {
+  const s = sessions.get(id);
+  if (!s || !s.sessionId) return;
+  const file = findTranscript(s.sessionId, s.cwd);
+  if (file) {
+    try {
+      const lines = readFileSync(file, "utf8").split("\n");
+      let count = 0;
+      let cut = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (!lines[i].trim()) continue;
+        let o;
+        try {
+          o = JSON.parse(lines[i]);
+        } catch {
+          continue;
+        }
+        if (o.isSidechain || o.isMeta || o.type !== "user" || !o.message) continue;
+        const content = o.message.content;
+        const hasText =
+          typeof content === "string" ? content.trim().length > 0 : Array.isArray(content) && content.some((b) => b && b.type === "text" && b.text);
+        if (!hasText) continue;
+        count++;
+        if (count === turnIndex) {
+          cut = i;
+          break;
+        }
+      }
+      if (cut !== -1) writeFileSync(file, lines.slice(0, cut).join("\n") + (cut > 0 ? "\n" : ""));
+    } catch (err) {
+      log("rewind transcript truncate failed", err.message);
+    }
+  }
+  send({ type: "interrupted", id });
+  startClaude({ id, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.mode, resume: s.sessionId });
+}
+
 // ---- message dispatch -------------------------------------------------------
 function handle(msg) {
   if (!msg) return;
@@ -1104,6 +1153,9 @@ function handle(msg) {
     }
     case "loadTranscript":
       loadTranscript(id, msg.sessionId, msg.cwd);
+      break;
+    case "rewind":
+      rewindSession(id, msg.turnIndex);
       break;
     case "pickFolder":
       pickFolder(id);
