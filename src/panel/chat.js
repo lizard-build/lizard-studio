@@ -694,6 +694,11 @@
     chat.turnIndexCounter = turnIndex - 1;
     chat.currentAssistantId = null;
     chat.currentAssistantBody = null;
+    // Kill any typewriter loops first — a live one would re-append the row
+    // this rewind just removed (attachAssistantRow resurrects orphaned rows).
+    for (const blk of chat.streamBlocks.values()) {
+      if (blk.raf) { cancelAnimationFrame(blk.raf); blk.raf = 0; }
+    }
     chat.streamBlocks.clear();
     chat.streamedMsgIds.clear();
     chat.streamMsgId = null;
@@ -1215,45 +1220,87 @@
   // finalizeAssistant) — no global timer scanning every transcript needed.
 
   // ---- live streaming (--include-partial-messages) --------------------------
-  // Coalesce markdown re-renders to one per animation frame, and re-parse only
-  // the *unfinished tail* of the buffer: completed top-level blocks are parsed
-  // once and frozen into the DOM. Re-rendering the whole buffer every frame
-  // made a long streamed reply cost O(length²) overall and visibly janked
-  // near the end of big messages.
-  function flushStreamBlock(chat, blk) {
+  // Deltas arrive as bursty multi-word chunks; dumping each chunk into the DOM
+  // at once makes the text visibly jump. Instead the buffer is revealed a few
+  // characters per frame — a typewriter whose speed grows with the backlog, so
+  // it never crawls behind the wire but never leaps either. This is the same
+  // "smooth streaming" trick ChatGPT and Claude.ai use.
+  //
+  // Rendering per frame stays cheap the same way it did before: markdown is
+  // re-parsed only for the *unfinished tail* of the revealed text — completed
+  // top-level blocks are parsed once and frozen into the DOM (re-rendering the
+  // whole buffer every frame made a long reply cost O(length²) overall).
+  function paceStreamBlock(chat, blk) {
     if (blk.raf) return;
-    blk.raf = requestAnimationFrame(() => {
+    blk.lastT = 0;
+    const step = (now) => {
       blk.raf = 0;
-      // A text content block can open (content_block_start) well before it
-      // has any real characters — some turns emit a block that stays
-      // whitespace-only for a while, or turns out empty altogether. body is a
-      // flex column with a `gap`, so merely being IN the DOM opens an empty
-      // gap before any visible text exists. Stay out of the DOM until there's
-      // something to show; once real content lands it never goes away again
-      // (buf only grows), so this is a one-way, one-time transition.
-      if (!blk.buf.trim()) return;
+      const backlog = blk.buf.length - blk.shown;
+      if (backlog > 0) {
+        const dt = Math.min(64, now - (blk.lastT || now));
+        blk.lastT = now;
+        // Base speed plus a catch-up term: equilibrium lag is a fraction of a
+        // second regardless of how fast the model streams.
+        const rate = 90 + backlog * 3; // chars per second
+        blk.shown = Math.min(blk.buf.length, blk.shown + Math.max(1, Math.round((rate * dt) / 1000)));
+        renderStreamSlice(chat, blk);
+      }
+      if (blk.shown < blk.buf.length) blk.raf = requestAnimationFrame(step);
+      else if (blk.done) finalizeStreamBlock(chat, blk);
+    };
+    blk.raf = requestAnimationFrame(step);
+  }
+
+  function renderStreamSlice(chat, blk) {
+    // A text content block can open (content_block_start) well before it
+    // has any real characters — some turns emit a block that stays
+    // whitespace-only for a while, or turns out empty altogether. body is a
+    // flex column with a `gap`, so merely being IN the DOM opens an empty
+    // gap before any visible text exists. Stay out of the DOM until there's
+    // something to show; once real content lands it never goes away again
+    // (the revealed prefix only grows), so this is a one-way transition.
+    if (!blk.buf.slice(0, blk.shown).trim()) return;
+    if (!blk.appended) {
+      blk.appended = true;
+      attachAssistantRow(chat, blk.body); // same lazy-attach, one level up
+      blk.body.appendChild(blk.el);
+    }
+    if (!blk.md) {
+      // One shared .md container so CSS (first/last-child margins, the
+      // streaming caret) sees the same shape a one-shot render produces.
+      blk.md = el("div", "md");
+      blk.live = el("div"); // classless wrapper holding the re-rendered tail
+      blk.md.appendChild(blk.live);
+      blk.el.replaceChildren(blk.md);
+    }
+    advanceStreamScan(blk, blk.shown);
+    if (blk.safe > blk.stable) {
+      const done = R.markdown(blk.buf.slice(blk.stable, blk.safe));
+      while (done.firstChild) blk.md.insertBefore(done.firstChild, blk.live);
+      blk.stable = blk.safe;
+    }
+    blk.live.replaceChildren(...R.markdown(blk.buf.slice(blk.stable, blk.shown)).childNodes);
+    if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+  }
+
+  // The block's wire buffer is complete — swap in the canonical one-shot
+  // markdown render (drops the caret, fixes any tail-parse artifacts).
+  function finalizeStreamBlock(chat, blk) {
+    if (blk.raf) {
+      cancelAnimationFrame(blk.raf);
+      blk.raf = 0;
+    }
+    if (blk.buf.trim()) {
       if (!blk.appended) {
         blk.appended = true;
-        attachAssistantRow(chat, blk.body); // same lazy-attach, one level up
+        attachAssistantRow(chat, blk.body);
         blk.body.appendChild(blk.el);
       }
-      if (!blk.md) {
-        // One shared .md container so CSS (first/last-child margins, the
-        // streaming caret) sees the same shape a one-shot render produces.
-        blk.md = el("div", "md");
-        blk.live = el("div"); // classless wrapper holding the re-rendered tail
-        blk.md.appendChild(blk.live);
-        blk.el.replaceChildren(blk.md);
-      }
-      advanceStreamScan(blk);
-      if (blk.safe > blk.stable) {
-        const done = R.markdown(blk.buf.slice(blk.stable, blk.safe));
-        while (done.firstChild) blk.md.insertBefore(done.firstChild, blk.live);
-        blk.stable = blk.safe;
-      }
-      blk.live.replaceChildren(...R.markdown(blk.buf.slice(blk.stable)).childNodes);
-      if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
-    });
+      blk.el.replaceChildren(R.markdown(blk.buf));
+      blk.el.classList.remove("streaming");
+    }
+    // else: ended up empty/whitespace-only — it was never put in the DOM,
+    // so there's nothing to remove or finalize.
   }
 
   // Incremental scan for the last "safe" freeze offset in a stream block's
@@ -1263,12 +1310,14 @@
   // only once the first complete line after the blank run is known. Every line
   // is scanned once per stream, so scanning is O(length) total.
   const STREAM_LIST_RE = /^(\s*)([-*]|\d+\.)\s+/;
-  function advanceStreamScan(blk) {
+  // `limit` caps the scan at the typewriter's revealed prefix — only fully
+  // revealed lines may be frozen, and the rest is rescanned as it appears.
+  function advanceStreamScan(blk, limit) {
     const buf = blk.buf;
     let i = blk.scan;
     for (;;) {
       const nl = buf.indexOf("\n", i);
-      if (nl === -1) break;
+      if (nl === -1 || nl >= limit) break;
       const line = buf.slice(i, nl);
       const t = line.trim();
       if (blk.fenceOpen) {
@@ -1313,13 +1362,15 @@
         const cb = ev.content_block || {};
         if (cb.type === "text") {
           closeToolGroup(chat);
-          // Not appended to `body` yet — flushStreamBlock does that lazily on
+          // Not appended to `body` yet — renderStreamSlice does that lazily on
           // the first non-whitespace content, so an empty/whitespace-only
           // block never opens a flex-gap gap for content nobody can see.
           const node = el("div", "assistant-stream streaming");
           chat.streamBlocks.set(ev.index, {
             type: "text", el: node, body, buf: "", raf: 0, appended: false,
-            // incremental-render state (see flushStreamBlock/advanceStreamScan)
+            // typewriter state (see paceStreamBlock)
+            shown: 0, done: false, lastT: 0,
+            // incremental-render state (see renderStreamSlice/advanceStreamScan)
             md: null, live: null, stable: 0, scan: 0, safe: 0, cand: -1, fenceOpen: false, prevList: false,
           });
         } else if (cb.type === "thinking") {
@@ -1337,23 +1388,25 @@
         const delta = ev.delta || {};
         if (delta.type === "text_delta" && blk.type === "text") blk.buf += delta.text || "";
         else break;
-        flushStreamBlock(chat, blk);
+        paceStreamBlock(chat, blk);
         break;
       }
       case "content_block_stop": {
         const blk = chat.streamBlocks.get(ev.index);
         if (!blk) break;
-        if (blk.raf) { cancelAnimationFrame(blk.raf); blk.raf = 0; }
-        if (blk.type === "text" && blk.buf.trim()) {
-          if (!blk.appended) {
-            attachAssistantRow(chat, blk.body);
-            blk.body.appendChild(blk.el);
-          }
-          blk.el.replaceChildren(R.markdown(blk.buf));
-          blk.el.classList.remove("streaming");
+        if (blk.type === "text" && blk.shown < blk.buf.length && !document.hidden && blk.buf.length - blk.shown <= 600) {
+          // Let the typewriter run out the short remaining tail (its catch-up
+          // term makes that take well under half a second), then finalize.
+          blk.done = true;
+          paceStreamBlock(chat, blk);
+        } else if (blk.type === "text") {
+          // Huge backlog or a hidden tab (rAF is throttled there) — cut
+          // straight to the final render rather than type for seconds.
+          finalizeStreamBlock(chat, blk);
+        } else if (blk.raf) {
+          cancelAnimationFrame(blk.raf);
+          blk.raf = 0;
         }
-        // else: ended up empty/whitespace-only — it was never put in the DOM
-        // (or was, pre-fix; either way there's nothing to remove/finalize).
         chat.streamBlocks.delete(ev.index);
         break;
       }
@@ -2138,10 +2191,11 @@
     finalizeAssistant(chat, chat.currentAssistantBody, Date.now());
     chat.currentAssistantId = null;
     chat.currentAssistantBody = null;
-    // Finalize any dangling live blocks (e.g. an interrupted turn).
+    // Finalize any dangling live blocks (e.g. an interrupted turn) — renders
+    // whatever the typewriter hadn't revealed yet, then drops the caret.
     for (const blk of chat.streamBlocks.values()) {
-      if (blk.raf) { cancelAnimationFrame(blk.raf); blk.raf = 0; }
-      if (blk.el) blk.el.classList && blk.el.classList.remove("streaming");
+      if (blk.type === "text") finalizeStreamBlock(chat, blk);
+      else if (blk.raf) { cancelAnimationFrame(blk.raf); blk.raf = 0; }
     }
     chat.streamBlocks.clear();
     chat.streamMsgId = null;
