@@ -1715,6 +1715,7 @@
     chat.permCards.set(requestId, entry);
     paintPerm(entry);
     append(chat, card);
+    renderTurnStatus(chat);
     if (chat.id === activeId) {
       scrollToBottom(chat);
       // Take focus like Claude Code's prompt does — but never steal a draft.
@@ -1727,6 +1728,7 @@
     if (!entry) return;
     chat.permCards.delete(requestId);
     entry.card.remove();
+    renderTurnStatus(chat);
     const out = { type: "permissionResult", id: chat.id, requestId, behavior: opt.allow ? "allow" : "deny" };
     if (opt.allow && opt.updatedPermissions) out.updatedPermissions = opt.updatedPermissions;
     if (!opt.allow) {
@@ -1774,6 +1776,7 @@
     function finish(out) {
       chat.permCards.delete(requestId);
       card.remove();
+      renderTurnStatus(chat);
       post(out);
       const next = chat.permCards.values().next().value;
       if (next && chat.id === activeId) next.card.focus();
@@ -1938,6 +1941,7 @@
     chat.permCards.set(requestId, entry);
     renderQuestion();
     append(chat, card);
+    renderTurnStatus(chat);
     if (chat.id === activeId) {
       scrollToBottom(chat);
       if (!els.input || !els.input.value.trim()) card.focus();
@@ -1949,6 +1953,7 @@
     if (!entry) return;
     chat.permCards.delete(requestId);
     entry.card.remove();
+    renderTurnStatus(chat);
   }
 
   // Drop every pending ask (turn ended, session restarted, or process exited —
@@ -2089,7 +2094,9 @@
     if (!chat) return;
     const summary = chat.turnStatusText || "";
     // Nothing to show — drop the node so it leaves no empty gap in the stream.
-    if (!chat.turnRunning && !summary) {
+    // Same while a permission/question dialog is pending: the dialog is the
+    // live UI, and a ticking timer under it reads as noise.
+    if ((!chat.turnRunning && !summary) || chat.permCards.size > 0) {
       if (chat.statusEl && chat.statusEl.parentNode) chat.statusEl.remove();
       return;
     }
