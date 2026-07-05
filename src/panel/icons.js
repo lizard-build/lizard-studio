@@ -59,10 +59,6 @@
     // tool we don't have a dedicated icon for (replaces the old dots-vertical).
     code:
       '<polyline points="92,80 52,128 92,176" fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/><polyline points="164,80 204,128 164,176" fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>',
-    // "Undo/rewind" hook arrow — a rounded corner dropping down from the top
-    // right into a left-pointing chevron, used for the rewind-to-here button.
-    rewind:
-      '<path d="M104,88 64,128 104,168 M64,128 H152 A32,32 0 0 0 184,96 V56" fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>',
   };
 
   function iconHTML(name, size) {

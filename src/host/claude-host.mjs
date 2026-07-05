@@ -1079,49 +1079,75 @@ function loadTranscript(id, sessionId, cwd) {
 }
 
 // ---- rewind ------------------------------------------------------------------
-// The panel's rewind button on a past user message truncates that message
-// (and everything after it) both visually and in the actual session: we cut
-// the on-disk JSONL transcript back to just before the target human turn,
-// then kill and resume the claude process against the trimmed file, so the
-// next prompt truly doesn't remember what got rewound — not just hidden in
-// the UI. Counts turns the same way loadTranscript filters them for replay
-// (real user text, not sidechains/meta/tool-result-only turns), so turnIndex
-// lines up with the panel's own count of rendered user bubbles.
-function rewindSession(id, turnIndex) {
+// The panel lets you edit a past message; pressing Enter on the edit both
+// truncates that message (and everything after it) in the UI and asks us to
+// cut the on-disk JSONL transcript back to just before it — then resend the
+// edited text as the new next turn — so the model actually forgets what got
+// rewound, not just hidden client-side. Counts turns the same way
+// loadTranscript filters them for replay (real user text, not
+// sidechains/meta/tool-result-only turns), so turnIndex lines up with the
+// panel's own count of rendered user bubbles.
+//
+// The live claude process for this session may still be mid-turn — actively
+// writing later lines to that same transcript file — when the rewind lands.
+// Truncate first and it could win the race and re-append past our cut, so we
+// kill it and wait for the actual `exit` event (not just send the signal)
+// before touching the file, then spawn the resumed process on the now-frozen
+// file. The resend (`text`/`images`) rides along in this same call rather
+// than arriving as a separate `prompt` message: the old session is gone the
+// instant this lands, and the new one isn't ready until the respawn above
+// finishes, so a second message sent by the panel right after would race
+// that gap. Writing the prompt ourselves, right after startClaude returns,
+// closes it.
+function rewindSession(id, turnIndex, text, images) {
   const s = sessions.get(id);
   if (!s || !s.sessionId) return;
-  const file = findTranscript(s.sessionId, s.cwd);
-  if (file) {
-    try {
-      const lines = readFileSync(file, "utf8").split("\n");
-      let count = 0;
-      let cut = -1;
-      for (let i = 0; i < lines.length; i++) {
-        if (!lines[i].trim()) continue;
-        let o;
-        try {
-          o = JSON.parse(lines[i]);
-        } catch {
-          continue;
+  const { cwd, model, effort, mode, sessionId } = s;
+  const child = s.child;
+
+  const truncateAndResume = () => {
+    const file = findTranscript(sessionId, cwd);
+    if (file) {
+      try {
+        const lines = readFileSync(file, "utf8").split("\n");
+        let count = 0;
+        let cut = -1;
+        for (let i = 0; i < lines.length; i++) {
+          if (!lines[i].trim()) continue;
+          let o;
+          try {
+            o = JSON.parse(lines[i]);
+          } catch {
+            continue;
+          }
+          if (o.isSidechain || o.isMeta || o.type !== "user" || !o.message) continue;
+          const content = o.message.content;
+          const hasText =
+            typeof content === "string" ? content.trim().length > 0 : Array.isArray(content) && content.some((b) => b && b.type === "text" && b.text);
+          if (!hasText) continue;
+          count++;
+          if (count === turnIndex) {
+            cut = i;
+            break;
+          }
         }
-        if (o.isSidechain || o.isMeta || o.type !== "user" || !o.message) continue;
-        const content = o.message.content;
-        const hasText =
-          typeof content === "string" ? content.trim().length > 0 : Array.isArray(content) && content.some((b) => b && b.type === "text" && b.text);
-        if (!hasText) continue;
-        count++;
-        if (count === turnIndex) {
-          cut = i;
-          break;
-        }
+        if (cut !== -1) writeFileSync(file, lines.slice(0, cut).join("\n") + (cut > 0 ? "\n" : ""));
+      } catch (err) {
+        log("rewind transcript truncate failed", err.message);
       }
-      if (cut !== -1) writeFileSync(file, lines.slice(0, cut).join("\n") + (cut > 0 ? "\n" : ""));
-    } catch (err) {
-      log("rewind transcript truncate failed", err.message);
     }
+    send({ type: "interrupted", id });
+    startClaude({ id, cwd, model, effort, permissionMode: mode, resume: sessionId });
+    sendPrompt(id, text, images);
+  };
+
+  if (child && child.exitCode == null && child.signalCode == null) {
+    child.once("exit", truncateAndResume);
+    killSession(id);
+  } else {
+    killSession(id);
+    truncateAndResume();
   }
-  send({ type: "interrupted", id });
-  startClaude({ id, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.mode, resume: s.sessionId });
 }
 
 // ---- message dispatch -------------------------------------------------------
@@ -1155,7 +1181,7 @@ function handle(msg) {
       loadTranscript(id, msg.sessionId, msg.cwd);
       break;
     case "rewind":
-      rewindSession(id, msg.turnIndex);
+      rewindSession(id, msg.turnIndex, msg.text, msg.images);
       break;
     case "pickFolder":
       pickFolder(id);

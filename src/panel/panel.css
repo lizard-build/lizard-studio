@@ -705,15 +705,6 @@ body {
 .msg-user {
   justify-content: flex-start;
 }
-/* Wraps the bubble + its copy/rewind/time footer in a column so the footer
-   lands below the bubble instead of beside it (.msg-user itself is a flex
-   row, shared with the queued-tag layout further down). */
-.user-body {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
 .msg-user .bubble {
   width: 100%;
   min-width: 0;
@@ -722,6 +713,34 @@ body {
   border-radius: 10px;
   padding: 8px 12px;
   color: var(--text-primary);
+}
+/* Click-to-edit affordance on a sent message — a rewindable bubble hints at
+   it with a pointer cursor and a faint highlight on hover, then swaps its
+   markdown for a matching textarea while being edited (see beginEdit in
+   chat.js). Enter commits (rewinds + resends), Escape/blur reverts. */
+.bubble.editable {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.bubble.editable:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.bubble.editing {
+  cursor: default;
+}
+.msg-edit {
+  display: block;
+  width: 100%;
+  resize: none;
+  overflow: hidden;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  line-height: inherit;
+  padding: 0;
+  margin: 0;
 }
 /* Prompt submitted while a turn is still streaming — shown dimmed until it's
    actually dispatched (see dispatchNextQueued in chat.js). */
@@ -781,16 +800,6 @@ body {
   transition: opacity 0.12s;
 }
 .msg-assistant:hover .msg-footer {
-  opacity: 1;
-  pointer-events: auto;
-}
-/* User message variant — same footer, right-aligned under the bubble, and
-   shown on hover of the whole row (not just the footer itself). */
-.msg-footer-user {
-  justify-content: flex-end;
-  margin-top: 4px;
-}
-.msg-user:hover .msg-footer {
   opacity: 1;
   pointer-events: auto;
 }

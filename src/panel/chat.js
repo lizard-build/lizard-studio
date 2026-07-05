@@ -626,70 +626,98 @@
   }
 
   // opts.real: this bubble stands for an actual human turn sent to (or replayed
-  // from) the claude session — gets a numbered, rewindable footer. Local-only
-  // bubbles (e.g. the synthetic "/login" one) pass no opts and stay plain.
+  // from) the claude session — its text becomes click-to-edit, and committing
+  // an edit rewinds the conversation to it. Local-only bubbles (e.g. the
+  // synthetic "/login" one) pass no opts and stay plain.
   function userBubble(chat, text, attachments, opts) {
     const row = el("div", "msg msg-user");
-    const wrap = el("div", "user-body");
-    wrap.appendChild(buildBubble(text, attachments));
-    row.appendChild(wrap);
+    const bubble = buildBubble(text, attachments);
+    row.appendChild(bubble);
     if (opts && opts.real) {
       const turnIndex = ++chat.turnIndexCounter;
       row.dataset.turnIndex = String(turnIndex);
-      const footer = userMessageFooter(chat, turnIndex, text, attachments, opts.ts || Date.now());
-      wrap.appendChild(footer);
-      const timeNode = footer.querySelector(".msg-time");
-      row.addEventListener("mouseenter", () => {
-        const t = Number(timeNode.dataset.ts);
-        if (t) timeNode.textContent = relTime(t);
-      });
+      wireEditableBubble(chat, bubble, turnIndex, text, attachments);
     }
     append(chat, row);
     return row;
   }
 
-  // Copy + rewind + relative time footer for a sent user message. Mirrors
-  // messageFooter's assistant version but right-aligned, and adds a rewind
-  // button (Claude Code desktop-style): truncates the visible conversation
-  // back to just before this message, refills the composer with it for
-  // editing, and tells the host to cut the on-disk transcript at the same
-  // point and resume the session — so the model actually forgets what got
-  // rewound, not just the UI.
-  function userMessageFooter(chat, turnIndex, text, attachments, ts) {
-    const footer = el("div", "msg-footer msg-footer-user");
-    const copyBtn = el("button", "msg-action");
-    copyBtn.type = "button";
-    copyBtn.title = "Copy";
-    copyBtn.setAttribute("aria-label", "Copy message");
-    copyBtn.innerHTML = ICON("copy", 13);
-    wireCopyButton(copyBtn, () => text, 13);
-    const rewindBtn = el("button", "msg-action");
-    rewindBtn.type = "button";
-    rewindBtn.title = "Rewind to here";
-    rewindBtn.setAttribute("aria-label", "Rewind conversation to this message");
-    rewindBtn.innerHTML = ICON("rewind", 13);
-    rewindBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      rewindTo(chat, turnIndex, text, attachments);
+  // Click the message text to edit it in place. Committing (Enter) rewinds
+  // the conversation back to just before this message — both the rendered
+  // transcript and the real session — and resends the edited text as the
+  // next turn. Escape/blur reverts without sending anything.
+  function wireEditableBubble(chat, bubble, turnIndex, text, attachments) {
+    bubble.classList.add("editable");
+    bubble.addEventListener("click", (e) => {
+      if (bubble.classList.contains("editing")) return;
+      if (e.target.closest("a")) return; // don't hijack link clicks
+      const sel = window.getSelection();
+      if (sel && String(sel).length) return; // don't hijack a text selection
+      beginEdit(chat, bubble, turnIndex, text, attachments);
     });
-    const time = el("span", "msg-time");
-    time.dataset.ts = String(ts);
-    time.textContent = relTime(ts);
-    footer.appendChild(copyBtn);
-    footer.appendChild(rewindBtn);
-    footer.appendChild(time);
-    return footer;
   }
 
-  // Truncates the rendered transcript back to (and including) the given
-  // human turn, puts its text/attachments back in the composer, and asks the
-  // host to cut the real session transcript at the same point. Only ever
-  // called from a row in the currently active chat (the button lives in its
-  // DOM), so no tab-switch handling is needed.
-  function rewindTo(chat, turnIndex, text, attachments) {
+  function beginEdit(chat, bubble, turnIndex, text, attachments) {
+    const mdNode = bubble.querySelector(".md");
+    bubble.classList.add("editing");
+    const ta = el("textarea", "msg-edit");
+    ta.value = text;
+    if (mdNode) mdNode.replaceWith(ta);
+    else bubble.appendChild(ta);
+    const resize = () => {
+      ta.style.height = "auto";
+      ta.style.height = ta.scrollHeight + "px";
+    };
+    resize();
+    ta.addEventListener("input", resize);
+    let committed = false;
+    const revert = () => {
+      bubble.classList.remove("editing");
+      ta.replaceWith(R.markdown(text));
+    };
+    ta.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        const newText = ta.value;
+        if (!newText.trim() && !(attachments && attachments.length)) return revert();
+        committed = true;
+        bubble.classList.remove("editing");
+        resendEdited(chat, turnIndex, newText, attachments);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        revert();
+      }
+    });
+    ta.addEventListener("blur", () => {
+      if (!committed && bubble.classList.contains("editing")) revert();
+    });
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
+
+  // Truncates the rendered transcript (and all local per-turn state) back to
+  // just before the given human turn, then resends the edited text as a
+  // fresh turn — so the model genuinely doesn't remember what got rewound,
+  // not just the UI. Only ever called from a row in the currently active
+  // chat (the edit lives in its DOM), so no tab-switch handling is needed.
+  //
+  // Rewind + resend travel in one host message (not a "rewind" followed by a
+  // separate "prompt"): the host has to kill the live process, wait for it to
+  // actually exit, truncate the on-disk transcript, and only then spawn the
+  // resumed one — the old session is gone the instant the rewind lands, but
+  // the new one isn't ready until that respawn finishes. A second message
+  // sent right after would race that gap. So the host does the whole thing —
+  // truncate, resume, write the edited prompt to the new process — as one
+  // atomic step (see rewindSession in claude-host.mjs).
+  function resendEdited(chat, turnIndex, newText, attachments) {
     const rows = Array.from(chat.messagesEl.children);
     const startIdx = rows.findIndex((r) => r.dataset && r.dataset.turnIndex === String(turnIndex));
     if (startIdx === -1) return;
+    const images = (attachments || []).map((a) => ({ mediaType: a.mediaType, data: (a.dataUrl.split(",")[1] || "") }));
+    if (!post({ type: "rewind", id: chat.id, turnIndex, text: newText, images })) {
+      systemNote(chat, "Host disconnected — couldn't rewind. Nothing was changed.", "warn");
+      return;
+    }
     for (let i = rows.length - 1; i >= startIdx; i--) rows[i].remove();
     chat.turnIndexCounter = turnIndex - 1;
     chat.currentAssistantId = null;
@@ -703,8 +731,6 @@
     chat.streamedMsgIds.clear();
     chat.streamMsgId = null;
     chat.toolGroup = null;
-    chat.turnRunning = false;
-    chat.turnStatusText = "";
     chat.statusEl = null; // went with the removed rows (or is about to be stale)
     clearPermCards(chat);
     // Tool cards that lived in the truncated region are dead weight — anything
@@ -715,16 +741,19 @@
         chat.emittedToolIds.delete(toolUseId);
       }
     }
+    userBubble(chat, newText, attachments, { real: true });
+    chat.turnRunning = true;
+    chat.turnStatusText = "";
+    chat.turnStartedAt = Date.now();
+    chat.turnTokens = 0;
+    chat.curMsgTokens = 0;
+    chat.statusWord = randStatusWord();
+    chat.statusWordAt = Date.now();
     if (chat.id === activeId) {
-      setRunningUI(false);
-      renderTurnStatus(chat);
-      els.input.value = text;
-      chat.attachments = Array.isArray(attachments) ? attachments.slice() : [];
-      renderAttachmentThumbs();
-      autosize();
-      els.input.focus();
+      setRunningUI(true);
+      startStatusTicker();
     }
-    post({ type: "rewind", id: chat.id, turnIndex });
+    renderTurnStatus(chat);
   }
 
   // ---- page-element context (from the Selector tool) ------------------------
