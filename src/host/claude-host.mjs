@@ -1355,8 +1355,12 @@ function checkoutBranch(id, cwd, branch) {
   });
 }
 
-// ---- git diff (uncommitted changes) -----------------------------------------
+// ---- git diff (everything not yet on the remote) ----------------------------
 // Powers the status-bar stat badge (+insertions -deletions) and the diff drawer.
+// Diffs the worktree against the merge-base with the remote's default branch, so
+// the count matches what a PR from this branch would show — unpushed commits
+// included, not just uncommitted edits. Falls back to a plain worktree-vs-HEAD
+// diff when there's no remote base yet (a repo that was never pushed).
 // Runs `git diff --unified=100000` so the whole file rides along as one hunk —
 // the panel unfolds "N unmodified lines" client-side instead of asking the host
 // for more context. Untracked files never show up in `git diff`, so they're
@@ -1383,11 +1387,41 @@ function gitDiff(id, cwd) {
         cb(e ? "" : String(out || ""))
       );
 
+    // Resolve the merge-base with the remote's default branch — the point a PR
+    // from this branch would fork off. Diffing the worktree against it counts
+    // everything not yet landed on the remote (unpushed commits + working edits),
+    // mirroring GitHub's three-dot PR diff. origin/HEAD isn't always set, so we
+    // fall back through the usual default-branch names. Yields null when there's
+    // no reachable remote base, so the caller can diff against HEAD instead.
+    const resolveBase = (cb) => {
+      execFile("git", ["-C", dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], GIT_DIFF_OPTS, (e, out) => {
+        const def = e ? "" : String(out || "").trim();
+        const candidates = [];
+        for (const ref of [def, "origin/main", "origin/master"]) {
+          if (ref && !candidates.includes(ref)) candidates.push(ref);
+        }
+        const tryNext = (i) => {
+          if (i >= candidates.length) return cb(null);
+          execFile("git", ["-C", dir, "merge-base", "HEAD", candidates[i]], GIT_DIFF_OPTS, (mErr, mOut) => {
+            const mb = mErr ? "" : String(mOut || "").trim();
+            if (mb) return cb(mb);
+            tryNext(i + 1);
+          });
+        };
+        tryNext(0);
+      });
+    };
+
     const withTrackedDiff = (cb) => {
-      if (!hasTracked) return cb("");
-      // Compares the worktree (staged + unstaged) against HEAD. A brand-new repo
-      // with no commits yet has no HEAD — fall back to a plain worktree/index diff.
-      runDiff(["HEAD"], (out) => (out ? cb(out) : runDiff([], cb)));
+      resolveBase((base) => {
+        // Diff the worktree (staged + unstaged) against the remote base. Empty
+        // output means nothing here is unpushed or uncommitted — badge shows 0.
+        if (base) return runDiff([base], cb);
+        // No remote base (never pushed / no origin) — show uncommitted work vs
+        // HEAD, and a brand-new repo with no HEAD gets a plain worktree diff.
+        if (!hasTracked) return cb("");
+        runDiff(["HEAD"], (out) => (out ? cb(out) : runDiff([], cb)));
+      });
     };
 
     withTrackedDiff((rawDiff) => {

@@ -446,19 +446,18 @@
       tip.appendChild(folderRow);
       if (chat.isRepo && chat.branch) {
         const branchRow = el("div", "chat-tab-tip-row");
-        branchRow.innerHTML = ICON("git-branch", 11);
+        branchRow.innerHTML = ICON("git-branch", 12);
         branchRow.appendChild(document.createTextNode(chat.branch));
         tip.appendChild(branchRow);
       }
       // Built fresh on every hover, so it always shows the latest reading.
-      // Hidden until the first reply reports usage (and right after /compact,
-      // when the size is unknown until the next reply).
-      if (chat.ctxTokens > 0) {
-        const ctxRow = el("div", "chat-tab-tip-row");
-        ctxRow.innerHTML = ICON("gauge", 12);
-        ctxRow.appendChild(document.createTextNode("Context: " + fmtTokens(chat.ctxTokens) + " tokens"));
-        tip.appendChild(ctxRow);
-      }
+      // Always present (0 before the first reply, and briefly after /compact
+      // until the next reply reports the new size) so the user always knows
+      // where to find it.
+      const ctxRow = el("div", "chat-tab-tip-row");
+      ctxRow.innerHTML = ICON("gauge", 12);
+      ctxRow.appendChild(document.createTextNode("Context: " + fmtTokens(chat.ctxTokens || 0) + " tokens"));
+      tip.appendChild(ctxRow);
       tip.classList.add("show");
       const r = tabEl.getBoundingClientRect();
       tip.style.top = r.bottom + 6 + "px";
@@ -3391,7 +3390,8 @@
   // ---- git status bar + diff drawer ------------------------------------------
   // Persistent bar (unlike the setup chips, it stays visible once a conversation
   // starts — that's exactly when Claude's edits pile up) showing the branch and
-  // a +insertions/-deletions badge whenever the cwd has uncommitted changes.
+  // a +insertions/-deletions badge whenever the cwd has changes that aren't yet
+  // on the remote's default branch (unpushed commits + uncommitted edits).
   // Clicking the badge opens a drawer with the full per-file diff.
   function syncGitBar(chat) {
     if (!els.gitBar) return;
