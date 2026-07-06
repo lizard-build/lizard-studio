@@ -45,6 +45,31 @@
     return s.length > 84 ? s.slice(0, 83) + "…" : s;
   }
 
+  // A DOM-position path (tag + nth-of-type per ancestor, up to an id or 8
+  // levels). Unlike selectorOf() — tag/id/class only — this tells apart two
+  // visually-identical siblings (e.g. repeated cards with no id), while still
+  // matching the same node across repeat clicks, so the chat panel can dedupe
+  // "same element clicked twice" without conflating distinct elements.
+  function pathOf(el) {
+    const parts = [];
+    let node = el;
+    for (let depth = 0; node && node.nodeType === 1 && depth < 8; depth++) {
+      let part = node.tagName.toLowerCase();
+      if (node.id) {
+        parts.unshift(part + "#" + node.id);
+        break;
+      }
+      const parent = node.parentElement;
+      if (parent) {
+        const siblings = [...parent.children].filter((c) => c.tagName === node.tagName);
+        if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+      }
+      parts.unshift(part);
+      node = parent;
+    }
+    return parts.join(">");
+  }
+
   // ---- computed-style card ----------------------------------------------
   function rgbToHex(str) {
     const m = String(str).match(/rgba?\(([^)]+)\)/);
@@ -288,6 +313,7 @@
     return {
       tag: el.tagName.toLowerCase(),
       selector: selectorOf(el),
+      path: pathOf(el),
       openTag: openingTag(el),
       width: RK.round(r.width),
       height: RK.round(r.height),

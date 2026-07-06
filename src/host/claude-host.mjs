@@ -33,6 +33,7 @@
 //   { type:"pickFolder", id }                                      native folder chooser
 //   { type:"gitBranches", id, cwd }                                list local branches + current
 //   { type:"checkoutBranch", id, cwd, branch }                     git checkout <branch>
+//   { type:"gitDiff", id, cwd }                                    working-tree diff vs HEAD (+ untracked files)
 //   { type:"browserResult", bid, ok, data?, error? }              reply to a `browser` request
 //   { type:"permissionResult", id, requestId, behavior,           answer a `permission` ask:
 //     message?, updatedPermissions?, interrupt?,                  behavior "allow" | "deny"
@@ -47,6 +48,10 @@
 //   { type:"exit",    id, code }
 //   { type:"folder",  id, path }                               null path == cancelled
 //   { type:"gitBranches", id, cwd, isRepo, current, branches, checkedOut? }
+//   { type:"gitDiff", id, cwd, isRepo, files, insertions, deletions }
+//     files: [{ path, status: "added"|"modified"|"deleted", binary, insertions, deletions, diff }]
+//     `diff` is the unified-diff body (from the first `@@` hunk marker on) with
+//     effectively unlimited context, so the panel can unfold it client-side.
 //   { type:"transcript", id, events, done }                    a chunk of replayed past messages
 //   { type:"browser", bid, op, args }                          ask the panel to inspect the live tab
 //   { type:"permission", id, requestId, toolName, input,       claude wants to use a tool — ask the user
@@ -952,7 +957,14 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
     "--permission-prompt-tool", "stdio",
   ];
   if (s.model) args.push("--model", s.model);
-  if (s.effort) args.push("--effort", s.effort);
+  // "ultracode" isn't a real --effort value (the CLI only accepts low/medium/
+  // high/xhigh/max there) — it's xhigh reasoning plus the dynamic-workflow
+  // setting, so we split it into the two flags the CLI actually understands.
+  if (s.effort === "ultracode") {
+    args.push("--effort", "xhigh", "--settings", JSON.stringify({ ultracode: true }));
+  } else if (s.effort) {
+    args.push("--effort", s.effort);
+  }
   if (resume) args.push("--resume", resume);
 
   // Ship the lizard-build/skill bootstrap skill to this session (see the
@@ -1343,6 +1355,110 @@ function checkoutBranch(id, cwd, branch) {
   });
 }
 
+// ---- git diff (uncommitted changes) -----------------------------------------
+// Powers the status-bar stat badge (+insertions -deletions) and the diff drawer.
+// Runs `git diff --unified=100000` so the whole file rides along as one hunk —
+// the panel unfolds "N unmodified lines" client-side instead of asking the host
+// for more context. Untracked files never show up in `git diff`, so they're
+// read straight off disk and presented as a synthetic all-added hunk.
+const GIT_DIFF_OPTS = { env: CHILD_ENV, maxBuffer: 32 * 1024 * 1024 };
+function gitDiff(id, cwd) {
+  const dir = cwd && existsSync(cwd) ? cwd : homedir();
+  // --untracked-files=all so a new file inside a new folder gets its own entry
+  // instead of collapsing to a single "?? folder/" line we can't read as a file.
+  execFile("git", ["-C", dir, "status", "--porcelain=v1", "--untracked-files=all"], GIT_DIFF_OPTS, (err, statusOut) => {
+    if (err) {
+      send({ type: "gitDiff", id, cwd: dir, isRepo: false, files: [], insertions: 0, deletions: 0 });
+      return;
+    }
+    const entries = String(statusOut || "")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => ({ code: line.slice(0, 2), path: line.slice(3) }));
+    const untracked = entries.filter((e) => e.code === "??").map((e) => e.path);
+    const hasTracked = entries.some((e) => e.code !== "??" && e.code !== "!!");
+
+    const runDiff = (extraArgs, cb) =>
+      execFile("git", ["-C", dir, "diff", "--unified=100000", ...extraArgs, "--"], GIT_DIFF_OPTS, (e, out) =>
+        cb(e ? "" : String(out || ""))
+      );
+
+    const withTrackedDiff = (cb) => {
+      if (!hasTracked) return cb("");
+      // Compares the worktree (staged + unstaged) against HEAD. A brand-new repo
+      // with no commits yet has no HEAD — fall back to a plain worktree/index diff.
+      runDiff(["HEAD"], (out) => (out ? cb(out) : runDiff([], cb)));
+    };
+
+    withTrackedDiff((rawDiff) => {
+      const files = parseUnifiedDiff(rawDiff);
+      for (const path of untracked) {
+        const synth = synthesizeAddedFileDiff(dir, path);
+        if (synth) files.push(synth);
+      }
+      let insertions = 0;
+      let deletions = 0;
+      for (const f of files) {
+        insertions += f.insertions;
+        deletions += f.deletions;
+      }
+      send({ type: "gitDiff", id, cwd: dir, isRepo: true, files, insertions, deletions });
+    });
+  });
+}
+
+// Splits `git diff --unified=100000` output on the `diff --git a/x b/y` file
+// markers, keeping only the hunk body (from the first `@@` line on) and
+// tallying +/- lines for the stat badge.
+function parseUnifiedDiff(raw) {
+  if (!raw) return [];
+  const files = [];
+  const chunks = raw.split(/^diff --git /m).slice(1);
+  for (const chunk of chunks) {
+    const lines = chunk.split("\n");
+    const header = lines[0] || "";
+    const m = header.match(/^a\/(.*) b\/(.*)$/);
+    const path = m ? m[2] : header.trim();
+    const binary = /\nBinary files /.test(chunk);
+    const status = /\nnew file mode/.test(chunk) ? "added" : /\ndeleted file mode/.test(chunk) ? "deleted" : "modified";
+    let insertions = 0;
+    let deletions = 0;
+    const body = [];
+    let inHunk = false;
+    for (let i = 1; i < lines.length; i++) {
+      const l = lines[i];
+      if (l.startsWith("@@")) inHunk = true;
+      if (!inHunk) continue;
+      body.push(l);
+      if (l.startsWith("+") && !l.startsWith("+++")) insertions++;
+      else if (l.startsWith("-") && !l.startsWith("---")) deletions++;
+    }
+    files.push({ path, status, binary, insertions, deletions, diff: binary ? "" : body.join("\n") });
+  }
+  return files;
+}
+
+// Untracked files are invisible to `git diff` — read the file directly and
+// format it as one big "+" hunk so it renders in the same drawer as tracked
+// changes. Skipped (marked binary, no content) past 2MB or if it contains a NUL
+// byte, so a stray binary blob doesn't blow up the native-messaging payload.
+function synthesizeAddedFileDiff(dir, path) {
+  try {
+    const full = join(dir, path);
+    const stat = statSync(full);
+    if (stat.size > 2 * 1024 * 1024) return { path, status: "added", binary: true, insertions: 0, deletions: 0, diff: "" };
+    const buf = readFileSync(full);
+    if (buf.includes(0)) return { path, status: "added", binary: true, insertions: 0, deletions: 0, diff: "" };
+    const text = buf.toString("utf8");
+    const contentLines = text.length ? text.split("\n") : [];
+    if (contentLines.length && contentLines[contentLines.length - 1] === "") contentLines.pop();
+    const body = [`@@ -0,0 +1,${contentLines.length} @@`, ...contentLines.map((l) => "+" + l)];
+    return { path, status: "added", binary: false, insertions: contentLines.length, deletions: 0, diff: body.join("\n") };
+  } catch {
+    return null;
+  }
+}
+
 // ---- transcript replay ------------------------------------------------------
 // The panel only keeps a conversation in the page DOM — reloading the side panel
 // wipes it. But `claude` persists every session as a JSONL transcript under
@@ -1406,13 +1522,24 @@ function loadTranscript(id, sessionId, cwd) {
     } catch {
       return;
     }
-    // Keep only the visible conversation: real user/assistant turns. Skip
-    // sub-agent sidechains and injected meta (system reminders, hooks).
-    if (o.isSidechain || o.isMeta) return;
-    if ((o.type !== "user" && o.type !== "assistant") || !o.message) return;
-    // Carry the JSONL line's `timestamp` so the panel can show a real "Xm ago"
-    // on replay instead of resetting every message to "now" on each panel open.
-    const ev = { type: o.type, message: o.message, timestamp: o.timestamp };
+    // Keep only the visible conversation: real user/assistant turns, plus
+    // local slash-command output (/usage etc.), which the CLI persists as a
+    // `system` line with the text in `content` rather than an assistant
+    // message. Skip sub-agent sidechains and injected meta (system
+    // reminders, hooks), and the post-/compact summary turn — the panel
+    // replays the full pre-compact history around it, so redisplaying the
+    // summary as a giant user bubble would just be noise.
+    if (o.isSidechain || o.isMeta || o.isCompactSummary || o.isVisibleInTranscriptOnly) return;
+    let ev;
+    if (o.type === "system" && o.subtype === "local_command" && typeof o.content === "string") {
+      ev = { type: "local_command", content: o.content, timestamp: o.timestamp };
+    } else if ((o.type === "user" || o.type === "assistant") && o.message) {
+      // Carry the JSONL line's `timestamp` so the panel can show a real "Xm ago"
+      // on replay instead of resetting every message to "now" on each panel open.
+      ev = { type: o.type, message: o.message, timestamp: o.timestamp };
+    } else {
+      return;
+    }
     const s = JSON.stringify(ev).length;
     // Batch events under Chrome's native-message size cap (send() truncates over it).
     if (size + s > 700000) flush(false);
@@ -1468,10 +1595,16 @@ function rewindSession(id, turnIndex, text, images) {
           } catch {
             continue;
           }
-          if (o.isSidechain || o.isMeta || o.type !== "user" || !o.message) continue;
+          if (o.isSidechain || o.isMeta || o.isCompactSummary || o.isVisibleInTranscriptOnly || o.type !== "user" || !o.message) continue;
           const content = o.message.content;
+          // Match the panel's bubble test: user lines that are pure synthetic
+          // wrappers (local-command stdout/stderr, task notifications) render
+          // as notes/cards, not bubbles, so they must not consume a turnIndex.
+          const SYNTH_RE = /<(task-notification|system-reminder|local-command-stdout|local-command-stderr|local-command-caveat)>[\s\S]*?<\/\1>\n*/g;
           const hasText =
-            typeof content === "string" ? content.trim().length > 0 : Array.isArray(content) && content.some((b) => b && b.type === "text" && b.text);
+            typeof content === "string"
+              ? content.replace(SYNTH_RE, "").trim().length > 0
+              : Array.isArray(content) && content.some((b) => b && b.type === "text" && b.text);
           if (!hasText) continue;
           count++;
           if (count === turnIndex) {
@@ -1541,6 +1674,9 @@ function handle(msg) {
       break;
     case "checkoutBranch":
       checkoutBranch(id, msg.cwd, msg.branch);
+      break;
+    case "gitDiff":
+      gitDiff(id, msg.cwd);
       break;
     case "browserResult":
       resolveBrowser(msg);

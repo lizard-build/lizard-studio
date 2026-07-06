@@ -46,6 +46,22 @@
   function randStatusWord() {
     return STATUS_WORDS[Math.floor(Math.random() * STATUS_WORDS.length)];
   }
+
+  // Real Claude Code picks one verb per "silent" phase (thinking before the
+  // first token, waiting on a tool round-trip) and holds it — a long stretch
+  // of visible streaming text is its own progress signal, so the verb never
+  // needs to churn on a clock. Call this at phase boundaries only.
+  function refreshStatusWord(chat) {
+    if (chat.compacting) return;
+    chat.statusWord = randStatusWord();
+    chat.statusWordAt = Date.now();
+  }
+
+  // mm:ss once a turn runs past a minute, matching Claude Code's own timer.
+  function formatElapsed(secs) {
+    if (secs < 60) return `${secs}s`;
+    return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  }
   let statusTimer = null;
 
   // Permission modes mirror Claude Code's Shift+Tab cycle and `--permission-mode`
@@ -69,13 +85,18 @@
   ];
   const DEFAULT_MODEL = "claude-opus-4-8";
 
-  // Reasoning effort — mirrors the CLI's `--effort <level>` flag.
+  // Reasoning effort — mirrors the CLI's `--effort <level>` flag. "ultracode"
+  // isn't a real effort level: it's xhigh reasoning plus dynamic workflow
+  // orchestration (the same slot the desktop app's effort slider adds as its
+  // 6th, purple entry) — see claude-host.mjs's startClaude for how it's split
+  // back into `--effort xhigh --settings '{"ultracode":true}'`.
   const EFFORTS = [
     { id: "low", label: "Low" },
     { id: "medium", label: "Medium" },
     { id: "high", label: "High" },
-    { id: "xhigh", label: "Xhigh" },
+    { id: "xhigh", label: "Extra" },
     { id: "max", label: "Max" },
+    { id: "ultracode", label: "Ultracode" },
   ];
   const DEFAULT_EFFORT = "medium";
 
@@ -220,6 +241,12 @@
     if (home && p.replace(/\/$/, "") === home.replace(/\/$/, "")) return "~";
     return basename(p);
   }
+  // "842", "12.4k", "128k" — token counts for the tab tooltip's context row.
+  function fmtTokens(n) {
+    if (n < 1000) return String(n);
+    const k = n / 1000;
+    return (k >= 100 ? Math.round(k) : k.toFixed(1).replace(/\.0$/, "")) + "k";
+  }
 
   function atBottom(chat) {
     const m = chat.messagesEl;
@@ -299,6 +326,10 @@
       turnStartedAt: 0,
       turnTokens: 0,
       curMsgTokens: 0,
+      // Live context size — see noteCtxUsage. ctxBase is the input side of the
+      // latest main-chain API call; ctxTokens adds its output streamed so far.
+      ctxBase: 0,
+      ctxTokens: 0,
       statusWord: "",
       statusWordAt: 0,
       // Page elements attached via the Selector tool, sent as context with the
@@ -315,6 +346,13 @@
       isRepo: false,
       branch: null,
       branches: [],
+      // Working-tree diff vs HEAD (filled in from the host's gitDiff reply).
+      // Refreshed on session start and after every turn ends.
+      diffFiles: [],
+      diffInsertions: 0,
+      diffDeletions: 0,
+      diffDrawerOpen: false,
+      diffCollapsedFiles: new Set(), // paths collapsed in the drawer
       // Pending permission asks (can_use_tool): requestId -> { card, opts, … }.
       permCards: new Map(),
       // Set right before sending a bare "/usage" (or "/usage-credits" /
@@ -411,6 +449,15 @@
         branchRow.innerHTML = ICON("git-branch", 11);
         branchRow.appendChild(document.createTextNode(chat.branch));
         tip.appendChild(branchRow);
+      }
+      // Built fresh on every hover, so it always shows the latest reading.
+      // Hidden until the first reply reports usage (and right after /compact,
+      // when the size is unknown until the next reply).
+      if (chat.ctxTokens > 0) {
+        const ctxRow = el("div", "chat-tab-tip-row");
+        ctxRow.innerHTML = ICON("gauge", 12);
+        ctxRow.appendChild(document.createTextNode("Context: " + fmtTokens(chat.ctxTokens) + " tokens"));
+        tip.appendChild(ctxRow);
       }
       tip.classList.add("show");
       const r = tabEl.getBoundingClientRect();
@@ -748,8 +795,7 @@
     chat.turnStartedAt = Date.now();
     chat.turnTokens = 0;
     chat.curMsgTokens = 0;
-    chat.statusWord = randStatusWord();
-    chat.statusWordAt = Date.now();
+    refreshStatusWord(chat);
     if (chat.id === activeId) {
       setRunningUI(true);
       startStatusTicker();
@@ -765,10 +811,14 @@
     const chat = chats.get(activeId);
     if (!chat) return;
     if (!Array.isArray(chat.contexts)) chat.contexts = [];
-    // Skip exact duplicates (same selector clicked twice).
-    if (!chat.contexts.some((c) => c.selector === element.selector && c.tag === element.tag)) {
-      chat.contexts.push(element);
-    }
+    // Skip exact duplicates (same DOM node clicked twice). Keyed by DOM path,
+    // not the tag/id/class selector alone — two different elements (e.g.
+    // sibling cards with identical classes and no id) share a selector but
+    // have distinct paths, so they must both be kept.
+    const isDup = element.path
+      ? chat.contexts.some((c) => c.path === element.path)
+      : chat.contexts.some((c) => c.selector === element.selector && c.tag === element.tag);
+    if (!isDup) chat.contexts.push(element);
     renderContextChips();
     if (els.input) els.input.focus();
   }
@@ -887,7 +937,25 @@
   // the live event path already ignores them (only tool_result is handled for
   // "user" events there). Strip them here too so replaying an on-disk
   // transcript doesn't redisplay them as a fake user message.
-  const SYNTHETIC_USER_TAG_RE = /<(task-notification|system-reminder|local-command-stdout|local-command-stderr)>[\s\S]*?<\/\1>\n*/g;
+  const SYNTHETIC_USER_TAG_RE = /<(task-notification|system-reminder|local-command-stdout|local-command-stderr|local-command-caveat)>[\s\S]*?<\/\1>\n*/g;
+
+  // Slash commands are persisted to the transcript as an XML wrapper:
+  //   <command-name>/usage</command-name>
+  //   <command-message>usage</command-message>
+  //   <command-args>foo bar</command-args>
+  // Live, the bubble shows the literal typed text ("/usage foo bar") — collapse
+  // the wrapper back to that on replay instead of redisplaying raw tags.
+  const COMMAND_TAG_RE =
+    /<command-name>\s*([^<]*?)\s*<\/command-name>\s*(?:<command-message>[\s\S]*?<\/command-message>\s*)?(?:<command-args>([\s\S]*?)<\/command-args>)?/;
+  function commandBubbleText(text) {
+    const m = COMMAND_TAG_RE.exec(text);
+    if (!m || !m[1]) return null;
+    // Old transcripts have the auto-injected tabs/context block riding in the
+    // args (it used to be appended after the command) — strip it like any
+    // other injected context so the bubble shows only what was typed.
+    const args = (m[2] || "").replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
+    return args ? m[1] + " " + args : m[1];
+  }
 
   // ---- auto tab context -------------------------------------------------
   // Lightweight, always-on context: title + URL for every open tab, with the
@@ -1426,6 +1494,9 @@
         chat.streamBlocks.clear();
         chat.curMsgTokens = 0;
         ensureAssistantBody(chat, id);
+        // A new message is a new "silent" phase (e.g. the round after a tool
+        // result) — give it its own verb rather than carrying the old one.
+        refreshStatusWord(chat);
         break;
       }
       case "content_block_start": {
@@ -2178,6 +2249,35 @@
     chat.permCards.clear();
   }
 
+  // ---- context-size tracking -------------------------------------------------
+  // chat.ctxTokens tracks what the model currently holds in context: the input
+  // side (prompt + cache reads/writes) billed by the latest main-chain API call,
+  // plus the output it has streamed since. Refreshed from message_start (input
+  // side), message_delta (output grows), the final `assistant` event, and
+  // replayed transcripts (last assistant message wins) — so it's current
+  // whenever the tab tooltip reads it. Compaction invalidates it: the compact
+  // call itself bills the whole pre-compact context, so updates are skipped
+  // while compacting and the value resets to unknown until the first
+  // post-compact reply (see endTurn).
+  function noteCtxUsage(chat, usage) {
+    if (!usage || chat.compacting) return;
+    const base = (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0);
+    // Synthetic messages (local slash-command answers, API-error stubs) carry
+    // no real input usage — never let them zero out or corrupt the reading.
+    if (base <= 0) return;
+    chat.ctxBase = base;
+    chat.ctxTokens = base + (usage.output_tokens || 0);
+  }
+  function trackCtxStream(chat, ev) {
+    if (!ev) return;
+    if (ev.type === "message_start") {
+      noteCtxUsage(chat, ev.message && ev.message.usage);
+    } else if (ev.type === "message_delta" && chat.ctxBase && !chat.compacting) {
+      const u = ev.usage || {};
+      if (typeof u.output_tokens === "number") chat.ctxTokens = chat.ctxBase + u.output_tokens;
+    }
+  }
+
   // ---- event handling (routed per chat) -------------------------------------
   function onClaudeEvent(chat, d) {
     if (!d || !d.type) return;
@@ -2200,6 +2300,7 @@
           if (d.permissionMode) chat.mode = d.permissionMode;
           if (chat.id === activeId) syncComposer();
           requestBranches(chat);
+          requestGitDiff(chat);
           savePrefs();
         } else if (d.subtype === "status" && d.status === "compacting") {
           // /compact runs a real summarization call with no assistant text or
@@ -2213,9 +2314,13 @@
       // Incremental tokens from --include-partial-messages: render assistant
       // text and thinking live, block by block.
       case "stream_event":
+        // Sub-agent (sidechain) calls run their own, separate context — only
+        // main-chain usage reflects this conversation's size.
+        if (!d.parent_tool_use_id) trackCtxStream(chat, d.event);
         handleStreamEvent(chat, d.event);
         break;
       case "assistant": {
+        if (!d.parent_tool_use_id) noteCtxUsage(chat, d.message && d.message.usage);
         const msgId = d.message && d.message.id;
         const body = ensureAssistantBody(chat, msgId);
         const streamed = msgId && chat.streamedMsgIds.has(msgId);
@@ -2247,6 +2352,13 @@
               fillToolResult(chat, block.tool_use_id, block.content, block.is_error);
             }
           }
+        } else if (typeof content === "string" && /<local-command-std(out|err)>/.test(content)) {
+          // Local-command output that arrives as a plain-string user event —
+          // e.g. /compact's "Compacted", which is the only visible completion
+          // signal the command has. (/usage's card is drawn from its synthetic
+          // assistant reply instead — skip while that's pending so a stdout
+          // copy of the same text can't double-render it.)
+          if (!chat.pendingUsageCard) renderLocalCommandOutput(chat, content, Date.now());
         }
         break;
       }
@@ -2263,6 +2375,9 @@
 
   function endTurn(chat, result) {
     chat.turnRunning = false;
+    // A compacted conversation just shrank to a summary; the real size is
+    // unknown until the first post-compact reply reports fresh usage.
+    if (chat.compacting) { chat.ctxBase = 0; chat.ctxTokens = 0; }
     chat.compacting = false;
     closeToolGroup(chat);
     finalizeAssistant(chat, chat.currentAssistantBody, Date.now());
@@ -2300,6 +2415,8 @@
     // hard-kill the reply that was still streaming — apply it now that the
     // turn is actually done, before anything queued goes out under it.
     if (chat.restartPending) restartSessionNow(chat);
+    // The turn may have edited files — refresh the uncommitted-changes badge.
+    requestGitDiff(chat);
     // Send the next queued prompt, if any — keeps working even if the user
     // has since switched to a different tab.
     dispatchNextQueued(chat);
@@ -2332,7 +2449,7 @@
     if (chat.turnRunning) {
       const secs = chat.turnStartedAt ? Math.max(0, Math.round((Date.now() - chat.turnStartedAt) / 1000)) : 0;
       const tokens = chat.turnTokens + chat.curMsgTokens;
-      const meta = [`${secs}s`];
+      const meta = [formatElapsed(secs)];
       if (tokens > 0) meta.push(`↓ ${tokens.toLocaleString()} tokens`);
       node.classList.add("running");
       // Build the spark once and only update the text parts on later ticks —
@@ -2359,13 +2476,9 @@
 
   function tickStatus() {
     const chat = chats.get(activeId);
-    if (chat && chat.turnRunning) {
-      const now = Date.now();
-      if (!chat.compacting && (!chat.statusWord || now - chat.statusWordAt > 1800)) {
-        chat.statusWord = randStatusWord();
-        chat.statusWordAt = now;
-      }
-    }
+    // Only a safety net for the word itself (e.g. state restored mid-turn) —
+    // real phase changes are what pick a new one, see refreshStatusWord.
+    if (chat && chat.turnRunning && !chat.compacting && !chat.statusWord) refreshStatusWord(chat);
     if (chat) renderTurnStatus(chat);
     let anyRunning = false;
     for (const c of chats.values()) if (c.turnRunning) { anyRunning = true; break; }
@@ -2490,6 +2603,7 @@
           if (msg.permissionMode) chat.mode = msg.permissionMode;
           if (chat.id === activeId) syncComposer();
           requestBranches(chat);
+          requestGitDiff(chat);
         }
         break;
       case "event":
@@ -2549,7 +2663,23 @@
           chat.branch = msg.current || null;
           chat.branches = Array.isArray(msg.branches) ? msg.branches : [];
           if (chat.id === activeId) syncComposer();
-          if (msg.checkedOut && chat.branch) systemNote(chat, `Switched to branch ${chat.branch}`);
+          if (msg.checkedOut && chat.branch) {
+            systemNote(chat, `Switched to branch ${chat.branch}`);
+            requestGitDiff(chat); // checkout can change the working-tree diff
+          }
+        }
+        break;
+      case "gitDiff":
+        if (chat) {
+          chat.isRepo = !!msg.isRepo;
+          chat.diffFiles = Array.isArray(msg.files) ? msg.files : [];
+          chat.diffInsertions = msg.insertions || 0;
+          chat.diffDeletions = msg.deletions || 0;
+          // Drop collapsed-state entries for files that no longer have changes.
+          const paths = new Set(chat.diffFiles.map((f) => f.path));
+          for (const p of chat.diffCollapsedFiles) if (!paths.has(p)) chat.diffCollapsedFiles.delete(p);
+          if (!chat.diffFiles.length) chat.diffDrawerOpen = false;
+          if (chat.id === activeId) syncGitBar(chat);
         }
         break;
       case "needsFolder":
@@ -2624,12 +2754,26 @@
   function replayTranscript(chat, events) {
     if (!chat || !Array.isArray(events)) return;
     for (const ev of events) {
-      if (!ev || !ev.message) continue;
+      if (!ev) continue;
+      if (ev.type === "local_command") {
+        const ts = ev.timestamp ? Date.parse(ev.timestamp) || Date.now() : Date.now();
+        renderLocalCommandOutput(chat, String(ev.content || ""), ts);
+        continue;
+      }
+      if (!ev.message) continue;
       if (ev.type === "user") {
         const content = ev.message.content;
         const ts = ev.timestamp ? Date.parse(ev.timestamp) || Date.now() : Date.now();
         if (typeof content === "string") {
-          const stripped = content.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
+          // Some local-command output (/compact's "Compacted") is stored as a
+          // plain-string user turn rather than a system line — render it as
+          // command output, not a user bubble.
+          if (/<local-command-std(out|err)>/.test(content)) {
+            renderLocalCommandOutput(chat, content, ts);
+            continue;
+          }
+          const stripped =
+            commandBubbleText(content) || content.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
           if (stripped) userBubble(chat, stripped, null, { real: true, ts });
         } else if (Array.isArray(content)) {
           const texts = [];
@@ -2638,10 +2782,15 @@
             if (b.type === "tool_result") fillToolResult(chat, b.tool_use_id, b.content, b.is_error);
             else if (b.type === "text" && b.text) texts.push(b.text);
           }
-          const stripped = texts.join("\n\n").replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
+          const joined = texts.join("\n\n");
+          const stripped =
+            commandBubbleText(joined) || joined.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
           if (stripped) userBubble(chat, stripped, null, { real: true, ts });
         }
       } else if (ev.type === "assistant") {
+        // Each replayed assistant message refreshes the context reading; the
+        // last one in the transcript is the conversation's current size.
+        noteCtxUsage(chat, ev.message.usage);
         const body = ensureAssistantBody(chat, ev.message.id);
         for (const block of ev.message.content || []) {
           if (!block) continue;
@@ -2664,6 +2813,34 @@
     if (chat.id === activeId) requestAnimationFrame(() => scrollToBottom(chat));
   }
 
+  // Render the output of a local slash command. The CLI persists it wrapped in
+  // <local-command-stdout>/-stderr> — as a `system` line for some commands
+  // (/usage) and as a plain-string `user` turn for others (/compact), and the
+  // latter also arrives live as a `user` event, so this is shared by both the
+  // live path and transcript replay. Stdout renders the way the live /usage
+  // path would — the usage card when the text parses as plan-usage lines,
+  // plain markdown otherwise — and stderr as a warning note.
+  function renderLocalCommandOutput(chat, raw, ts) {
+    const err = /<local-command-stderr>([\s\S]*?)<\/local-command-stderr>/.exec(raw);
+    if (err && err[1].trim()) systemNote(chat, err[1].trim(), "warn");
+    const out = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(raw);
+    const text = (out ? out[1] : err ? "" : raw).trim();
+    if (!text) return;
+    // /compact's whole stdout is the word "Compacted" — a note concludes the
+    // "Compacting…" status better than an assistant bubble would, and doubles
+    // as the live completion feedback the command otherwise lacks.
+    if (/^compacted$/i.test(text)) {
+      systemNote(chat, "Context compacted");
+      return;
+    }
+    const body = ensureAssistantBody(chat, "local-command-" + ts);
+    attachAssistantRow(chat, body);
+    const parsed = parseUsageText(text);
+    if (parsed) body.appendChild(buildUsageCard(parsed));
+    else body.appendChild(R.markdown(text));
+    finalizeAssistant(null, body, ts);
+  }
+
   // Wipe a tab's transcript and start a fresh session (used on folder change).
   function resetChatSession(chat) {
     chat.messagesEl.innerHTML = "";
@@ -2683,6 +2860,8 @@
     chat.streamBlocks.clear();
     chat.streamedMsgIds.clear();
     chat.streamMsgId = null;
+    chat.ctxBase = 0;
+    chat.ctxTokens = 0;
     chat.queue = []; // stale prompts from the wiped conversation shouldn't replay
     if (chat.id === activeId) {
       renderTurnStatus(chat);
@@ -2805,10 +2984,17 @@
     const hasContext = Array.isArray(chat.contexts) && chat.contexts.length > 0;
     const attachments = Array.isArray(chat.attachments) ? chat.attachments : [];
     if (!chat.started) startChatSession(chat);
+    // Slash commands go to the CLI's command parser, not the model — anything
+    // after the name is swallowed into <command-args> (/compact would treat an
+    // appended tabs block as custom summarization instructions). Send commands
+    // bare: skip the tabs block (not calling the builder leaves its snapshot
+    // untouched, so the next real prompt still sends it) and leave any attached
+    // context chips in place for the next real prompt instead of consuming them.
+    const isCommand = /^\//.test(text);
     // Silent, always-on context: what tabs are open right now, active one flagged.
-    const tabsBlock = await buildTabsContextBlock(chat);
+    const tabsBlock = isCommand ? "" : await buildTabsContextBlock(chat);
     // Prepend any attached page/element context as a block, then clear it.
-    const ctx = formatContexts(chat);
+    const ctx = isCommand ? "" : formatContexts(chat);
     const hasPage = hasContext && chat.contexts.some((c) => c.kind === "page");
     const hasFile = hasContext && chat.contexts.some((c) => c.kind === "file");
     const fallback = hasContext
@@ -2822,17 +3008,12 @@
     // The CLI answers a bare /usage (or /usage-credits, /extra-usage) with a
     // synthetic, zero-turn plain-text reply — swap it for a progress-bar card.
     chat.pendingUsageCard = /^\/(usage|usage-credits|extra-usage)\s*$/.test(text);
-    // Slash commands (built-ins like /usage, or skills) only get recognized by
-    // the CLI when the message starts with "/name" — prepending the tabs/context
-    // blocks before it turns it into plain text the model has to interpret
-    // itself instead of a real command. So for a bare "/…" prompt, the command
-    // goes first and any context follows after it, instead of leading.
     const extra = tabsBlock + ctx;
     // Wrap injected context in invisible sentinels so replayTranscript() can
     // strip it back out on reload — the live bubble above already shows just
     // the literal typed text, and replay should match that.
     const wrappedExtra = extra ? CTX_MARK_START + extra + CTX_MARK_END : "";
-    const sentText = /^\//.test(text) ? text + (wrappedExtra ? "\n\n" + wrappedExtra : "") : wrappedExtra + (text || fallback);
+    const sentText = isCommand ? text : wrappedExtra + (text || fallback);
     const images = attachments.map((a) => ({ mediaType: a.mediaType, data: (a.dataUrl.split(",")[1] || "") }));
     // If the port died since the connected check, post() reports it and nothing
     // reached the host. Requeue the prompt (visible, cancellable) instead of
@@ -2857,7 +3038,7 @@
       return;
     }
     userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments, { real: true });
-    chat.contexts = [];
+    if (!isCommand) chat.contexts = []; // command turns don't consume context chips
     chat.attachments = [];
     if (chat.id === activeId) {
       renderContextChips();
@@ -2871,8 +3052,7 @@
     chat.turnStartedAt = Date.now();
     chat.turnTokens = 0;
     chat.curMsgTokens = 0;
-    chat.statusWord = randStatusWord();
-    chat.statusWordAt = Date.now();
+    refreshStatusWord(chat);
     chat.streamedMsgIds.clear();
     chat.streamBlocks.clear();
     chat.streamMsgId = null;
@@ -3188,6 +3368,7 @@
     renderTurnStatus(chat);
     if (chat.turnRunning) startStatusTicker();
     syncBranch(chat);
+    syncGitBar(chat);
     renderContextChips();
     renderAttachmentThumbs();
     updateSetup();
@@ -3207,6 +3388,225 @@
     }
   }
 
+  // ---- git status bar + diff drawer ------------------------------------------
+  // Persistent bar (unlike the setup chips, it stays visible once a conversation
+  // starts — that's exactly when Claude's edits pile up) showing the branch and
+  // a +insertions/-deletions badge whenever the cwd has uncommitted changes.
+  // Clicking the badge opens a drawer with the full per-file diff.
+  function syncGitBar(chat) {
+    if (!els.gitBar) return;
+    const hasChanges = chat.isRepo && chat.diffFiles.length > 0;
+    els.gitBar.classList.toggle("hidden", !hasChanges);
+    if (!hasChanges) {
+      els.gitDrawer.classList.add("hidden");
+      return;
+    }
+    els.gitBarBranch.textContent = chat.branch || "";
+    els.gitStatAdd.textContent = `+${chat.diffInsertions}`;
+    els.gitStatDel.textContent = `-${chat.diffDeletions}`;
+    els.gitDrawer.classList.toggle("hidden", !chat.diffDrawerOpen);
+    if (chat.diffDrawerOpen) renderDiffDrawer(chat);
+  }
+
+  function toggleDiffDrawer() {
+    const chat = chats.get(activeId);
+    if (!chat) return;
+    chat.diffDrawerOpen = !chat.diffDrawerOpen;
+    syncGitBar(chat);
+  }
+
+  function closeDiffDrawer() {
+    const chat = chats.get(activeId);
+    if (!chat) return;
+    chat.diffDrawerOpen = false;
+    syncGitBar(chat);
+  }
+
+  function renderDiffDrawer(chat) {
+    els.gitDrawerBody.innerHTML = "";
+    for (const file of chat.diffFiles) {
+      els.gitDrawerBody.appendChild(buildFileSection(chat, file));
+    }
+  }
+
+  function buildFileSection(chat, file) {
+    const collapsed = chat.diffCollapsedFiles.has(file.path);
+    const section = el("div", "diff-file" + (collapsed ? " collapsed" : ""));
+
+    const head = el("div", "diff-file-head");
+    const toggle = el("span", "diff-file-toggle");
+    toggle.innerHTML = ICON("caret-down", 12);
+    head.appendChild(toggle);
+    head.appendChild(el("span", "diff-file-path", file.path));
+    head.appendChild(el("span", "diff-file-add", `+${file.insertions}`));
+    head.appendChild(el("span", "diff-file-del", `-${file.deletions}`));
+    head.addEventListener("click", () => {
+      if (chat.diffCollapsedFiles.has(file.path)) chat.diffCollapsedFiles.delete(file.path);
+      else chat.diffCollapsedFiles.add(file.path);
+      section.classList.toggle("collapsed");
+    });
+    section.appendChild(head);
+
+    if (file.binary) {
+      section.appendChild(el("div", "diff-file-binary", "Binary file not shown"));
+    } else if (!file.diff) {
+      // e.g. a pure rename with no content change — git emits no hunk at all.
+      section.appendChild(el("div", "diff-file-binary", "No content changes"));
+    } else {
+      section.appendChild(buildDiffBody(file.diff));
+    }
+    return section;
+  }
+
+  // Parses a `git diff --unified=100000` hunk body into per-line rows with the
+  // old/new line numbers git reports, so the drawer can show real gutters.
+  function parseDiffRows(diffText) {
+    const rows = [];
+    let oldNo = 0;
+    let newNo = 0;
+    for (const l of String(diffText || "").split("\n")) {
+      if (l.startsWith("@@")) {
+        const m = l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+        if (m) {
+          oldNo = parseInt(m[1], 10);
+          newNo = parseInt(m[2], 10);
+        }
+        continue;
+      }
+      if (l.startsWith("+")) rows.push({ type: "add", oldNo: null, newNo: newNo++, text: l.slice(1) });
+      else if (l.startsWith("-")) rows.push({ type: "del", oldNo: oldNo++, newNo: null, text: l.slice(1) });
+      else rows.push({ type: "ctx", oldNo: oldNo++, newNo: newNo++, text: l.slice(1) });
+    }
+    return rows;
+  }
+
+  // When a run of deletions is immediately followed by an equally long run of
+  // additions, pair them line-by-line and mark the changed middle of each pair
+  // (common prefix/suffix trim), so the drawer can tint just the edited words —
+  // but only when the pair is mostly identical; on dissimilar lines the row
+  // tint already says everything and a whole-line highlight would be noise.
+  function markWordDiffs(rows) {
+    let i = 0;
+    while (i < rows.length) {
+      if (rows[i].type !== "del") { i++; continue; }
+      let dEnd = i;
+      while (dEnd < rows.length && rows[dEnd].type === "del") dEnd++;
+      let aEnd = dEnd;
+      while (aEnd < rows.length && rows[aEnd].type === "add") aEnd++;
+      if (aEnd - dEnd === dEnd - i) {
+        for (let k = 0; k < dEnd - i; k++) pairWordDiff(rows[i + k], rows[dEnd + k]);
+      }
+      i = aEnd;
+    }
+  }
+
+  // Token-level LCS between the two lines, so each changed word gets its own
+  // highlight range (`lizard-code` → `lizard-studio` tints just `code` and
+  // `studio`, twice if it appears twice) instead of one prefix-to-suffix blob.
+  function pairWordDiff(d, a) {
+    const xt = (d.text || "").match(/\s+|\w+|[^\s\w]/g) || [];
+    const yt = (a.text || "").match(/\s+|\w+|[^\s\w]/g) || [];
+    const n = xt.length;
+    const m = yt.length;
+    if (!n || !m || n > 300 || m > 300) return;
+    const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        dp[i][j] = xt[i] === yt[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    if ((2 * dp[0][0]) / (n + m) < 0.5) return; // mostly different — the row tint is enough
+    const dr = [];
+    const ar = [];
+    const push = (list, s, e) => {
+      if (list.length && list[list.length - 1][1] === s) list[list.length - 1][1] = e;
+      else list.push([s, e]);
+    };
+    let i = 0;
+    let j = 0;
+    let xo = 0;
+    let yo = 0;
+    while (i < n && j < m) {
+      if (xt[i] === yt[j]) {
+        xo += xt[i++].length;
+        yo += yt[j++].length;
+      } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+        push(dr, xo, xo + xt[i].length);
+        xo += xt[i++].length;
+      } else {
+        push(ar, yo, yo + yt[j].length);
+        yo += yt[j++].length;
+      }
+    }
+    while (i < n) { push(dr, xo, xo + xt[i].length); xo += xt[i++].length; }
+    while (j < m) { push(ar, yo, yo + yt[j].length); yo += yt[j++].length; }
+    if (dr.length) d.hl = dr;
+    if (ar.length) a.hl = ar;
+  }
+
+  // Long runs of unchanged context lines collapse into a "N unmodified lines"
+  // bar (click to unfold in place) — short runs (the usual 1-2 line gap between
+  // two nearby edits) just render inline, matching how the screenshot reads.
+  const DIFF_COLLAPSE_THRESHOLD = 3;
+  function buildDiffBody(diffText) {
+    const rows = parseDiffRows(diffText);
+    markWordDiffs(rows);
+    const body = el("div", "diff-file-body");
+    let i = 0;
+    while (i < rows.length) {
+      if (rows[i].type === "ctx") {
+        let j = i;
+        while (j < rows.length && rows[j].type === "ctx") j++;
+        const run = rows.slice(i, j);
+        if (run.length >= DIFF_COLLAPSE_THRESHOLD) {
+          const wrap = el("div", "diff-ctx-run collapsed");
+          const bar = el("div", "diff-collapsed-bar");
+          const ic = el("span", "diff-collapsed-ic");
+          ic.innerHTML = ICON("caret-down", 12);
+          bar.appendChild(ic);
+          bar.appendChild(document.createTextNode(`${run.length} unmodified line${run.length === 1 ? "" : "s"}`));
+          bar.addEventListener("click", () => wrap.classList.toggle("collapsed"));
+          wrap.appendChild(bar);
+          const lines = el("div", "diff-ctx-lines");
+          for (const r of run) lines.appendChild(diffLineRow(r));
+          wrap.appendChild(lines);
+          body.appendChild(wrap);
+        } else {
+          for (const r of run) body.appendChild(diffLineRow(r));
+        }
+        i = j;
+      } else {
+        body.appendChild(diffLineRow(rows[i]));
+        i++;
+      }
+    }
+    return body;
+  }
+
+  // One gutter number per row (like the reference): the old line number for
+  // deletions, the new one for everything else. Color carries the +/- meaning
+  // — no sign column.
+  function diffLineRow(r) {
+    const row = el("div", "diff-line diff-line-" + r.type);
+    const no = r.type === "del" ? r.oldNo : r.newNo;
+    row.appendChild(el("span", "diff-lineno", no != null ? String(no) : ""));
+    const code = el("span", "diff-code");
+    if (r.hl) {
+      const cls = r.type === "add" ? "diff-word-add" : "diff-word-del";
+      let pos = 0;
+      for (const [s, e] of r.hl) {
+        if (s > pos) code.appendChild(document.createTextNode(r.text.slice(pos, s)));
+        code.appendChild(el("span", cls, r.text.slice(s, e)));
+        pos = e;
+      }
+      if (pos < r.text.length) code.appendChild(document.createTextNode(r.text.slice(pos)));
+    } else {
+      code.textContent = r.text;
+    }
+    row.appendChild(code);
+    return row;
+  }
+
   // The setup chips (folder/branch) only make sense before a conversation
   // begins — once the active chat has any messages, fold them away.
   function updateSetup() {
@@ -3219,6 +3619,15 @@
   // Ask the host for the branch list + current branch of a chat's working dir.
   function requestBranches(chat) {
     if (chat && chat.cwd) post({ type: "gitBranches", id: chat.id, cwd: chat.cwd });
+  }
+
+  // ---- git status bar + diff drawer ------------------------------------------
+  // Ask the host for the working-tree diff vs HEAD (+ untracked files), so the
+  // status bar can show a +insertions/-deletions badge and the drawer can render
+  // the actual per-file diff. Refreshed on session start/folder change and after
+  // every turn ends (see endTurn) — that's when Claude's edits actually land.
+  function requestGitDiff(chat) {
+    if (chat && chat.cwd) post({ type: "gitDiff", id: chat.id, cwd: chat.cwd });
   }
 
   function toggleBranchMenu() {
@@ -3272,10 +3681,16 @@
     chat.isRepo = false;
     chat.branch = null;
     chat.branches = [];
+    chat.diffFiles = [];
+    chat.diffInsertions = 0;
+    chat.diffDeletions = 0;
+    chat.diffDrawerOpen = false;
+    chat.diffCollapsedFiles.clear();
     savePrefs();
     if (chat.id === activeId) syncComposer();
     resetChatSession(chat);
     requestBranches(chat);
+    requestGitDiff(chat);
     renderTabs();
   }
 
@@ -3409,17 +3824,30 @@
     els.hostBannerText = root.querySelector("#host-outdated-text");
     els.hostBannerCopy = root.querySelector("#host-outdated-copy");
     els.hostBannerIc = root.querySelector("#host-outdated-ic");
+    els.gitBar = root.querySelector("#git-status-bar");
+    els.gitBarBranch = root.querySelector("#git-bar-branch");
+    els.gitStatusBadge = root.querySelector("#git-status-badge");
+    els.gitStatAdd = root.querySelector("#git-stat-add");
+    els.gitStatDel = root.querySelector("#git-stat-del");
+    els.gitDrawer = root.querySelector("#git-diff-drawer");
+    els.gitDrawerBody = root.querySelector("#git-diff-drawer-body");
+    els.gitDrawerClose = root.querySelector("#git-diff-drawer-close");
 
     // Static icons.
     root.querySelector("#new-chat-btn").innerHTML = ICON("plus", 17);
     root.querySelector("#history-btn").innerHTML = ICON("history", 17);
     root.querySelector("#folder-ic").innerHTML = ICON("folder", 14);
     root.querySelector("#branch-ic").innerHTML = ICON("git-branch", 13);
+    root.querySelector("#git-bar-ic").innerHTML = ICON("git-branch", 12);
+    els.gitDrawerClose.innerHTML = ICON("x", 14);
     els.hostBannerCopy.innerHTML = ICON("copy", 13);
     wireCopyButton(els.hostBannerCopy, () => els.hostBannerCopy.dataset.cmd, 13);
     els.send.innerHTML = ICON("send", 16);
     els.stop.innerHTML = ICON("stop", 14);
     els.attachFileBtn.innerHTML = ICON("plus", 15);
+
+    els.gitStatusBadge.addEventListener("click", toggleDiffDrawer);
+    els.gitDrawerClose.addEventListener("click", closeDiffDrawer);
 
     els.send.addEventListener("click", sendPrompt);
     els.stop.addEventListener("click", interrupt);
@@ -3595,7 +4023,18 @@
         </div>
       </div>
     </div>
-    <div id="chat-stack" class="chat-stack"></div>
+    <div id="chat-stack" class="chat-stack">
+      <!-- Diff drawer: absolutely positioned over the whole chat stack, so
+           opening it reads as the flap below expanding up to the top of the
+           chat. Hidden entirely when the cwd has no uncommitted changes. -->
+      <div id="git-diff-drawer" class="git-diff-drawer hidden">
+        <!-- No title row — the flap right below already shows branch + stats. -->
+        <div class="git-diff-drawer-head">
+          <button id="git-diff-drawer-close" class="icon-btn" title="Close"></button>
+        </div>
+        <div id="git-diff-drawer-body" class="git-diff-drawer-body"></div>
+      </div>
+    </div>
     <div class="composer">
       <div id="slash-menu" class="slash-menu hidden"></div>
       <div id="mode-menu" class="mode-menu hidden"></div>
@@ -3611,6 +4050,18 @@
           <span class="branch-label">main</span>
         </button>
         <div id="branch-menu" class="branch-menu hidden"></div>
+      </div>
+      <!-- Uncommitted-changes tab: a strokeless flap the same width as the
+           composer box, rounded to match its top corners, tucked flush against
+           it — reads as sticking out from under the input rather than a
+           separate bar (see #git-status-bar + .composer-box in panel.css). -->
+      <div id="git-status-bar" class="git-status-bar hidden">
+        <span id="git-bar-ic" class="git-bar-ic"></span>
+        <span id="git-bar-branch" class="git-bar-branch">main</span>
+        <span class="git-bar-spacer"></span>
+        <button id="git-status-badge" class="git-status-badge" title="View uncommitted changes">
+          <span id="git-stat-add" class="git-stat-add">+0</span><span id="git-stat-del" class="git-stat-del">-0</span>
+        </button>
       </div>
       <div class="composer-box">
         <div id="context-chips" class="context-chips hidden"></div>

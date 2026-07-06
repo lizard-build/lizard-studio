@@ -185,6 +185,8 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* Sit on the same left line as the row texts below (12px icon column + 6px gap). */
+  padding-left: 18px;
 }
 .chat-tab-tip-row {
   display: flex;
@@ -199,7 +201,11 @@ body {
   text-overflow: ellipsis;
 }
 .chat-tab-tip-row svg {
-  flex: 0 0 auto;
+  /* Fixed 12px icon column — icons render at 11–12px, so pin the box width
+     (preserveAspectRatio centers the smaller ones) and every row's text
+     starts on the same left line. */
+  flex: 0 0 12px;
+  width: 12px;
   color: var(--text-tertiary);
 }
 
@@ -858,7 +864,6 @@ body {
   flex-direction: column;
   gap: 14px;
   background: var(--bg-secondary);
-  border: 1px solid var(--border-primary);
   border-radius: 10px;
   padding: 12px 14px;
 }
@@ -866,7 +871,6 @@ body {
   font-size: 11px;
   font-weight: 600;
   color: var(--text-tertiary);
-  text-transform: uppercase;
   letter-spacing: 0.02em;
 }
 .usage-row { display: flex; flex-direction: column; gap: 6px; }
@@ -896,7 +900,7 @@ body {
 .usage-bar-fill {
   height: 100%;
   border-radius: 999px;
-  background: var(--other-blue);
+  background: var(--control-primary);
 }
 .usage-row-resets {
   font-size: 11.5px;
@@ -1446,6 +1450,204 @@ code.inline {
 }
 @keyframes ts-caret { 0%,100% { opacity: 0; } 50% { opacity: 1; } }
 
+/* ---- git status bar: persistent (unlike .chat-setup) +ins/-del badge ----
+   A strokeless flap that sticks out from UNDER the composer box (Gemini
+   "Sharing …" header style): same width, top corners rounded to the box's
+   radius, and its bottom tucked behind the box via negative margin — the box
+   keeps its own full rounded corners and just overlaps the flap, so the two
+   read as one shape with the box's top border as the seam. */
+.git-status-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px 21px;
+  margin-bottom: -14px;
+  border-radius: 14px 14px 0 0;
+  background: var(--bg-secondary);
+}
+.git-bar-ic { display: inline-flex; color: var(--text-tertiary); flex: 0 0 auto; }
+.git-bar-branch {
+  font-family: var(--font-family);
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git-bar-spacer { flex: 1 1 auto; }
+.git-status-badge {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: none;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.git-status-badge:hover { background: rgba(255, 255, 255, 0.09); }
+.git-stat-add { color: var(--control-primary); }
+.git-stat-del { color: var(--other-red); }
+
+/* ---- diff drawer: full per-file diff, opened from the status badge ----
+   Overlays the whole chat stack: same width as the flap below and fused to
+   it (both --bg-secondary, strokeless), reaching up to the top of the chat.
+   Rises out of the flap when opened. */
+.git-diff-drawer {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 8px;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px 14px 0 0;
+  background: var(--bg-secondary);
+  animation: drawer-rise 0.18s ease;
+}
+@keyframes drawer-rise {
+  from { transform: translateY(18px); opacity: 0.3; }
+  to { transform: none; opacity: 1; }
+}
+/* While open, square the flap's top corners — the drawer's bottom edge sits
+   exactly on it, so drawer + flap + composer read as one sheet. */
+.chat-stack:has(.git-diff-drawer:not(.hidden)) ~ .composer .git-status-bar {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+/* Slim top row holding only the close button — no title, the flap below
+   already names the branch and shows the stats. */
+.git-diff-drawer-head {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 6px 2px;
+}
+.git-diff-drawer-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-primary) transparent;
+}
+
+/* File header: a lighter full-width strip — caret, name, +N -M right after it.
+   Solid color (not rgba) because it's sticky and scrolls over diff lines. */
+.diff-file-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: #1e1e1e;
+  cursor: pointer;
+  user-select: none;
+  font-family: var(--font-family);
+}
+.diff-file-head:hover { background: #242424; }
+.diff-file-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  transition: transform 0.15s ease;
+}
+.diff-file.collapsed .diff-file-toggle { transform: rotate(-90deg); }
+.diff-file.collapsed .diff-file-body,
+.diff-file.collapsed .diff-file-binary { display: none; }
+.diff-file-path {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diff-file-add,
+.diff-file-del {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 500;
+}
+.diff-file-add { color: var(--control-primary); }
+.diff-file-del { color: var(--other-red); }
+.diff-file-binary { padding: 10px 16px 12px 56px; font-size: 12px; color: var(--text-tertiary); }
+
+.diff-file-body {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 2px 0 10px;
+}
+/* One line-number gutter (old № for deletions, new № otherwise), wrapped code,
+   and a colored spine on the left edge: solid green for adds, dashed red for
+   deletions — matching the reference. */
+.diff-line {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  padding-right: 12px;
+}
+.diff-line-add { background: rgba(16, 185, 129, 0.09); }
+.diff-line-del { background: rgba(239, 68, 68, 0.09); }
+.diff-line-add::before,
+.diff-line-del::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+}
+.diff-line-add::before { background: var(--control-primary); }
+.diff-line-del::before { background: repeating-linear-gradient(to bottom, var(--other-red) 0 4px, transparent 4px 7px); }
+.diff-lineno {
+  flex: 0 0 auto;
+  width: 44px;
+  padding-right: 12px;
+  text-align: right;
+  color: var(--text-tertiary);
+  user-select: none;
+}
+.diff-line-add .diff-lineno { color: var(--control-primary); }
+.diff-line-del .diff-lineno { color: var(--other-red); }
+.diff-code {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* The changed words inside a modified line pair, tinted stronger. */
+.diff-word-add { background: rgba(16, 185, 129, 0.3); border-radius: 3px; }
+.diff-word-del { background: rgba(239, 68, 68, 0.32); border-radius: 3px; }
+
+.diff-ctx-run.collapsed .diff-ctx-lines { display: none; }
+.diff-collapsed-bar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 16px;
+  font-family: var(--font-family);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.diff-collapsed-bar:hover { color: var(--text-primary); }
+.diff-collapsed-ic { display: inline-flex; color: var(--text-tertiary); transition: transform 0.15s ease; }
+.diff-ctx-run.collapsed .diff-collapsed-ic { transform: rotate(180deg); }
+
 /* composer — single unified box with an inline control row (Cursor-style) */
 .composer {
   position: relative;
@@ -1488,6 +1690,8 @@ code.inline {
 }
 .slash-item.active .slash-cmd { color: var(--text-primary); }
 .composer-box {
+  /* Positioned so it paints over the git-status-bar flap tucked under it. */
+  position: relative;
   background: var(--bg-secondary);
   border: 1px solid var(--border-primary);
   border-radius: 14px;
