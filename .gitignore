@@ -4,5 +4,7 @@ src/host/host-config.json
 src/host/launch.sh
 src/host/host.log
 src/host/shell-env.json
+# Generated at runtime by claude-host.mjs (quarantine-free spawn shim).
+src/host/spawn-shim.mjs
 
 .DS_Store

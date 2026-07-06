@@ -56,9 +56,11 @@ curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src
 
 Already have the repo checked out? `bash src/host/install.sh` is equivalent (and `--uninstall` removes it).
 
-It resolves your `node` and `claude` paths, copies the host to `~/.lizard-code/host`, and registers the origin-locked `com.lizard.code` manifest. Reload the extension and the panel connects automatically. Requires the Claude Code CLI (`npm i -g @anthropic-ai/claude-code`).
+It resolves your `node` and `claude` paths, copies the host to `~/.lizard-studio/host`, and registers the origin-locked `com.lizard.code` manifest. Reload the extension and the panel connects automatically. Requires the Claude Code CLI (`npm i -g @anthropic-ai/claude-code`).
 
-> The host runs from `~/.lizard-code/host`, **not** from the repo, on purpose: macOS TCC blocks browsers from launching native-messaging hosts under `~/Desktop`, `~/Documents`, or `~/Downloads` — they fail with a baffling *"Native host has exited"*. Re-run `install.sh` after `git pull` to refresh the copy. Logs: `~/.lizard-code/host/host.log`.
+> The host runs from `~/.lizard-studio/host`, **not** from the repo, on purpose: macOS TCC blocks browsers from launching native-messaging hosts under `~/Desktop`, `~/Documents`, or `~/Downloads` — they fail with a baffling *"Native host has exited"*. Re-run `install.sh` after `git pull` to refresh the copy. Logs: `~/.lizard-studio/host/host.log`.
+
+> **No Gatekeeper pop-ups, by design.** Chrome carries macOS's `LSFileQuarantineEnabled` flag, and the OS propagates it down the whole process tree — so a `claude` spawned the naive way writes quarantined files, and the native modules it extracts at runtime trip a *"could not verify … is free of malware"* dialog on every session ([claude-code#14911](https://github.com/anthropics/claude-code/issues/14911)). The host sidesteps this by launching every `claude` through `launchd` (a tiny self-materialized shim + `launchctl submit`, stdio relayed over a localhost socket), which starts the process outside Chrome's quarantine context. If the launchd path fails, it silently falls back to a direct spawn — the chat always works.
 
 ## Architecture
 
@@ -67,7 +69,7 @@ It resolves your `node` and `claude` paths, copies the host to `~/.lizard-code/h
 - `src/toolbar.js` — the floating toolbar; `src/main.js` — state restore + toggle command.
 - `src/background.js` — service worker: toolbar toggle, side-panel open/close, capture + chat relays.
 - `src/panel/` — the side-panel app: `chat.js` (Claude Code client: streaming, tool cards, permission asks, browser-tool executor over `chrome.debugger`/CDP), `render.js` (XSS-safe markdown / highlighting / diffs), `panel.{html,js,css}`. A terminal view (`terminal.js` + vendored xterm) is kept in the codebase but currently disabled in the UI.
-- `src/host/` — the native host: `claude-host.mjs` (spawns `claude` in stream-json mode, one process per chat tab; bridges permission control-requests and browser tool calls; replays transcripts; drives `/login`), `mcp-browser.mjs` (the MCP relay exposing `browser_*` tools), `install.sh`.
+- `src/host/` — the native host: `claude-host.mjs` (spawns `claude` in stream-json mode via launchd to dodge Chrome's quarantine propagation — see the Gatekeeper note above — one process per chat tab; bridges permission control-requests and browser tool calls; replays transcripts; drives `/login`), `mcp-browser.mjs` (the MCP relay exposing `browser_*` tools), `spawn-shim.mjs` (generated at runtime by the host), `install.sh`.
 
 No build step — plain JS loaded directly as content scripts and side-panel scripts.
 
