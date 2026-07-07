@@ -125,7 +125,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 15;
+  const EXPECTED_HOST_VERSION = 16;
 
   let els = {};
   let port = null;
@@ -325,6 +325,8 @@
       mode: opts.mode || lastMode,
       sessionId: opts.sessionId || null,
       slashCommands: [],
+      skills: [],
+      plugins: [],
       started: false,
       turnRunning: false,
       // A model/mode/effort switch made while a turn was running — applied
@@ -2703,6 +2705,8 @@
           if (Array.isArray(d.slash_commands)) {
             chat.slashCommands = d.slash_commands.includes("login") ? d.slash_commands : ["login", ...d.slash_commands];
           }
+          if (Array.isArray(d.skills)) chat.skills = d.skills;
+          if (Array.isArray(d.plugins)) chat.plugins = d.plugins.map((p) => ({ name: p.name, source: p.source }));
           if (d.model) reflectModel(chat, d.model);
           if (d.permissionMode) chat.mode = d.permissionMode;
           if (chat.id === activeId) syncComposer();
@@ -3083,8 +3087,12 @@
           // `/login` is handled by the panel (the headless CLI doesn't list it),
           // so make sure it's offered in the autocomplete menu.
           chat.slashCommands = msg.list.includes("login") ? msg.list : ["login", ...msg.list];
+          if (Array.isArray(msg.skills)) chat.skills = msg.skills;
+          if (Array.isArray(msg.plugins)) chat.plugins = msg.plugins;
           // If the user is mid-"/" in this tab, populate the menu now.
           if (chat.id === activeId && /^\/[^\s]*$/.test(els.input.value)) updateSlash();
+          // Refresh the Skills list if it's the open settings view.
+          if (chat.id === activeId && settingsOpen() && settingsTab === "config" && cfgKey === "skills") renderSettings();
         }
         break;
       case "exit":
@@ -4075,10 +4083,10 @@
 
   // ---- settings modal -------------------------------------------------------
   // A modal overlaying the whole panel, opened by the gear in the subbar, with
-  // a tab strip up top. Connection + About are read-only status; the single
-  // Config tab edits three on-disk files (CLAUDE.md / Hooks / MCP) through the
-  // host (the browser sandbox can't touch the filesystem itself), picked by an
-  // in-tab segmented control.
+  // a tab strip up top. Connection is read-only status; the single Config tab
+  // edits on-disk config through the host (the browser sandbox can't touch the
+  // filesystem) — CLAUDE.md / Hooks / MCP / Plugins editors plus a read-only
+  // Skills list — picked by an in-tab segmented control.
   const SETTINGS_TABS = [
     { id: "connection", label: "Connection" },
     { id: "config", label: "Config" },
@@ -4087,7 +4095,7 @@
   // picks the editor (raw text vs JSON); `label` is the segment caption;
   // `project`/`user` are the human-readable target paths. Keyed by the same id
   // the host's configResolve() understands.
-  const CONFIG_FILES = ["claudemd", "hooks", "mcp"];
+  const CONFIG_FILES = ["claudemd", "hooks", "mcp", "plugins", "skills"];
   const CONFIG_META = {
     claudemd: {
       title: "CLAUDE.md",
@@ -4117,6 +4125,21 @@
       user: "~/.claude.json → \"mcpServers\"",
       placeholder:
         '{\n  "playwright": {\n    "command": "npx",\n    "args": ["-y", "@playwright/mcp@latest"]\n  }\n}',
+    },
+    plugins: {
+      title: "Plugins",
+      label: "Plugins",
+      format: "json",
+      blurb: "Enable or disable installed plugins. A JSON object of \"name@marketplace\": true/false.",
+      project: "<project>/.claude/settings.json → \"enabledPlugins\"",
+      user: "~/.claude/settings.json → \"enabledPlugins\"",
+      placeholder: '{\n  "frontend-design@claude-code-plugins": true\n}',
+    },
+    skills: {
+      title: "Skills",
+      label: "Skills",
+      readonly: true,
+      blurb: "Skills available to Claude in this project, discovered from ~/.claude/skills, the project's .claude/skills, and installed plugins. Edit them at their source files.",
     },
   };
   let settingsTab = "connection";
@@ -4204,19 +4227,32 @@
     const meta = CONFIG_META[cfgKey];
     const sec = el("div", "settings-section");
 
-    // Segmented control choosing which of the three files to edit. Switching
-    // discards the current file's unsaved edits (same as leaving the tab).
+    // Segmented control choosing which file/view to show. Switching discards
+    // the current file's unsaved edits (same as leaving the tab).
     const files = el("div", "settings-filepick");
     for (const k of CONFIG_FILES) {
       const b = el("button", "settings-filepick-btn" + (k === cfgKey ? " active" : ""), CONFIG_META[k].label);
       b.addEventListener("click", () => {
         if (k === cfgKey) return;
         cfgKey = k;
-        loadConfig(k, (cfgEdit && cfgEdit.scope) || "project");
+        if (CONFIG_META[k].readonly) {
+          cfgEdit = null;
+          renderSettings();
+        } else {
+          loadConfig(k, (cfgEdit && cfgEdit.scope) || "project");
+        }
       });
       files.appendChild(b);
     }
     sec.appendChild(files);
+
+    // Read-only view (Skills): no file, scope, or editor — just a list.
+    if (meta.readonly) {
+      sec.appendChild(el("div", "settings-blurb", meta.blurb));
+      renderSkillsList(sec);
+      els.settingsBody.appendChild(sec);
+      return;
+    }
 
     // First open (or a stale editor from another file): kick off a load;
     // loadConfig() re-renders (repainting this whole section) once the request
@@ -4239,7 +4275,7 @@
     }
     sec.appendChild(toggle);
     sec.appendChild(el("div", "settings-path", cfgEdit.scope === "project" ? meta.project : meta.user));
-    // All three files are read by claude at session start, not mid-turn.
+    // These files are read by claude at session start, not mid-turn.
     sec.appendChild(el("div", "settings-note", "Applies to new or restarted chats."));
 
     if (cfgEdit.loading) {
@@ -4302,7 +4338,39 @@
     revert.classList.toggle("hidden", !dirty());
 
     sec.appendChild(actions);
+
+    // For the plugins editor, list the installed plugins so the user knows the
+    // exact "name@marketplace" keys to toggle. Each plugin's `source` is that key.
+    if (cfgKey === "plugins") renderInstalledPlugins(sec);
+
     els.settingsBody.appendChild(sec);
+  }
+
+  // Read-only list of the skills available in the active chat (populated by the
+  // host's command harvest / the session init event).
+  function renderSkillsList(sec) {
+    const chat = chats.get(activeId);
+    const skills = (chat && Array.isArray(chat.skills) ? chat.skills.slice() : []).sort((a, b) => a.localeCompare(b));
+    if (!skills.length) {
+      sec.appendChild(el("div", "settings-note", "No skills loaded yet — open or start a chat in this folder first."));
+      return;
+    }
+    sec.appendChild(el("div", "settings-note", skills.length + (skills.length === 1 ? " skill" : " skills")));
+    const list = el("div", "settings-list");
+    for (const s of skills) list.appendChild(el("div", "settings-list-row", s));
+    sec.appendChild(list);
+  }
+
+  // Reference list under the plugins editor: the installed plugins and their
+  // enable-key (source), so the user can copy the exact string into the JSON.
+  function renderInstalledPlugins(sec) {
+    const chat = chats.get(activeId);
+    const plugins = (chat && Array.isArray(chat.plugins) ? chat.plugins : []).filter((p) => p && p.source);
+    if (!plugins.length) return;
+    sec.appendChild(el("div", "settings-note", "Installed"));
+    const list = el("div", "settings-list");
+    for (const p of plugins) list.appendChild(el("div", "settings-list-row", p.source));
+    sec.appendChild(list);
   }
 
   // A read-only key → value line for the Connection tab.

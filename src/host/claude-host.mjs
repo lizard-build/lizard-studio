@@ -42,7 +42,7 @@
 //   { type:"checkoutBranch", id, cwd, branch }                     git checkout <branch>
 //   { type:"gitDiff", id, cwd }                                    working-tree diff vs HEAD (+ untracked files)
 //   { type:"configRead",  id, key, scope, cwd }                    read a settings file (→ configRead reply).
-//                                                                 key: "claudemd" | "hooks" | "mcp";
+//                                                                 key: "claudemd" | "hooks" | "mcp" | "plugins";
 //                                                                 scope: "project" | "user"
 //   { type:"configWrite", id, key, scope, cwd, content }           write it back (→ configWrite reply). For
 //                                                                 hooks/mcp `content` is the JSON sub-object,
@@ -168,7 +168,7 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v12: killShell / probeShellPort (surgical background-shell stop + port probe).
 // v13: bashExec / bashKill (composer "!" bash mode — local one-off shell runs).
 // v14: kill/probe reach a dev server orphaned after a panel reopen (by port).
-const HOST_VERSION = 15;
+const HOST_VERSION = 16;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -1348,13 +1348,17 @@ function killBashForSession(id) {
 // harvest it up front with a throwaway claude that we kill the instant init
 // arrives (before the model is ever queried, so it costs nothing). Cached per
 // cwd, since the command set is determined by the working directory.
-const commandCache = new Map();   // cwd -> string[]
+const commandCache = new Map();   // cwd -> { list, skills, plugins }
 const harvestWaiters = new Map(); // cwd -> Set of tab ids awaiting an in-flight harvest
+
+function sendCommands(id, data) {
+  send({ type: "commands", id, list: data.list, skills: data.skills, plugins: data.plugins });
+}
 
 function ensureCommands(id, cwd, model) {
   cwd = cwd || homedir();
   if (commandCache.has(cwd)) {
-    send({ type: "commands", id, list: commandCache.get(cwd) });
+    sendCommands(id, commandCache.get(cwd));
     return;
   }
   // A harvest for this cwd is already running — two tabs opening in the same
@@ -1398,11 +1402,14 @@ function harvestCommands(cwd, model) {
   const feed = lineJsonReader((o) => {
     if (done) return;
     if (o.type === "system" && o.subtype === "init" && Array.isArray(o.slash_commands)) {
-      commandCache.set(cwd, o.slash_commands);
-      for (const wid of harvestWaiters.get(cwd) || []) {
-        send({ type: "commands", id: wid, list: o.slash_commands });
-      }
-      log("harvested", o.slash_commands.length, "commands for", cwd);
+      const data = {
+        list: o.slash_commands,
+        skills: Array.isArray(o.skills) ? o.skills : [],
+        plugins: Array.isArray(o.plugins) ? o.plugins.map((p) => ({ name: p.name, source: p.source })) : [],
+      };
+      commandCache.set(cwd, data);
+      for (const wid of harvestWaiters.get(cwd) || []) sendCommands(wid, data);
+      log("harvested", data.list.length, "commands,", data.skills.length, "skills,", data.plugins.length, "plugins for", cwd);
       finish();
     }
   });
@@ -1917,6 +1924,8 @@ function configResolve(key, scope, cwd) {
       return { path: proj ? join(cwd, ".claude", "settings.json") : join(USER_CLAUDE_DIR, "settings.json"), kind: "json", subkey: "hooks" };
     case "mcp":
       return { path: proj ? join(cwd, ".mcp.json") : join(homedir(), ".claude.json"), kind: "json", subkey: "mcpServers" };
+    case "plugins":
+      return { path: proj ? join(cwd, ".claude", "settings.json") : join(USER_CLAUDE_DIR, "settings.json"), kind: "json", subkey: "enabledPlugins" };
     default:
       return null;
   }

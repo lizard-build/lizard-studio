@@ -2483,7 +2483,8 @@ code.inline {
 .settings-kv-dot.bad { background: var(--other-red); }
 
 /* Config editors (CLAUDE.md / Hooks / MCP). */
-/* File picker: full-width segmented control choosing which file to edit. */
+/* File picker: segmented control choosing which file/view to show. Segments
+   size to their labels and the strip scrolls if they outgrow the modal. */
 .settings-filepick {
   display: flex;
   gap: 3px;
@@ -2492,9 +2493,12 @@ code.inline {
   background: var(--bg-primary, rgba(0, 0, 0, 0.25));
   border: 1px solid var(--border-primary);
   border-radius: 10px;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+.settings-filepick::-webkit-scrollbar { height: 0; }
 .settings-filepick-btn {
-  flex: 1 1 0;
+  flex: 0 0 auto;
   appearance: none;
   border: none;
   background: transparent;
@@ -2502,9 +2506,10 @@ code.inline {
   font-family: var(--font-family);
   font-size: 12.5px;
   font-weight: 600;
-  padding: 7px 8px;
+  padding: 7px 12px;
   border-radius: 7px;
   cursor: pointer;
+  white-space: nowrap;
   transition: background 0.12s, color 0.12s;
 }
 .settings-filepick-btn:hover { color: var(--text-primary); }
@@ -2553,6 +2558,21 @@ code.inline {
   word-break: break-all;
 }
 .settings-note { font-size: 11px; color: var(--text-tertiary); margin-bottom: 10px; }
+/* Read-only lists (Skills; installed-plugins reference under the editor). */
+.settings-list {
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.settings-list-row {
+  font-size: 12px;
+  color: var(--text-primary);
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-secondary);
+  word-break: break-all;
+}
+.settings-list-row:first-child { border-top: none; }
 .settings-loading { font-size: 12.5px; color: var(--text-tertiary); padding: 8px 0; }
 .settings-editor {
   display: block;
