@@ -2471,16 +2471,16 @@ code.inline {
 .settings-kv-val {
   font-size: 12px;
   color: var(--text-primary);
-  font-family: var(--font-mono);
+  font-family: var(--font-family);
   text-align: right;
   word-break: break-all;
 }
 
-/* Host-status value cell: a small colored dot + text, inline in the kv row. */
+/* Host-status value cell: a small solid dot + text, inline in the kv row. */
 .settings-kv-status { display: inline-flex; align-items: center; gap: 7px; }
 .settings-kv-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
-.settings-kv-dot.ok { background: var(--control-primary); box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18); }
-.settings-kv-dot.bad { background: var(--other-red); box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.18); }
+.settings-kv-dot.ok { background: var(--control-primary); }
+.settings-kv-dot.bad { background: var(--other-red); }
 
 /* Config editors (CLAUDE.md / Hooks / MCP). */
 /* File picker: full-width segmented control choosing which file to edit. */
@@ -2547,7 +2547,7 @@ code.inline {
 }
 .settings-path {
   font-size: 11px;
-  font-family: var(--font-mono);
+  font-family: var(--font-family);
   color: var(--text-tertiary);
   margin-bottom: 10px;
   word-break: break-all;
