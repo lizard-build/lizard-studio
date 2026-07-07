@@ -4082,7 +4082,6 @@
   const SETTINGS_TABS = [
     { id: "connection", label: "Connection" },
     { id: "config", label: "Config" },
-    { id: "about", label: "About" },
   ];
   // The files the Config tab can edit, in segmented-control order. `format`
   // picks the editor (raw text vs JSON); `label` is the segment caption;
@@ -4165,9 +4164,8 @@
       els.settingsTabs.appendChild(btn);
     }
     els.settingsBody.innerHTML = "";
-    if (settingsTab === "connection") renderSettingsConnection();
-    else if (settingsTab === "about") renderSettingsAbout();
-    else if (settingsTab === "config") renderSettingsConfig();
+    if (settingsTab === "config") renderSettingsConfig();
+    else renderSettingsConnection();
   }
 
   // ---- config editors (CLAUDE.md / Hooks / MCP) -----------------------------
@@ -4307,7 +4305,7 @@
     els.settingsBody.appendChild(sec);
   }
 
-  // A read-only key → value line for the Connection / About tabs.
+  // A read-only key → value line for the Connection tab.
   function settingsKV(key, value) {
     const row = el("div", "settings-kv");
     row.appendChild(el("span", "settings-kv-key", key));
@@ -4319,33 +4317,20 @@
     const sec = el("div", "settings-section");
     sec.appendChild(el("div", "settings-section-title", "Host connection"));
 
+    // Status as a key → value row (same format as the version rows), with a
+    // small colored dot in the value carrying the connected/disconnected cue.
     const ok = connected && hostReady;
-    const stat = el("div", "settings-status " + (ok ? "ok" : "bad"));
-    stat.appendChild(el("span", "settings-status-dot"));
-    stat.appendChild(el("span", "settings-status-text", ok ? "Connected" : connected ? "Connecting…" : "Not connected"));
-    sec.appendChild(stat);
+    const statusRow = el("div", "settings-kv");
+    statusRow.appendChild(el("span", "settings-kv-key", "Native host"));
+    const val = el("span", "settings-kv-val settings-kv-status");
+    val.appendChild(el("span", "settings-kv-dot " + (ok ? "ok" : "bad")));
+    val.appendChild(document.createTextNode(ok ? "Connected" : connected ? "Connecting…" : "Not connected"));
+    statusRow.appendChild(val);
+    sec.appendChild(statusRow);
 
     sec.appendChild(settingsKV("Host version", hostVersion ? String(hostVersion) : "—"));
     sec.appendChild(settingsKV("Required version", String(EXPECTED_HOST_VERSION)));
-    if (home) sec.appendChild(settingsKV("Home", shortPath(home)));
     els.settingsBody.appendChild(sec);
-  }
-
-  function renderSettingsAbout() {
-    const sec = el("div", "settings-section");
-    const brand = el("div", "settings-brand");
-    brand.appendChild(el("span", "settings-brand-mark")).innerHTML = window.RKLizardHTML(28);
-    const bmeta = el("div", "settings-brand-meta");
-    bmeta.appendChild(el("div", "settings-brand-name", "Lizard Studio"));
-    bmeta.appendChild(el("div", "settings-brand-sub", "Claude Code, in your browser."));
-    brand.appendChild(bmeta);
-    sec.appendChild(brand);
-    els.settingsBody.appendChild(sec);
-
-    const dsec = el("div", "settings-section");
-    dsec.appendChild(settingsKV("Panel protocol", String(EXPECTED_HOST_VERSION)));
-    dsec.appendChild(settingsKV("Host protocol", hostVersion ? String(hostVersion) : "—"));
-    els.settingsBody.appendChild(dsec);
   }
 
   function syncComposer() {

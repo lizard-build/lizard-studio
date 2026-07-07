@@ -2476,21 +2476,11 @@ code.inline {
   word-break: break-all;
 }
 
-.settings-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-.settings-status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex: 0 0 auto;
-}
-.settings-status.ok .settings-status-dot { background: var(--control-primary); box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18); }
-.settings-status.bad .settings-status-dot { background: var(--other-red); box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.18); }
-.settings-status-text { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+/* Host-status value cell: a small colored dot + text, inline in the kv row. */
+.settings-kv-status { display: inline-flex; align-items: center; gap: 7px; }
+.settings-kv-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+.settings-kv-dot.ok { background: var(--control-primary); box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18); }
+.settings-kv-dot.bad { background: var(--other-red); box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.18); }
 
 /* Config editors (CLAUDE.md / Hooks / MCP). */
 /* File picker: full-width segmented control choosing which file to edit. */
@@ -2632,9 +2622,3 @@ code.inline {
 .settings-msg.ok { color: var(--control-primary); }
 .settings-msg.bad { color: var(--other-red); }
 .settings-msg.dim { color: var(--text-tertiary); }
-
-/* About header. */
-.settings-brand { display: flex; align-items: center; gap: 12px; }
-.settings-brand-mark { display: inline-flex; color: var(--control-primary); flex: 0 0 auto; }
-.settings-brand-name { font-size: 15px; font-weight: 600; color: var(--text-primary); }
-.settings-brand-sub { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
