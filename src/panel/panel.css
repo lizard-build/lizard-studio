@@ -1820,6 +1820,19 @@ code.inline {
   font-weight: 500;
   color: var(--text-tertiary);
 }
+/* "View transcript" — sized like the stats beside it, green to read as a link. */
+.task-card-link {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: var(--font-family);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--control-primary);
+  cursor: pointer;
+}
+.task-card-link:hover { text-decoration: underline; }
 /* Clickable served address — muted like a stat, links up on hover. */
 .task-card-url {
   appearance: none;
