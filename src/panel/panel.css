@@ -2562,33 +2562,43 @@ code.inline {
   gap: 10px;
   margin-top: 10px;
 }
+/* Save = secondary (neutral fill); Revert = shadow button (borderless, soft
+   raised shadow) so it reads a step quieter than Save. */
 .settings-save-btn {
   appearance: none;
   border: none;
   border-radius: 8px;
-  background: var(--control-primary);
-  color: #fff;
+  background: var(--control-secondary);
+  color: var(--text-primary);
   font-family: var(--font-family);
   font-size: 12.5px;
   font-weight: 600;
   padding: 7px 16px;
   cursor: pointer;
-  transition: opacity 0.12s;
+  transition: background 0.12s, opacity 0.12s;
 }
+.settings-save-btn:hover:not(:disabled) { background: var(--control-secondary-hover); }
+.settings-save-btn:active:not(:disabled) { transform: scale(0.97); }
 .settings-save-btn:disabled { opacity: 0.4; cursor: default; }
 .settings-revert-btn {
   appearance: none;
-  border: 1px solid var(--border-primary);
+  border: none;
   border-radius: 8px;
-  background: transparent;
+  background: var(--bg-secondary);
   color: var(--text-secondary);
   font-family: var(--font-family);
   font-size: 12.5px;
   font-weight: 600;
-  padding: 6px 14px;
+  padding: 7px 14px;
   cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 0 0 1px var(--border-primary);
+  transition: box-shadow 0.12s, color 0.12s;
 }
-.settings-revert-btn:hover { color: var(--text-primary); border-color: var(--control-secondary-hover); }
+.settings-revert-btn:hover {
+  color: var(--text-primary);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5), inset 0 0 0 1px var(--control-secondary-hover);
+}
+.settings-revert-btn:active { transform: scale(0.97); }
 .settings-msg { font-size: 12px; }
 .settings-msg.ok { color: var(--control-primary); }
 .settings-msg.bad { color: var(--other-red); }
