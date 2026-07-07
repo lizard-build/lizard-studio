@@ -1377,20 +1377,25 @@ code.inline {
 /* Composer "!" bash-mode runs — a terminal-style card in the transcript. */
 .bash-run { margin: 2px 0; }
 .bash-run-card {
-  border: 1px solid var(--border-primary);
-  border-radius: 10px;
-  background: var(--bg-secondary);
-  overflow: hidden;
+  /* .bash-run is a flex row — without this the card shrinks to its widest
+     output line instead of filling the width (like .msg-user .bubble does). */
+  width: 100%;
+  min-width: 0;
   font-family: var(--font-mono);
   font-size: 12px;
 }
+/* The command echoes as a bordered bubble — same shape as a sent user
+   message — and the output/foot sit below it, borderless, like model logs. */
 .bash-run-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-secondary);
+  border-radius: 10px;
 }
-.bash-run-prompt { color: #a855f7; font-weight: 600; flex: 0 0 auto; }
+.bash-run-prompt { color: var(--control-primary); font-weight: 600; flex: 0 0 auto; }
 .bash-run-cmd {
   flex: 1 1 auto;
   min-width: 0;
@@ -1402,8 +1407,8 @@ code.inline {
   flex: 0 0 auto;
   width: 11px;
   height: 11px;
-  border: 2px solid rgba(168, 85, 247, 0.3);
-  border-top-color: #a855f7;
+  border: 2px solid rgba(16, 185, 129, 0.3);
+  border-top-color: var(--control-primary);
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
 }
@@ -1422,24 +1427,33 @@ code.inline {
   transition: background 0.12s, color 0.12s;
 }
 .bash-run-stop:hover { background: var(--other-red); color: #fff; }
+/* Output sits below the command bubble. The finished run renders a shared
+   codeBlock (its own bg/copy button); the live <pre> mirrors that look. */
+.bash-run-body { margin: 6px 0 0; }
+.bash-run-body .code-block { margin: 0; }
+/* The line-count label is UI chrome, not shell text — keep it in Inter, not
+   the mono the card otherwise inherits. */
+.bash-run-body .result-label { font-family: var(--font-family); }
 .bash-run-out {
   margin: 0;
-  padding: 8px 10px;
+  padding: 10px 12px;
   max-height: 320px;
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   color: var(--text-secondary);
-  background: var(--bg-primary);
-  border-top: 1px solid var(--border-primary);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
 }
 .bash-run-out::-webkit-scrollbar { width: 8px; height: 8px; }
 .bash-run-out::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 4px; }
 .bash-run-err { color: var(--other-red); }
 .bash-run-foot {
-  padding: 5px 10px;
+  padding: 6px 2px 0;
   font-size: 11px;
-  border-top: 1px solid var(--border-primary);
 }
 .bash-run-foot.ok { color: var(--text-tertiary); }
 .bash-run-foot.err { color: var(--other-red); }
@@ -2089,7 +2103,7 @@ code.inline {
   padding: 0 8px;
   border: none;
   border-radius: 6px;
-  background: #a855f7;
+  background: var(--control-primary);
   color: #fff;
   font-family: var(--font-mono);
   font-size: 11.5px;
@@ -2098,12 +2112,12 @@ code.inline {
   cursor: pointer;
   transition: background 0.12s;
 }
-.bash-pill:hover { background: #9333ea; }
+.bash-pill:hover { background: var(--control-primary-hover); }
 .composer-box.bash-active .composer-input { padding-left: 56px; }
-.composer-box.bash-active { border-color: #a855f7; }
+.composer-box.bash-active { border-color: var(--control-primary); }
 .composer-box.bash-active:focus-within {
-  border-color: #a855f7;
-  box-shadow: 0 0 0 1px rgba(168, 85, 247, 0.35);
+  border-color: var(--control-primary);
+  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.35);
 }
 /* Page-element context chips (from the Selector tool), above the textarea. */
 .context-chips {

@@ -372,6 +372,13 @@
       bashMode: false,
       bashHistory: Array.isArray(opts.bashHistory) ? opts.bashHistory : [],
       bashRuns: new Map(),
+      // Finished bash-mode runs not yet seen by the model. Each real prompt
+      // silently folds these (command + output) into its context and clears the
+      // buffer — the model learns what you ran without a visible bubble or an
+      // extra turn, mirroring Claude Code's REPL bash mode. In-memory only (a
+      // panel reload drops it), so stale output from a past session never rides
+      // a fresh message; the runs themselves persist via bashHistory.
+      bashPending: [],
       // Page elements attached via the Selector tool, sent as context with the
       // next prompt, then cleared.
       contexts: [],
@@ -3347,27 +3354,48 @@
       head.appendChild(stopBtn);
     }
     card.appendChild(head);
-    const out = el("pre", "bash-run-out hidden");
-    card.appendChild(out);
+    // Output lives in its own container: a plain <pre> streams into it live,
+    // then finishBashRun swaps that for a highlighted codeBlock (copy button +
+    // line-count label) — the same treatment a model Bash result gets.
+    const body = el("div", "bash-run-body hidden");
+    const out = el("pre", "bash-run-out");
+    body.appendChild(out);
+    card.appendChild(body);
     const foot = el("div", "bash-run-foot hidden");
     card.appendChild(foot);
     row.appendChild(card);
-    return { row, outEl: out, footEl: foot, stopBtn, spin };
+    return { row, bodyEl: body, outEl: out, footEl: foot, stopBtn, spin };
+  }
+
+  // Render a finished run's output the way a model Bash result renders: a
+  // line-count label above long output, then a copyable, highlighted codeBlock.
+  // Empty output leaves the body hidden (the command bubble stands alone).
+  function renderBashOutput(bodyEl, text) {
+    bodyEl.innerHTML = "";
+    const t = text || "";
+    if (!t.trim()) { bodyEl.classList.add("hidden"); return; }
+    bodyEl.classList.remove("hidden");
+    const lines = t.split("\n");
+    if (lines.length > 16 || t.length > 1400) {
+      bodyEl.appendChild(el("div", "result-label", "Output · " + lines.length + " lines"));
+    }
+    bodyEl.appendChild(R.codeBlock(t, ""));
   }
 
   function bashFoot(footEl, code, signal, error) {
     footEl.className = "bash-run-foot";
     if (error) { footEl.classList.add("err"); footEl.textContent = error; return; }
     if (signal) { footEl.classList.add("err"); footEl.textContent = "Stopped"; return; }
-    if (code === 0 || code == null) { footEl.classList.add("ok"); footEl.textContent = "Exit 0"; }
-    else { footEl.classList.add("err"); footEl.textContent = "Exit " + code; }
+    // A clean exit needs no footer — the output already speaks for itself.
+    if (code === 0 || code == null) { footEl.className = "bash-run-foot hidden"; footEl.textContent = ""; return; }
+    footEl.classList.add("err"); footEl.textContent = "Exit " + code;
   }
 
   function runBash(chat, command) {
     const execId = newId();
     const ts = Date.now();
-    const { row, outEl, footEl, stopBtn, spin } = buildBashCard(command, { live: true });
-    const run = { row, outEl, footEl, stopBtn, spin, command, ts, outText: "", running: true };
+    const { row, bodyEl, outEl, footEl, stopBtn, spin } = buildBashCard(command, { live: true });
+    const run = { row, bodyEl, outEl, footEl, stopBtn, spin, command, ts, outText: "", running: true };
     chat.bashRuns.set(execId, run);
     append(chat, row);
     if (stopBtn) stopBtn.addEventListener("click", () => post({ type: "bashKill", id: chat.id, execId }));
@@ -3380,7 +3408,7 @@
     const run = chat && chat.bashRuns.get(execId);
     if (!run || !chunk) return;
     const stick = chat.id === activeId && atBottom(chat);
-    run.outEl.classList.remove("hidden");
+    run.bodyEl.classList.remove("hidden");
     const node = stream === "stderr" ? el("span", "bash-run-err") : document.createTextNode(chunk);
     if (stream === "stderr") node.textContent = chunk;
     run.outEl.appendChild(node);
@@ -3401,17 +3429,51 @@
     run.running = false;
     if (run.stopBtn) run.stopBtn.remove();
     if (run.spin) run.spin.remove();
+    // Swap the live stream for the polished, copyable codeBlock now it's done.
+    renderBashOutput(run.bodyEl, run.outText);
     run.footEl.classList.remove("hidden");
     bashFoot(run.footEl, code, signal, error);
     chat.bashHistory.push({ id: execId, command: run.command, output: run.outText, code: code == null ? null : code, signal: signal || null, ts: run.ts });
     if (chat.bashHistory.length > 100) chat.bashHistory = chat.bashHistory.slice(-100);
+    // Queue it to ride the next prompt into the model's context (see
+    // formatBashContext / deliverPrompt). Keep the buffer bounded.
+    chat.bashPending.push({ command: run.command, output: run.outText, code: code == null ? null : code, signal: signal || null });
+    if (chat.bashPending.length > 20) chat.bashPending = chat.bashPending.slice(-20);
     savePrefs();
+  }
+
+  // Serialize the not-yet-seen bash runs into a context block prepended to the
+  // next prompt (pure read — deliverPrompt clears the buffer once the prompt is
+  // actually sent). Rides inside the same invisible sentinels as the tabs/page
+  // context, so it never shows in the bubble and is stripped on replay.
+  function formatBashContext(chat) {
+    const runs = Array.isArray(chat.bashPending) ? chat.bashPending : [];
+    if (!runs.length) return "";
+    const TOTAL_CAP = 40000;
+    const parts = [];
+    let used = 0;
+    for (const r of runs) {
+      const status = r.signal ? "(stopped)" : `(exit ${r.code == null ? "?" : r.code})`;
+      const out = (r.output || "").trim();
+      let block = `$ ${r.command}\n${out ? out + "\n" : ""}${status}`;
+      if (used + block.length > TOTAL_CAP) {
+        parts.push(block.slice(0, Math.max(0, TOTAL_CAP - used)) + "\n…[truncated]");
+        break;
+      }
+      parts.push(block);
+      used += block.length;
+    }
+    const head =
+      "[Shell commands the user ran locally via the composer's bash mode" +
+      (chat.cwd ? " in " + shortPath(chat.cwd) : "") +
+      ", with their output. The user ran these themselves — treat as context, not as a message they typed.]";
+    return head + "\n\n" + parts.join("\n\n") + "\n\n";
   }
 
   // Static (non-streaming) render of a persisted run, used on transcript replay.
   function renderBashEntry(chat, entry) {
-    const { row, outEl, footEl } = buildBashCard(entry.command || "", { live: false });
-    if (entry.output) { outEl.classList.remove("hidden"); outEl.textContent = entry.output; }
+    const { row, bodyEl, footEl } = buildBashCard(entry.command || "", { live: false });
+    renderBashOutput(bodyEl, entry.output || "");
     footEl.classList.remove("hidden");
     bashFoot(footEl, entry.code, entry.signal, null);
     append(chat, row);
@@ -3466,6 +3528,7 @@
     for (const execId of chat.bashRuns.keys()) post({ type: "bashKill", id: chat.id, execId });
     chat.bashRuns.clear();
     chat.bashHistory = [];
+    chat.bashPending = [];
     chat._bashIdx = 0;
     chat.bashMode = false;
     chat.queue = []; // stale prompts from the wiped conversation shouldn't replay
@@ -3618,6 +3681,8 @@
     const tabsBlock = isCommand ? "" : await buildTabsContextBlock(chat);
     // Prepend any attached page/element context as a block, then clear it.
     const ctx = isCommand ? "" : formatContexts(chat);
+    // Silently fold in any local bash-mode runs the model hasn't seen yet.
+    const bashBlock = isCommand ? "" : formatBashContext(chat);
     const hasPage = hasContext && chat.contexts.some((c) => c.kind === "page");
     const hasFile = hasContext && chat.contexts.some((c) => c.kind === "file");
     const fallback = hasContext
@@ -3631,7 +3696,7 @@
     // The CLI answers a bare /usage (or /usage-credits, /extra-usage) with a
     // synthetic, zero-turn plain-text reply — swap it for a progress-bar card.
     chat.pendingUsageCard = /^\/(usage|usage-credits|extra-usage)\s*$/.test(text);
-    const extra = tabsBlock + ctx;
+    const extra = tabsBlock + ctx + bashBlock;
     // Wrap injected context in invisible sentinels so replayTranscript() can
     // strip it back out on reload — the live bubble above already shows just
     // the literal typed text, and replay should match that.
@@ -3661,7 +3726,10 @@
       return;
     }
     userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments, { real: true });
-    if (!isCommand) chat.contexts = []; // command turns don't consume context chips
+    if (!isCommand) {
+      chat.contexts = []; // command turns don't consume context chips
+      chat.bashPending = []; // the model has now seen these local runs
+    }
     chat.attachments = [];
     if (chat.id === activeId) {
       renderContextChips();
