@@ -125,7 +125,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 12;
+  const EXPECTED_HOST_VERSION = 14;
 
   let els = {};
   let port = null;
@@ -209,7 +209,7 @@
         if (Array.isArray(p.history)) history = p.history;
         if (Array.isArray(p.tabs) && p.tabs.length) {
           for (const t of p.tabs) {
-            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, model: t.model, effort: t.effort, mode: t.mode, sessionId: t.sessionId });
+            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, model: t.model, effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory });
             chats.set(chat.id, chat);
             order.push(chat.id);
           }
@@ -225,7 +225,7 @@
     try {
       const tabs = order.map((id) => {
         const c = chats.get(id);
-        return { id: c.id, title: c.title, cwd: c.cwd, model: c.model, effort: c.effort, mode: c.mode, sessionId: c.sessionId };
+        return { id: c.id, title: c.title, cwd: c.cwd, model: c.model, effort: c.effort, mode: c.mode, sessionId: c.sessionId, bashHistory: (c.bashHistory || []).slice(-40) };
       });
       chrome.storage.local.set({ rkChatV2: { tabs, activeId, history: history.slice(0, 40), lastModel, lastEffort, lastMode, lastCwd } });
     } catch (_) {}
@@ -363,6 +363,15 @@
       ctxTokens: 0,
       statusWord: "",
       statusWordAt: 0,
+      // Composer "!" bash mode — a local shell escape hatch (see runBash). When
+      // `bashMode` is on the composer runs its next submit as a one-off shell
+      // command in `cwd` instead of sending a prompt to the model. `bashHistory`
+      // persists finished runs ({ id, command, output, code, ts }) so they
+      // survive a panel reload (they live only in the panel, never in the CLI
+      // transcript); `bashRuns` tracks in-flight ones (execId -> render nodes).
+      bashMode: false,
+      bashHistory: Array.isArray(opts.bashHistory) ? opts.bashHistory : [],
+      bashRuns: new Map(),
       // Page elements attached via the Selector tool, sent as context with the
       // next prompt, then cleared.
       contexts: [],
@@ -2953,6 +2962,9 @@
           systemNote(c, "Host disconnected mid-turn.", "warn");
           endTurn(c, null);
         }
+        // Any bash-mode command in flight can't report its exit now — finalize
+        // its card so it doesn't spin forever.
+        for (const execId of [...c.bashRuns.keys()]) finishBashRun(c, execId, null, null, "Host disconnected — command stopped.");
       }
       if (expectHostRestart) {
         expectHostRestart = false;
@@ -3032,7 +3044,11 @@
         if (chat) onClaudeEvent(chat, msg.data);
         break;
       case "transcript":
-        if (chat) replayTranscript(chat, msg.events);
+        if (chat) {
+          replayTranscript(chat, msg.events);
+          // Flush any local bash runs that come after the last transcript event.
+          if (msg.done) drainBashUntil(chat, Infinity);
+        }
         break;
       case "selfUpdate":
         // updated:true → the host is about to restart; keep "updating…" up
@@ -3110,6 +3126,14 @@
       case "shellPort":
         onShellPort(msg);
         break;
+      case "bashStart":
+        break; // the card already shows a spinner; nothing more to do
+      case "bashOut":
+        if (chat) onBashOut(chat, msg.execId, msg.stream, msg.chunk);
+        break;
+      case "bashExit":
+        if (chat) finishBashRun(chat, msg.execId, msg.code, msg.signal, msg.error);
+        break;
       case "needsFolder":
         // Host refused to start without a valid directory (none given, or the
         // saved one is gone). Drop the stale path, surface the empty state, and
@@ -3169,10 +3193,24 @@
   // messages (they only ever lived in the DOM). Ask the host to read the session's
   // on-disk JSONL and replay it, once, the first time we have a live host.
   function maybeReplay(chat) {
-    if (!chat || chat.replayed || !chat.sessionId) return;
-    if (!connected || !hostReady) return;
-    chat.replayed = true;
-    post({ type: "loadTranscript", id: chat.id, sessionId: chat.sessionId, cwd: chat.cwd });
+    if (!chat || chat.replayed) return;
+    if (chat.sessionId) {
+      if (!connected || !hostReady) return;
+      chat.replayed = true;
+      chat._bashIdx = 0;
+      if (Array.isArray(chat.bashHistory)) chat.bashHistory.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+      post({ type: "loadTranscript", id: chat.id, sessionId: chat.sessionId, cwd: chat.cwd });
+      return;
+    }
+    // No CLI session to replay — but a bash-only tab may still have local shell
+    // history to restore. Only when its DOM is empty (a genuinely restored tab,
+    // not a live one that already rendered its runs) so runs never double up.
+    if (Array.isArray(chat.bashHistory) && chat.bashHistory.length && chat.messagesEl.childElementCount === 0) {
+      chat.replayed = true;
+      chat._bashIdx = 0;
+      chat.bashHistory.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+      drainBashUntil(chat, Infinity);
+    }
   }
 
   // Render a chunk of past messages (the host streams them in order across one or
@@ -3187,6 +3225,9 @@
       // replay, so a replayed subagent's elapsed reflects its real historical
       // duration instead of collapsing to ~0s (everything replayed "now").
       replayStamp = ev.timestamp ? Date.parse(ev.timestamp) || 0 : 0;
+      // Interleave local bash-mode runs at their chronological spot among the
+      // CLI transcript events (both carry timestamps; events arrive in order).
+      if (replayStamp) drainBashUntil(chat, replayStamp);
       if (ev.type === "local_command") {
         const ts = ev.timestamp ? Date.parse(ev.timestamp) || Date.now() : Date.now();
         renderLocalCommandOutput(chat, String(ev.content || ""), ts);
@@ -3278,6 +3319,117 @@
     finalizeAssistant(null, body, ts);
   }
 
+  // ---- composer bash mode: local shell runs ---------------------------------
+  // Runs go through the host's bashExec (a detached `zsh -c` in the tab's cwd)
+  // and never touch the claude process or the model. Output streams into a
+  // terminal-style card; finished runs persist to chat.bashHistory so they
+  // survive a reload (see maybeReplay / drainBashUntil).
+  const BASH_LIVE_CAP = 500000; // max chars kept in a live output <pre>
+  const BASH_STORE_CAP = 20000; // max chars persisted per run (tail — errors sit there)
+
+  // Build the card DOM. `live` cards get a stop button + spinner; replayed ones
+  // are static. Returns the nodes the streaming/finish code writes into.
+  function buildBashCard(command, opts) {
+    opts = opts || {};
+    const row = el("div", "msg bash-run");
+    const card = el("div", "bash-run-card");
+    const head = el("div", "bash-run-head");
+    head.appendChild(el("span", "bash-run-prompt", "$"));
+    head.appendChild(el("span", "bash-run-cmd", command));
+    let stopBtn = null, spin = null;
+    if (opts.live) {
+      spin = el("span", "bash-run-spin");
+      head.appendChild(spin);
+      stopBtn = el("button", "bash-run-stop");
+      stopBtn.type = "button";
+      stopBtn.title = "Stop";
+      stopBtn.innerHTML = ICON("stop", 12);
+      head.appendChild(stopBtn);
+    }
+    card.appendChild(head);
+    const out = el("pre", "bash-run-out hidden");
+    card.appendChild(out);
+    const foot = el("div", "bash-run-foot hidden");
+    card.appendChild(foot);
+    row.appendChild(card);
+    return { row, outEl: out, footEl: foot, stopBtn, spin };
+  }
+
+  function bashFoot(footEl, code, signal, error) {
+    footEl.className = "bash-run-foot";
+    if (error) { footEl.classList.add("err"); footEl.textContent = error; return; }
+    if (signal) { footEl.classList.add("err"); footEl.textContent = "Stopped"; return; }
+    if (code === 0 || code == null) { footEl.classList.add("ok"); footEl.textContent = "Exit 0"; }
+    else { footEl.classList.add("err"); footEl.textContent = "Exit " + code; }
+  }
+
+  function runBash(chat, command) {
+    const execId = newId();
+    const ts = Date.now();
+    const { row, outEl, footEl, stopBtn, spin } = buildBashCard(command, { live: true });
+    const run = { row, outEl, footEl, stopBtn, spin, command, ts, outText: "", running: true };
+    chat.bashRuns.set(execId, run);
+    append(chat, row);
+    if (stopBtn) stopBtn.addEventListener("click", () => post({ type: "bashKill", id: chat.id, execId }));
+    if (!post({ type: "bashExec", id: chat.id, execId, command, cwd: chat.cwd })) {
+      finishBashRun(chat, execId, 1, null, "Host disconnected — command not run.");
+    }
+  }
+
+  function onBashOut(chat, execId, stream, chunk) {
+    const run = chat && chat.bashRuns.get(execId);
+    if (!run || !chunk) return;
+    const stick = chat.id === activeId && atBottom(chat);
+    run.outEl.classList.remove("hidden");
+    const node = stream === "stderr" ? el("span", "bash-run-err") : document.createTextNode(chunk);
+    if (stream === "stderr") node.textContent = chunk;
+    run.outEl.appendChild(node);
+    // Bound the live DOM: drop oldest nodes once it grows past the cap.
+    run.outLen = (run.outLen || 0) + chunk.length;
+    while (run.outLen > BASH_LIVE_CAP && run.outEl.firstChild && run.outEl.childNodes.length > 1) {
+      run.outLen -= (run.outEl.firstChild.textContent || "").length;
+      run.outEl.removeChild(run.outEl.firstChild);
+    }
+    run.outText = (run.outText + chunk).slice(-BASH_STORE_CAP);
+    if (stick) scrollToBottom(chat);
+  }
+
+  function finishBashRun(chat, execId, code, signal, error) {
+    const run = chat && chat.bashRuns.get(execId);
+    if (!run) return;
+    chat.bashRuns.delete(execId);
+    run.running = false;
+    if (run.stopBtn) run.stopBtn.remove();
+    if (run.spin) run.spin.remove();
+    run.footEl.classList.remove("hidden");
+    bashFoot(run.footEl, code, signal, error);
+    chat.bashHistory.push({ id: execId, command: run.command, output: run.outText, code: code == null ? null : code, signal: signal || null, ts: run.ts });
+    if (chat.bashHistory.length > 100) chat.bashHistory = chat.bashHistory.slice(-100);
+    savePrefs();
+  }
+
+  // Static (non-streaming) render of a persisted run, used on transcript replay.
+  function renderBashEntry(chat, entry) {
+    const { row, outEl, footEl } = buildBashCard(entry.command || "", { live: false });
+    if (entry.output) { outEl.classList.remove("hidden"); outEl.textContent = entry.output; }
+    footEl.classList.remove("hidden");
+    bashFoot(footEl, entry.code, entry.signal, null);
+    append(chat, row);
+  }
+
+  // Render persisted bash runs up to `tsLimit`, advancing the replay cursor.
+  // Interleaves local shell history with the CLI transcript in timestamp order.
+  function drainBashUntil(chat, tsLimit) {
+    const h = chat && chat.bashHistory;
+    if (!Array.isArray(h)) return;
+    let i = chat._bashIdx || 0;
+    while (i < h.length && (h[i].ts || 0) <= tsLimit) {
+      renderBashEntry(chat, h[i]);
+      i++;
+    }
+    chat._bashIdx = i;
+  }
+
   // Wipe a tab's transcript and start a fresh session (used on folder change).
   function resetChatSession(chat) {
     chat.messagesEl.innerHTML = "";
@@ -3309,9 +3461,17 @@
     chat.transcriptAgentId = null;
     chat.ctxBase = 0;
     chat.ctxTokens = 0;
+    // Local shell runs go with the wiped conversation — stop any in-flight ones
+    // and drop the persisted history (their cards were just removed above).
+    for (const execId of chat.bashRuns.keys()) post({ type: "bashKill", id: chat.id, execId });
+    chat.bashRuns.clear();
+    chat.bashHistory = [];
+    chat._bashIdx = 0;
+    chat.bashMode = false;
     chat.queue = []; // stale prompts from the wiped conversation shouldn't replay
     if (chat.id === activeId) {
       renderTurnStatus(chat);
+      syncBashMode(chat);
       updateSetup();
     }
     chat.started = false;
@@ -3322,6 +3482,22 @@
     const chat = chats.get(activeId);
     if (!chat) return;
     const text = els.input.value.trim();
+    // Bash mode ("!"): run the line as a local shell command in the tab's cwd
+    // instead of sending it to the model. Runs independently of any in-flight
+    // turn (it never touches the claude process), and returns to normal mode
+    // after each command — retype "!" to run another.
+    if (chat.bashMode) {
+      if (!text) return;
+      if (!chat.cwd) {
+        post({ type: "pickFolder", id: chat.id }) || promptForFolder(chat);
+        return;
+      }
+      els.input.value = "";
+      exitBashMode(chat);
+      autosize();
+      runBash(chat, text);
+      return;
+    }
     // `/clear` wipes the conversation and starts a fresh session. It's handled
     // here rather than passed to the headless CLI, which treats it as plain text.
     if (/^\/clear\s*$/.test(text)) {
@@ -3893,6 +4069,7 @@
     const effort = EFFORTS.find((e) => e.id === chat.effort) || EFFORTS.find((e) => e.id === DEFAULT_EFFORT);
     if (els.effortBtn) els.effortBtn.querySelector(".effort-label").textContent = effort.label;
     setRunningUI(chat.turnRunning);
+    syncBashMode(chat);
     renderTurnStatus(chat);
     if (chat.turnRunning) startStatusTicker();
     syncBranch(chat);
@@ -4828,6 +5005,35 @@
     els.slashMenu.classList.add("hidden");
   }
 
+  // ---- composer bash mode ---------------------------------------------------
+  // Typing "!" as the first character flips the composer into a local shell
+  // prompt (à la Claude Code's REPL): a "bash" pill, a shell placeholder, and
+  // the next submit runs the line as a one-off command in the tab's cwd instead
+  // of prompting the model (see runBash). Backspace on an empty command leaves.
+  const PLACEHOLDER_NORMAL = "Type / for commands";
+  const PLACEHOLDER_BASH = "Enter a shell command";
+
+  function enterBashMode(chat) {
+    if (!chat || chat.bashMode) return;
+    chat.bashMode = true;
+    hideSlash();
+    syncBashMode(chat);
+    els.input.focus();
+  }
+  function exitBashMode(chat) {
+    if (!chat || !chat.bashMode) return;
+    chat.bashMode = false;
+    syncBashMode(chat);
+  }
+  // Reflect the active chat's bash-mode flag into the composer chrome. Called on
+  // enter/exit and on every tab switch (bashMode is per-chat).
+  function syncBashMode(chat) {
+    const on = !!(chat && chat.bashMode);
+    if (els.composerBox) els.composerBox.classList.toggle("bash-active", on);
+    if (els.bashPill) els.bashPill.classList.toggle("hidden", !on);
+    if (els.input) els.input.placeholder = on ? PLACEHOLDER_BASH : PLACEHOLDER_NORMAL;
+  }
+
   // ---- onboarding overlay ---------------------------------------------------
   function showOnboarding(detail) {
     if (!mounted) return;
@@ -4871,6 +5077,7 @@
     els.settingsBody = root.querySelector("#settings-body");
     els.slashMenu = root.querySelector("#slash-menu");
     els.slashGhost = root.querySelector("#slash-ghost");
+    els.bashPill = root.querySelector("#bash-pill");
     els.onboarding = root.querySelector("#chat-onboarding");
     els.onboardingStatus = root.querySelector("#chat-onboarding-status");
     els.copyInstall = root.querySelector("#chat-copy-install");
@@ -4956,6 +5163,11 @@
 
     els.send.addEventListener("click", sendPrompt);
     els.stop.addEventListener("click", interrupt);
+    els.bashPill.addEventListener("click", () => {
+      const chat = chats.get(activeId);
+      if (chat) exitBashMode(chat);
+      els.input.focus();
+    });
     els.attachFileBtn.addEventListener("click", () => els.fileInput.click());
     els.fileInput.addEventListener("change", () => {
       const files = Array.from(els.fileInput.files || []);
@@ -5017,8 +5229,19 @@
       }
     });
     els.input.addEventListener("input", () => {
+      const chat = chats.get(activeId);
+      // "!" as the first character flips into bash mode — consume it so the
+      // pill stands in for it (matching Claude Code's REPL) and the command
+      // itself is just what follows.
+      if (chat && !chat.bashMode && els.input.value[0] === "!") {
+        els.input.value = els.input.value.slice(1);
+        enterBashMode(chat);
+      }
       autosize();
-      updateSlash();
+      // The slash menu is a normal-mode affordance; a shell command that happens
+      // to start with "/" (e.g. /usr/bin/env) must not trigger it.
+      if (chat && chat.bashMode) hideSlash();
+      else updateSlash();
     });
     // Paste an image from the clipboard → attach as a thumbnail.
     els.input.addEventListener("paste", (e) => {
@@ -5064,6 +5287,16 @@
         if (e.key === "ArrowUp") { e.preventDefault(); moveSlash(-1); return; }
         if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); acceptSlash(slash.index); return; }
         if (e.key === "Escape") { e.preventDefault(); hideSlash(); return; }
+      }
+      // Backspace on an empty bash-mode command leaves bash mode — the reverse
+      // of the "!" that entered it (like deleting past the "!" in Claude Code).
+      if (e.key === "Backspace" && els.input.value === "") {
+        const chat = chats.get(activeId);
+        if (chat && chat.bashMode) {
+          e.preventDefault();
+          exitBashMode(chat);
+          return;
+        }
       }
       // Backspace at the very start of an empty-to-the-left caret erases the
       // last attached context chip — like deleting an inline token in Cursor.
@@ -5202,6 +5435,7 @@
         <div id="attach-thumbs" class="attach-thumbs hidden"></div>
         <div class="composer-input-wrap">
           <div id="slash-ghost" class="slash-ghost hidden" aria-hidden="true"></div>
+          <button id="bash-pill" class="bash-pill hidden" type="button" title="Exit bash mode (Backspace)">bash</button>
           <textarea id="composer-input" class="composer-input" rows="1"
             placeholder="Type / for commands"></textarea>
         </div>

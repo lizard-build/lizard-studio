@@ -1374,6 +1374,76 @@ code.inline {
   pointer-events: none;
 }
 
+/* Composer "!" bash-mode runs — a terminal-style card in the transcript. */
+.bash-run { margin: 2px 0; }
+.bash-run-card {
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.bash-run-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+}
+.bash-run-prompt { color: #a855f7; font-weight: 600; flex: 0 0 auto; }
+.bash-run-cmd {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.bash-run-spin {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+  border: 2px solid rgba(168, 85, 247, 0.3);
+  border-top-color: #a855f7;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+.bash-run-stop {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.bash-run-stop:hover { background: var(--other-red); color: #fff; }
+.bash-run-out {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border-primary);
+}
+.bash-run-out::-webkit-scrollbar { width: 8px; height: 8px; }
+.bash-run-out::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 4px; }
+.bash-run-err { color: var(--other-red); }
+.bash-run-foot {
+  padding: 5px 10px;
+  font-size: 11px;
+  border-top: 1px solid var(--border-primary);
+}
+.bash-run-foot.ok { color: var(--text-tertiary); }
+.bash-run-foot.err { color: var(--other-red); }
+
 .tool-result { padding: 0 0 4px 22px; }
 .tool-result .code-block { margin: 0; background: rgba(255, 255, 255, 0.05); }
 .tool-result.err .code-block { background: rgba(239, 68, 68, 0.1); }
@@ -2005,6 +2075,35 @@ code.inline {
 .composer-box:focus-within {
   border-color: var(--control-secondary-hover);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+/* Bash mode: a purple "bash" pill stands in for the typed "!", the placeholder
+   becomes a shell prompt, and the whole box picks up a purple accent. */
+.bash-pill {
+  position: absolute;
+  z-index: 2;
+  left: 6px;
+  top: 4px;
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 6px;
+  background: #a855f7;
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.bash-pill:hover { background: #9333ea; }
+.composer-box.bash-active .composer-input { padding-left: 56px; }
+.composer-box.bash-active { border-color: #a855f7; }
+.composer-box.bash-active:focus-within {
+  border-color: #a855f7;
+  box-shadow: 0 0 0 1px rgba(168, 85, 247, 0.35);
 }
 /* Page-element context chips (from the Selector tool), above the textarea. */
 .context-chips {

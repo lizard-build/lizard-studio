@@ -23,6 +23,9 @@
 //                                                                 server's process subtree (→ shellKilled)
 //   { type:"probeShellPort", id, taskId, command }                 ask what TCP port a dev server listens
 //                                                                 on (→ shellPort)
+//   { type:"bashExec", id, execId, command, cwd }                  run a one-off shell command (composer
+//                                                                 "!" bash mode) → bashStart/bashOut/bashExit
+//   { type:"bashKill", id, execId }                                stop a running bash-mode command
 //   { type:"stop",    id }                                         kill the claude process
 //   { type:"close",   id }                                         kill + forget the session
 //   { type:"restartSession", id, model, effort, permissionMode }   restart with the given trio, resuming
@@ -50,6 +53,9 @@
 //   { type:"interrupted", id }                                 the turn was hard-stopped; a respawn follows
 //   { type:"shellKilled", id, taskId, shellId, ok, error }     reply to killShell
 //   { type:"shellPort", id, taskId, port }                     reply to probeShellPort (null if unknown)
+//   { type:"bashStart", id, execId, pid }                      a bash-mode command started
+//   { type:"bashOut", id, execId, stream, chunk }              stdout/stderr chunk from a bash-mode command
+//   { type:"bashExit", id, execId, code, signal?, error? }     a bash-mode command finished
 //   { type:"event",   id, data }                               one claude stream-json object
 //   { type:"exit",    id, code }
 //   { type:"folder",  id, path }                               null path == cancelled
@@ -152,7 +158,9 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // that op isn't answered (hosts older than v4).
 // Bump this on EVERY host change the extension needs to know about.
 // v12: killShell / probeShellPort (surgical background-shell stop + port probe).
-const HOST_VERSION = 12;
+// v13: bashExec / bashKill (composer "!" bash mode — local one-off shell runs).
+// v14: kill/probe reach a dev server orphaned after a panel reopen (by port).
+const HOST_VERSION = 14;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -1113,12 +1121,17 @@ function killSession(id) {
 }
 
 function killAll() {
+  for (const execId of [...bashRuns.keys()]) bashKill(execId);
   for (const id of [...sessions.keys()]) killSession(id);
 }
 
-// Enumerate the process subtree under a session's claude and hand back helpers to
-// navigate it. Background commands (dev servers, etc.) all run as descendants of
-// that claude, so this is the basis for both killing and probing a shell.
+// Enumerate the WHOLE process table and hand back helpers to navigate it.
+// Background commands (dev servers) normally run under this session's claude, but
+// after a panel close the host+claude die and those shells get orphaned onto
+// launchd — so we keep the full tree, not just claude's descendants, and a
+// `shellRoot` that stops at a protected boundary (claude / this host / init) so
+// we can find an orphan's own root without ever walking into something we must
+// not signal.
 function enumClaudeTree(id, cb) {
   const s = sessions.get(id);
   const rootPid = s && s.child && s.child.pid;
@@ -1144,42 +1157,49 @@ function enumClaudeTree(id, cb) {
       }
       return acc;
     };
-    const descSet = new Set(subtree(rootPid)); // every process under this claude
-    // The ancestor of `pid` that is a direct child of claude — the shell's root.
-    const topShell = (pid) => {
+    const descSet = new Set(subtree(rootPid)); // processes under THIS claude
+    // Never signal these: init, this host, and any live claude session.
+    const protectedPids = new Set([1, process.pid]);
+    for (const sess of sessions.values()) if (sess.child && sess.child.pid) protectedPids.add(sess.child.pid);
+    // Highest ancestor of `pid` that isn't protected — the shell's own root,
+    // whether it's still under claude or orphaned to launchd.
+    const shellRoot = (pid) => {
       let cur = pid;
-      while (parentOf.get(cur) !== rootPid) {
+      for (;;) {
         const par = parentOf.get(cur);
-        if (par === undefined || !descSet.has(par)) break;
+        if (par === undefined || protectedPids.has(par)) break;
         cur = par;
       }
       return cur;
     };
-    cb(null, { rootPid, cmdOf, subtree, descSet, topShell });
+    cb(null, { rootPid, cmdOf, parentOf, kids, subtree, descSet, protectedPids, shellRoot });
   });
 }
 
-// Resolve a shell (by its command, or the port it listens on) to the FULL set of
-// PIDs in its subtree — the whole `bash → npm → node → vite` tree.
+// Resolve a shell (by command, or the port it listens on) to the FULL set of PIDs
+// in its subtree — the whole `bash → npm → node → vite` tree — never including a
+// protected pid.
 function resolveShellPids(tree, opts, cb) {
-  const { cmdOf, subtree, descSet, topShell } = tree;
+  const { cmdOf, subtree, descSet, protectedPids, shellRoot } = tree;
   const collect = (targetPids) => {
-    const roots = new Set(targetPids.map(topShell).filter((p) => descSet.has(p)));
+    const roots = new Set(targetPids.map(shellRoot).filter((p) => p && !protectedPids.has(p)));
     const all = new Set();
     for (const r of roots) { all.add(r); for (const c of subtree(r)) all.add(c); }
-    return [...all];
+    return [...all].filter((p) => !protectedPids.has(p));
   };
-  // 1) Match by the shell's own command.
+  // 1) Match by command among THIS claude's descendants (the in-session case —
+  //    scoped tight so a stray match elsewhere can't be killed).
   const cmd = String(opts.command || "").replace(/\s+/g, " ").trim();
   if (cmd) {
     const needle = cmd.slice(0, 48);
     const hits = [...descSet].filter((pid) => (cmdOf.get(pid) || "").replace(/\s+/g, " ").includes(needle));
     if (hits.length) return cb(collect(hits));
   }
-  // 2) Fall back to whatever listens on the given port (dev servers).
+  // 2) Kill whatever listens on the port — precise, and works even for a process
+  //    orphaned after a panel reopen (no longer under this claude).
   if (opts.port) {
     execFile("lsof", ["-nP", "-iTCP:" + opts.port, "-sTCP:LISTEN", "-t"], (e2, lout) => {
-      const pids = e2 || !lout ? [] : lout.split(/\s+/).map(Number).filter((n) => n && descSet.has(n));
+      const pids = e2 || !lout ? [] : lout.split(/\s+/).map(Number).filter(Boolean);
       cb(collect(pids));
     });
     return;
@@ -1213,20 +1233,105 @@ function killShell(id, opts) {
 function probeShellPort(id, opts) {
   opts = opts || {};
   const reply = (port) => send({ type: "shellPort", id, taskId: opts.taskId || null, port: port || null });
-  if (!String(opts.command || "").trim()) return reply(null);
+  const needle = String(opts.command || "").replace(/\s+/g, " ").trim().slice(0, 48);
+  if (!needle) return reply(null);
   enumClaudeTree(id, (err, tree) => {
     if (err) return reply(null);
-    resolveShellPids(tree, { command: opts.command }, (pids) => {
-      if (!pids.length) return reply(null);
-      execFile("lsof", ["-nP", "-a", "-p", pids.join(","), "-iTCP", "-sTCP:LISTEN", "-Fn"], (e2, lout) => {
-        if (e2 || !lout) return reply(null);
-        const ports = [];
-        for (const line of lout.split("\n")) { const m = /^n.*:(\d+)$/.exec(line); if (m) ports.push(+m[1]); }
-        ports.sort((a, b) => a - b);
-        reply(ports[0] || null);
-      });
+    const { cmdOf, subtree, descSet } = tree;
+    const matchIn = (pids) => pids.filter((pid) => (cmdOf.get(pid) || "").replace(/\s+/g, " ").includes(needle));
+    // Prefer the in-session process; fall back to a match anywhere (a server
+    // orphaned to launchd after the panel was reopened). Read-only, so a wider
+    // search is safe.
+    let cand = matchIn([...descSet]);
+    if (!cand.length) cand = matchIn([...cmdOf.keys()]);
+    if (!cand.length) return reply(null);
+    const pids = new Set();
+    for (const c of cand) { pids.add(c); for (const d of subtree(c)) pids.add(d); }
+    execFile("lsof", ["-nP", "-a", "-p", [...pids].join(","), "-iTCP", "-sTCP:LISTEN", "-Fn"], (e2, lout) => {
+      if (e2 || !lout) return reply(null);
+      const ports = [];
+      for (const line of lout.split("\n")) { const m = /^n.*:(\d+)$/.exec(line); if (m) ports.push(+m[1]); }
+      ports.sort((a, b) => a - b);
+      reply(ports[0] || null);
     });
   });
+}
+
+// ---- composer bash mode -----------------------------------------------------
+// The panel's "!"-prefixed bash mode runs a one-off shell command locally, the
+// same escape hatch Claude Code's REPL offers — it never touches the claude
+// process or the model, it just executes in the tab's cwd and streams stdout /
+// stderr straight back to the transcript. Each run is a `zsh -c` child in its
+// OWN process group (detached), so a whole `npm run … → node` tree can be
+// stopped with one group signal from bashKill. Keyed by the panel's execId.
+const bashRuns = new Map(); // execId -> { child, id }
+
+function bashExec(id, msg) {
+  const execId = msg && msg.execId;
+  const command = String((msg && msg.command) || "");
+  if (!execId || !command.trim()) {
+    send({ type: "bashExit", id, execId, code: 1, error: "empty command" });
+    return;
+  }
+  const cwd = (msg && msg.cwd) || homedir();
+  if (!existsSync(cwd)) {
+    send({ type: "bashExit", id, execId, code: 1, error: "folder not found: " + cwd });
+    return;
+  }
+  const shell = CHILD_ENV.SHELL || process.env.SHELL || "/bin/zsh";
+  let child;
+  try {
+    child = spawn(shell, ["-c", command], {
+      cwd,
+      env: CHILD_ENV,
+      detached: true, // own process group, so bashKill can take the whole tree
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (e) {
+    send({ type: "bashExit", id, execId, code: 127, error: (e && e.message) || "spawn failed" });
+    return;
+  }
+  bashRuns.set(execId, { child, id });
+  send({ type: "bashStart", id, execId, pid: child.pid });
+  // Slice oversized chunks so a single line of output never blows the native-
+  // messaging size cap (the panel reassembles them in order regardless).
+  const forward = (stream) => (buf) => {
+    let s = buf.toString("utf8");
+    while (s.length) {
+      send({ type: "bashOut", id, execId, stream, chunk: s.slice(0, 60000) });
+      s = s.slice(60000);
+    }
+  };
+  child.stdout.on("data", forward("stdout"));
+  child.stderr.on("data", forward("stderr"));
+  child.on("error", (e) => {
+    if (!bashRuns.has(execId)) return;
+    bashRuns.delete(execId);
+    send({ type: "bashExit", id, execId, code: 127, error: (e && e.message) || "exec error" });
+  });
+  child.on("close", (code, signal) => {
+    if (!bashRuns.has(execId)) return;
+    bashRuns.delete(execId);
+    send({ type: "bashExit", id, execId, code: code == null ? null : code, signal: signal || null });
+  });
+}
+
+// Stop a running bash-mode command — SIGTERM the whole process group, then hard-
+// kill anything that ignores it. `-pid` targets the group (detached spawn above).
+function bashKill(execId) {
+  const run = bashRuns.get(execId);
+  if (!run || !run.child || !run.child.pid) return;
+  const pgid = run.child.pid;
+  try { process.kill(-pgid, "SIGTERM"); } catch { try { run.child.kill("SIGTERM"); } catch { /* gone */ } }
+  const hard = setTimeout(() => {
+    try { process.kill(-pgid, "SIGKILL"); } catch { try { run.child.kill("SIGKILL"); } catch { /* gone */ } }
+  }, 700);
+  hard.unref?.();
+}
+
+// Stop every bash run belonging to a tab (its session is closing / restarting).
+function killBashForSession(id) {
+  for (const [execId, run] of bashRuns) if (run.id === id) bashKill(execId);
 }
 
 // ---- slash-command discovery ------------------------------------------------
@@ -1807,8 +1912,15 @@ function handle(msg) {
     case "probeShellPort":
       probeShellPort(id, msg);
       break;
+    case "bashExec":
+      bashExec(id, msg);
+      break;
+    case "bashKill":
+      bashKill(msg.execId);
+      break;
     case "stop":
     case "close":
+      killBashForSession(id);
       killSession(id);
       break;
     case "restartSession": {
