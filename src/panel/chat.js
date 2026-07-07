@@ -3999,6 +3999,12 @@
     return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
   }
 
+  // Open a URL in a real browser tab (extension side panels can't navigate).
+  function openExternal(url) {
+    try { chrome.tabs.create({ url }); }
+    catch (_) { window.open(url, "_blank"); }
+  }
+
   function buildTaskCard(chat, item) {
     const card = el("div", "task-card " + item.status);
     const top = el("div", "task-card-top");
@@ -4052,9 +4058,13 @@
       }
       if (stats.childNodes.length) card.appendChild(stats);
     } else if (isPreview && item.url) {
-      // The served address, mirroring the reference panel's "localhost:8791".
+      // The served address — click to open it in a browser tab.
       const stats = el("div", "task-card-stats");
-      stats.appendChild(el("span", "task-card-stat", item.url));
+      const link = el("button", "task-card-url", item.url);
+      link.type = "button";
+      link.title = "Open http://" + item.url;
+      link.addEventListener("click", (e) => { e.stopPropagation(); openExternal("http://" + item.url); });
+      stats.appendChild(link);
       card.appendChild(stats);
     }
     return card;

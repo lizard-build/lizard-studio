@@ -1686,6 +1686,19 @@ code.inline {
   font-weight: 500;
   color: var(--text-tertiary);
 }
+/* Clickable served address — muted like a stat, links up on hover. */
+.task-card-url {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color 0.12s;
+}
+.task-card-url:hover { color: var(--control-primary); text-decoration: underline; }
 /* Finished cards read quieter than running ones. */
 .task-card.done, .task-card.error { opacity: 0.82; }
 
