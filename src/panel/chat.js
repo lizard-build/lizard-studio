@@ -1670,6 +1670,9 @@
   }
 
   function toolCard(chat, body, block) {
+    // A question to the user is conversation, not tool noise — it gets its own
+    // Q&A block outside the tool-group fold (see askBlock).
+    if (block.name === "AskUserQuestion" && askBlock(chat, body, block)) return;
     attachAssistantRow(chat, body);
     // Known tools get a dedicated icon; MCP tool calls (mcp__server__tool) get the
     // server mark; anything else falls back to the generic code mark — never the
@@ -1716,6 +1719,81 @@
     chat.toolCards.set(block.id, { card, resultEl, toggle, name: block.name, shellId, stopServerId });
     noteToolStart(chat, block, card);
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+  }
+
+  // ---- AskUserQuestion transcript block --------------------------------------
+  // The interactive picker (showQuestionAsk) disappears once answered; this is
+  // the durable record the exchange leaves in the transcript. The question
+  // prints in full — header chip and all — and the user's pick fills in under
+  // it when the tool result lands (fillToolResult → fillAskAnswers). Returns
+  // false on malformed input so toolCard can fall back to a plain card.
+  function askBlock(chat, body, block) {
+    const input = block.input || {};
+    const questions = (Array.isArray(input.questions) ? input.questions : [])
+      .filter((q) => q && q.question)
+      .slice(0, 4);
+    if (!questions.length) return false;
+    attachAssistantRow(chat, body);
+    // Asking the user ends the tool run — the block sits between group folds.
+    closeToolGroup(chat);
+    const card = el("div", "ask-block");
+    const head = el("div", "ask-block-head");
+    const ic = el("span", "ask-block-ic");
+    ic.innerHTML = ICON("chat", 14);
+    head.appendChild(ic);
+    head.appendChild(el("span", null, "Claude asked"));
+    card.appendChild(head);
+    // Answer lines attach to their question's item — keyed by question text,
+    // which is also how the result encodes them.
+    const slots = new Map();
+    for (const q of questions) {
+      const item = el("div", "ask-block-item");
+      if (q.header) item.appendChild(el("div", "ask-tag", q.header));
+      item.appendChild(el("div", "ask-block-q", q.question));
+      card.appendChild(item);
+      slots.set(q.question, item);
+    }
+    body.appendChild(card);
+    chat.toolCards.set(block.id, { ask: true, card, slots, name: block.name });
+    if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+    return true;
+  }
+
+  // The result reads `Your questions have been answered: "Q"="A", … . You can
+  // now continue…` — parse the pairs back out and print each answer under its
+  // question. An error result (deny / interrupt) or nothing parsable marks the
+  // ask dismissed instead. Idempotent: endTurn sweeps unanswered asks through
+  // here too, and a late result must not double-render.
+  function fillAskAnswers(entry, text, isError) {
+    if (entry.card.dataset.askDone) return;
+    entry.card.dataset.askDone = "1";
+    const answers = new Map();
+    if (!isError && text) {
+      for (const m of text.matchAll(/"([^"\n]+)"="([\s\S]*?)"(?=, "|\.\s*You can now|\s*$)/g)) {
+        answers.set(m[1], m[2]);
+      }
+    }
+    let matched = false;
+    for (const [q, item] of entry.slots) {
+      if (!answers.has(q)) continue;
+      matched = true;
+      item.appendChild(askAnswerLine(answers.get(q) || "—"));
+    }
+    if (!matched) {
+      // Pairs parsed but question text didn't line up — still show the picks
+      // rather than silently dropping them.
+      if (answers.size) for (const a of answers.values()) entry.card.appendChild(askAnswerLine(a || "—"));
+      else entry.card.appendChild(el("div", "ask-dismissed", "Dismissed"));
+    }
+  }
+
+  function askAnswerLine(answer) {
+    const line = el("div", "ask-answer");
+    const ic = el("span", "ask-answer-ic");
+    ic.innerHTML = ICON("check", 12);
+    line.appendChild(ic);
+    line.appendChild(el("span", null, answer));
+    return line;
   }
 
   // ---- consecutive tool-call grouping (Claude Code-style) --------------------
@@ -1895,6 +1973,12 @@
   function fillToolResult(chat, toolUseId, content, isError) {
     const entry = chat.toolCards.get(toolUseId);
     if (!entry) return;
+    if (entry.ask) {
+      fillAskAnswers(entry, normalizeResult(content), !!isError);
+      chat.toolCards.delete(toolUseId);
+      if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+      return;
+    }
     entry.toggle.classList.remove("running");
     entry.toggle.classList.add("done");
     entry.toggle.classList.toggle("err", !!isError);
@@ -2839,6 +2923,12 @@
     // Tool calls that never got a result (denied-with-interrupt, or the turn
     // was cancelled mid-run) would pulse forever — close them out as errored.
     for (const entry of chat.toolCards.values()) {
+      // An ask the turn ended without answering (Esc, interrupt) is dismissed —
+      // it has no toggle to close out.
+      if (entry.ask) {
+        fillAskAnswers(entry, "", true);
+        continue;
+      }
       if (entry.toggle.classList.contains("running")) {
         entry.toggle.classList.remove("running");
         entry.toggle.classList.add("done", "err");

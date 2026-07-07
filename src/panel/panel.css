@@ -1294,6 +1294,53 @@ code.inline {
   color: var(--text-tertiary);
 }
 
+/* AskUserQuestion in the transcript — the durable Q&A record the picker leaves
+   behind. Flat like the rest of the assistant stream (no card frame): a quiet
+   "Claude asked" line, the question in body type, and the chosen answer
+   checked in under it once the result lands. */
+.ask-block { display: flex; flex-direction: column; }
+.ask-block-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+.ask-block-ic { display: inline-flex; color: var(--text-tertiary); }
+.ask-block-item { padding-left: 21px; }
+.ask-block .ask-tag { margin-top: 8px; }
+.ask-block-q {
+  margin-top: 6px;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+}
+.ask-answer {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+.ask-answer-ic {
+  flex: 0 0 auto;
+  display: inline-flex;
+  margin-top: 2px;
+  color: var(--control-primary);
+}
+.ask-dismissed {
+  margin: 6px 0 0 21px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+
 /* tool / skill calls — flat, no stroke frame (the bordered box is reserved for
    user messages). These read as a quiet inline row in the assistant stream. */
 .tool-card {
