@@ -4119,11 +4119,28 @@
 
   // Stop a running task. Background commands / dev servers run as descendants of
   // this session's claude, so the host kills that shell's process subtree
-  // directly (see killShell there) — no session interrupt, no chat message. A
-  // subagent has no shell to kill, so it falls back to interrupting the turn.
+  // directly (see killShell there) — surgical, no chat message.
+  //
+  // But if the model is mid-turn it's likely watching this very process; killing
+  // it out from under the model makes it notice the "unexpected" death and try to
+  // restart / investigate it. So when a turn is running we also interrupt it —
+  // silently (no chat message), which stops the model AND tears down the shell.
+  // Idle sessions get the surgical kill only.
   function stopTask(chat, item) {
     if (item.stopping) return;
     if (item.kind === "agent") { interrupt(); return; }
+    item.stopping = true;
+    syncTasks(chat); // reflect "Stopping…" immediately
+
+    if (chat.turnRunning) {
+      // Interrupt kills + resumes the claude process, which tears down its child
+      // shells (this task included) and stops the model from reacting to the kill.
+      interrupt();
+      clearTimeout(item._stopTimer);
+      item._stopTimer = setTimeout(() => { finishTask(item, "done"); syncTasks(chat); }, 400);
+      return;
+    }
+
     const port = item.url && /:(\d+)\b/.exec(item.url);
     const ok = post({
       type: "killShell",
@@ -4133,17 +4150,15 @@
       command: item.command || "", // empty for preview MCP tasks → host matches by port only
       port: port ? port[1] : null,
     });
-    if (!ok) { interrupt(); return; } // host unreachable — best-effort fallback
-    item.stopping = true;
-    syncTasks(chat); // reflect "Stopping…" immediately
-    // Safety net: a host that doesn't know killShell (not reinstalled yet) never
+    if (!ok) { item.stopping = false; syncTasks(chat); return; } // host unreachable
+    // Safety net: a host that doesn't know killShell (not updated yet) never
     // replies — don't hang in "Stopping…" forever.
     clearTimeout(item._stopTimer);
     item._stopTimer = setTimeout(() => {
       if (item.status === "running" && item.stopping) {
         item.stopping = false;
         syncTasks(chat);
-        systemNote(chat, "Couldn't stop the task — the host may be outdated. Re-run install.sh and reload.", "warn");
+        systemNote(chat, "Couldn't stop the task — the host may be outdated. Reload to update it.", "warn");
       }
     }, 6000);
   }
