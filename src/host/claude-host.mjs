@@ -151,7 +151,8 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // selfUpdate below) and only falls back to the manual install.sh command if
 // that op isn't answered (hosts older than v4).
 // Bump this on EVERY host change the extension needs to know about.
-const HOST_VERSION = 11;
+// v12: killShell / probeShellPort (surgical background-shell stop + port probe).
+const HOST_VERSION = 12;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
