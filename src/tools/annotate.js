@@ -339,6 +339,9 @@
     // stays clickable; our own annotate bar is appended on top of everything.
     surface = RK.h("div", { class: "rk-annot-surface" });
     surface.addEventListener("mousedown", onDown);
+    // In responsive mode the device iframe would otherwise swallow every press —
+    // float the drawing surface above it so annotations land on top of the frame.
+    if (RK.viewport().framed) surface.style.zIndex = String(RK.FRAME_Z);
     ui.prepend(surface);
 
     // Replace the main toolbar rather than stack a second bar on top of it: grab

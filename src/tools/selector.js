@@ -17,6 +17,9 @@
   const COL = { prop: "#C9CDD4", num: "#E2A15B", kw: "#C58AF0", font: "#9BD17C", raw: "#7E848D" };
 
   let unsub = null, last = null, mouse = { x: 0, y: 0 };
+  // Device→screen scale of the hovered element's frame (1 on the top page). Size
+  // labels divide by it so they read in device px, not shrunk-on-screen px.
+  let vpScale = 1;
 
   // ---- box-model overlay -------------------------------------------------
   // A filled frame between an outer and inner rect (evenodd punches the hole).
@@ -29,7 +32,7 @@
 
   function sizeTag(hg, x, y, value, kind) {
     if (value <= 0.5) return;
-    const t = RK.h("div", { class: "rk-tag" }, String(RK.round(value)));
+    const t = RK.h("div", { class: "rk-tag" }, String(RK.round(value / vpScale)));
     t.style.transform = "translate(-50%,-50%)";
     t.style.left = x + "px";
     t.style.top = y + "px";
@@ -120,7 +123,7 @@
   }
 
   function buildCard(el) {
-    let cs; try { cs = getComputedStyle(el); } catch (e) { return null; }
+    let cs; try { cs = RK.computedStyle(el); } catch (e) { return null; }
     const r = el.getBoundingClientRect();
     const n = (p) => parseFloat(cs.getPropertyValue(p)) || 0;
     const flexy = /flex|grid/.test(cs.display);
@@ -227,6 +230,7 @@
     }
 
     const { margin, border, padding, content, m, p } = hit.rects;
+    vpScale = hit.rects.sc || 1;
 
     // Bands: margin (outer green), padding (inner green), content (blue).
     frame(g, margin, border, C_MARGIN);
@@ -288,7 +292,7 @@
   // A compact, self-contained snapshot of the element to hand to the chat.
   function captureElement(el) {
     let cs = null;
-    try { cs = getComputedStyle(el); } catch (e) { /* detached */ }
+    try { cs = RK.computedStyle(el); } catch (e) { /* detached */ }
     const r = el.getBoundingClientRect();
     const px = (v) => RK.round(parseFloat(v) || 0);
     const styles = cs

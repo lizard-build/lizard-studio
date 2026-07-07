@@ -18,6 +18,24 @@ Font: **Geist Sans** (`'Geist', sans-serif`)
 **Always sentence case.** Never use all-caps / uppercase for labels, section
 headers, metadata, or anything else — not even via `text-transform: uppercase`.
 
+### Application UI (dense surfaces — the Studio side panel)
+
+The Studio panel is a compact ~340px side panel. It uses the **small end of the
+product scale as-is** — nothing new. New panel UI must use **only** these three
+roles:
+
+| Token | Size/Leading | Weight | Usage |
+|---|---|---|---|
+| Micro 10 | 10/14 | Medium (500) | dense counters, timestamps (sparingly) |
+| Label 12 | 12/16 | Medium (500) | metadata, status, section labels, descriptions, badges, counts |
+| Body/Title 14 | 14/20 | 400 body / 600 title | message & body text (400); card, list-item and drawer titles (600) |
+
+Only **10 / 12 / 14**. Do **not** use 13, 15, 18 or 22, and never in-between
+sizes (11.5, 12.5) — snap to 12 or 14. Header vs. body hierarchy comes from
+weight (600 vs 400) and spacing, not a bigger size; 24/32 are for full-screen
+states only, never inline panel chrome. `--font-mono` is used for code, diff
+bodies and numeric badges (`+/−`, token counts) at these **same** sizes.
+
 ## Colors
 
 ### Background (locked)

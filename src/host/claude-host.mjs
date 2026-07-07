@@ -19,6 +19,10 @@
 //   { type:"start",   id, cwd, model?, effort?, permissionMode?, resume? }  spawn (or respawn) claude
 //   { type:"prompt",  id, text, images? }                          send one user turn (images: [{mediaType,data}])
 //   { type:"interrupt", id }                                       hard-stop: kill + resume the session
+//   { type:"killShell", id, taskId, shellId?, command?, port? }    kill just one background shell / dev
+//                                                                 server's process subtree (→ shellKilled)
+//   { type:"probeShellPort", id, taskId, command }                 ask what TCP port a dev server listens
+//                                                                 on (→ shellPort)
 //   { type:"stop",    id }                                         kill the claude process
 //   { type:"close",   id }                                         kill + forget the session
 //   { type:"restartSession", id, model, effort, permissionMode }   restart with the given trio, resuming
@@ -44,6 +48,8 @@
 //   { type:"ready",   version, home, claudePath, ok }          sent once on connect (no id)
 //   { type:"started", id, pid, cwd, model, effort, permissionMode }
 //   { type:"interrupted", id }                                 the turn was hard-stopped; a respawn follows
+//   { type:"shellKilled", id, taskId, shellId, ok, error }     reply to killShell
+//   { type:"shellPort", id, taskId, port }                     reply to probeShellPort (null if unknown)
 //   { type:"event",   id, data }                               one claude stream-json object
 //   { type:"exit",    id, code }
 //   { type:"folder",  id, path }                               null path == cancelled
@@ -1109,6 +1115,119 @@ function killAll() {
   for (const id of [...sessions.keys()]) killSession(id);
 }
 
+// Enumerate the process subtree under a session's claude and hand back helpers to
+// navigate it. Background commands (dev servers, etc.) all run as descendants of
+// that claude, so this is the basis for both killing and probing a shell.
+function enumClaudeTree(id, cb) {
+  const s = sessions.get(id);
+  const rootPid = s && s.child && s.child.pid;
+  if (!rootPid) return cb(new Error("no session"));
+  // COLUMNS wide so ps doesn't clip the command column to the terminal width
+  // (which would break the command match below).
+  execFile("ps", ["-Ao", "pid=,ppid=,command="], { maxBuffer: 8 * 1024 * 1024, env: { ...process.env, COLUMNS: "100000" } }, (err, out) => {
+    if (err) return cb(err);
+    const parentOf = new Map(), cmdOf = new Map(), kids = new Map();
+    for (const line of out.split("\n")) {
+      const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+      if (!m) continue;
+      const pid = +m[1], ppid = +m[2];
+      parentOf.set(pid, ppid); cmdOf.set(pid, m[3]);
+      if (!kids.has(ppid)) kids.set(ppid, []);
+      kids.get(ppid).push(pid);
+    }
+    const subtree = (root) => {
+      const acc = [], seen = new Set(), stack = [root];
+      while (stack.length) {
+        const pid = stack.pop();
+        for (const c of kids.get(pid) || []) if (!seen.has(c)) { seen.add(c); acc.push(c); stack.push(c); }
+      }
+      return acc;
+    };
+    const descSet = new Set(subtree(rootPid)); // every process under this claude
+    // The ancestor of `pid` that is a direct child of claude — the shell's root.
+    const topShell = (pid) => {
+      let cur = pid;
+      while (parentOf.get(cur) !== rootPid) {
+        const par = parentOf.get(cur);
+        if (par === undefined || !descSet.has(par)) break;
+        cur = par;
+      }
+      return cur;
+    };
+    cb(null, { rootPid, cmdOf, subtree, descSet, topShell });
+  });
+}
+
+// Resolve a shell (by its command, or the port it listens on) to the FULL set of
+// PIDs in its subtree — the whole `bash → npm → node → vite` tree.
+function resolveShellPids(tree, opts, cb) {
+  const { cmdOf, subtree, descSet, topShell } = tree;
+  const collect = (targetPids) => {
+    const roots = new Set(targetPids.map(topShell).filter((p) => descSet.has(p)));
+    const all = new Set();
+    for (const r of roots) { all.add(r); for (const c of subtree(r)) all.add(c); }
+    return [...all];
+  };
+  // 1) Match by the shell's own command.
+  const cmd = String(opts.command || "").replace(/\s+/g, " ").trim();
+  if (cmd) {
+    const needle = cmd.slice(0, 48);
+    const hits = [...descSet].filter((pid) => (cmdOf.get(pid) || "").replace(/\s+/g, " ").includes(needle));
+    if (hits.length) return cb(collect(hits));
+  }
+  // 2) Fall back to whatever listens on the given port (dev servers).
+  if (opts.port) {
+    execFile("lsof", ["-nP", "-iTCP:" + opts.port, "-sTCP:LISTEN", "-t"], (e2, lout) => {
+      const pids = e2 || !lout ? [] : lout.split(/\s+/).map(Number).filter((n) => n && descSet.has(n));
+      cb(collect(pids));
+    });
+    return;
+  }
+  cb([]);
+}
+
+// Kill just ONE background shell / dev server, surgically — the clean equivalent
+// of the model's KillShell, without touching claude or any other shell.
+function killShell(id, opts) {
+  opts = opts || {};
+  const reply = (ok, error) =>
+    send({ type: "shellKilled", id, taskId: opts.taskId || null, shellId: opts.shellId || null, ok: !!ok, error: error || null });
+  enumClaudeTree(id, (err, tree) => {
+    if (err) return reply(false, err.message);
+    resolveShellPids(tree, opts, (pids) => {
+      if (!pids.length) return reply(false, "shell not found");
+      for (const pid of pids) { try { process.kill(pid, "SIGTERM"); } catch { /* gone */ } }
+      const hard = setTimeout(() => {
+        for (const pid of pids) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+      }, 700);
+      hard.unref?.();
+      reply(true);
+    });
+  });
+}
+
+// Ask the OS what TCP port a background shell (dev server) is actually listening
+// on — so the panel can show its `localhost:PORT` link even when the port isn't
+// in the command and the model never read the server's output.
+function probeShellPort(id, opts) {
+  opts = opts || {};
+  const reply = (port) => send({ type: "shellPort", id, taskId: opts.taskId || null, port: port || null });
+  if (!String(opts.command || "").trim()) return reply(null);
+  enumClaudeTree(id, (err, tree) => {
+    if (err) return reply(null);
+    resolveShellPids(tree, { command: opts.command }, (pids) => {
+      if (!pids.length) return reply(null);
+      execFile("lsof", ["-nP", "-a", "-p", pids.join(","), "-iTCP", "-sTCP:LISTEN", "-Fn"], (e2, lout) => {
+        if (e2 || !lout) return reply(null);
+        const ports = [];
+        for (const line of lout.split("\n")) { const m = /^n.*:(\d+)$/.exec(line); if (m) ports.push(+m[1]); }
+        ports.sort((a, b) => a - b);
+        reply(ports[0] || null);
+      });
+    });
+  });
+}
+
 // ---- slash-command discovery ------------------------------------------------
 // claude only emits its `slash_commands` list (in the system/init event) once it
 // receives the first user message — so a brand-new chat has no list to show. We
@@ -1680,6 +1799,12 @@ function handle(msg) {
       break;
     case "interrupt":
       interrupt(id);
+      break;
+    case "killShell":
+      killShell(id, msg);
+      break;
+    case "probeShellPort":
+      probeShellPort(id, msg);
       break;
     case "stop":
     case "close":

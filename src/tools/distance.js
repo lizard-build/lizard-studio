@@ -37,18 +37,28 @@
   }
   function reflow() { if (last) { last.rects = boxRects(last.el); subs.forEach((fn) => fn(last, null)); } }
 
+  // Rects are returned in SCREEN coordinates so tools draw them directly. In
+  // responsive mode the element lives in the scaled device frame: we map every
+  // edge and every box-model band through the frame's origin + scale. `sc` (the
+  // scale) rides along so label renderers can divide back to device px — the
+  // numbers a user cares about are the device's, not the shrunk-on-screen ones.
   function boxRects(el) {
-    const r = el.getBoundingClientRect();
-    const cs = getComputedStyle(el);
-    const n = (p) => parseFloat(cs.getPropertyValue(p)) || 0;
+    const vp = RK.viewport();
+    const framed = vp.framed && el.ownerDocument === vp.doc;
+    const sc = framed ? vp.scale : 1;
+    const ox = framed ? vp.ox : 0, oy = framed ? vp.oy : 0;
+    const rr = el.getBoundingClientRect();
+    const cs = RK.computedStyle(el);
+    const n = (p) => (parseFloat(cs.getPropertyValue(p)) || 0) * sc;
     const m = { t: n("margin-top"), r: n("margin-right"), b: n("margin-bottom"), l: n("margin-left") };
     const bd = { t: n("border-top-width"), r: n("border-right-width"), b: n("border-bottom-width"), l: n("border-left-width") };
     const p = { t: n("padding-top"), r: n("padding-right"), b: n("padding-bottom"), l: n("padding-left") };
+    const r = { left: ox + rr.left * sc, top: oy + rr.top * sc, width: rr.width * sc, height: rr.height * sc };
     const border = { x: r.left, y: r.top, w: r.width, h: r.height };
     const margin = { x: r.left - m.l, y: r.top - m.t, w: r.width + m.l + m.r, h: r.height + m.t + m.b };
     const padding = { x: r.left + bd.l, y: r.top + bd.t, w: r.width - bd.l - bd.r, h: r.height - bd.t - bd.b };
     const content = { x: padding.x + p.l, y: padding.y + p.t, w: padding.w - p.l - p.r, h: padding.h - p.t - p.b };
-    return { border, margin, padding, content, m, p, bd, tag: tagLabel(el) };
+    return { border, margin, padding, content, m, p, bd, sc, tag: tagLabel(el) };
   }
 
   function tagLabel(el) {
@@ -72,7 +82,7 @@
       }
     }
 
-    function gapLine(g, hg, x1, y1, x2, y2, value, axis) {
+    function gapLine(g, hg, x1, y1, x2, y2, value, axis, sc) {
       if (value <= 0.5) return;
       g.appendChild(RK.svg("line", { x1, y1, x2, y2, stroke: "#EF4444", "stroke-width": 1 }));
       // end caps
@@ -83,7 +93,7 @@
         g.appendChild(RK.svg("line", { x1: x1 - 4, y1, x2: x1 + 4, y2: y1, stroke: "#EF4444", "stroke-width": 1 }));
         g.appendChild(RK.svg("line", { x1: x2 - 4, y1: y2, x2: x2 + 4, y2, stroke: "#EF4444", "stroke-width": 1 }));
       }
-      const badge = RK.h("div", { class: "rk-badge warn" }, String(RK.round(value)));
+      const badge = RK.h("div", { class: "rk-badge warn" }, String(RK.round(value / (sc || 1))));
       hg.appendChild(badge);
       badge.style.left = (x1 + x2) / 2 + "px";
       badge.style.top = (y1 + y2) / 2 + "px";
@@ -94,19 +104,19 @@
       const hg = RK.htmlLayer(ID); hg.replaceChildren();
 
       if (altDown && anchor && hit && anchor.el !== hit.el) {
-        const a = anchor.rects.border, b = hit.rects.border;
+        const a = anchor.rects.border, b = hit.rects.border, sc = hit.rects.sc;
         // outline both boxes — anchor stays neutral grey, target uses the accent
         [["#5F646D", a], [RK.accent(), b]].forEach(([c, r]) =>
           g.appendChild(rect({ x: r.x, y: r.y, width: r.w, height: r.h, fill: "none", stroke: c, "stroke-width": 1, "stroke-dasharray": c === "#5F646D" ? "4 3" : "0" })));
 
         // vertical gap
         const cx = b.x + b.w / 2;
-        if (b.y >= a.y + a.h) gapLine(g, hg, cx, a.y + a.h, cx, b.y, b.y - (a.y + a.h), "v");
-        else if (b.y + b.h <= a.y) gapLine(g, hg, cx, b.y + b.h, cx, a.y, a.y - (b.y + b.h), "v");
+        if (b.y >= a.y + a.h) gapLine(g, hg, cx, a.y + a.h, cx, b.y, b.y - (a.y + a.h), "v", sc);
+        else if (b.y + b.h <= a.y) gapLine(g, hg, cx, b.y + b.h, cx, a.y, a.y - (b.y + b.h), "v", sc);
         // horizontal gap
         const cy = b.y + b.h / 2;
-        if (b.x >= a.x + a.w) gapLine(g, hg, a.x + a.w, cy, b.x, cy, b.x - (a.x + a.w), "h");
-        else if (b.x + b.w <= a.x) gapLine(g, hg, b.x + b.w, cy, a.x, cy, a.x - (b.x + b.w), "h");
+        if (b.x >= a.x + a.w) gapLine(g, hg, a.x + a.w, cy, b.x, cy, b.x - (a.x + a.w), "h", sc);
+        else if (b.x + b.w <= a.x) gapLine(g, hg, b.x + b.w, cy, a.x, cy, a.x - (b.x + b.w), "h", sc);
         return;
       }
 

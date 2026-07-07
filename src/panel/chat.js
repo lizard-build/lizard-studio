@@ -57,10 +57,13 @@
     chat.statusWordAt = Date.now();
   }
 
-  // mm:ss once a turn runs past a minute, matching Claude Code's own timer.
+  // mm:ss once a turn runs past a minute, matching Claude Code's own timer;
+  // rolls over to "1h 39m 34s" once it passes an hour.
   function formatElapsed(secs) {
     if (secs < 60) return `${secs}s`;
-    return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+    const m = Math.floor(secs / 60);
+    if (m < 60) return `${m}m ${secs % 60}s`;
+    return `${Math.floor(m / 60)}h ${m % 60}m ${secs % 60}s`;
   }
   let statusTimer = null;
 
@@ -75,13 +78,13 @@
     { id: "bypassPermissions", label: "Bypass permissions", short: "Bypass", hint: "Allows everything without asking. Use with care.", cls: "mode-bypass" },
   ];
 
-  // Listed most- to least-capable — Fable 5 is the top tier (above Opus),
-  // then Opus, Sonnet, Haiku fastest/smallest.
+  // Listed least- to most-capable — Haiku is fastest/smallest, then Sonnet,
+  // Opus, and Fable 5 as the top tier (above Opus).
   const MODELS = [
-    { id: "claude-fable-5", label: "Fable 5" },
-    { id: "claude-opus-4-8", label: "Opus 4.8" },
-    { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
+    { id: "claude-sonnet-5", label: "Sonnet 5" },
+    { id: "claude-opus-4-8", label: "Opus 4.8" },
+    { id: "claude-fable-5", label: "Fable 5" },
   ];
   const DEFAULT_MODEL = "claude-opus-4-8";
 
@@ -131,6 +134,9 @@
   let reconnectTimer = null;
   let mounted = false;
   let home = null;
+  // Host protocol version last reported in `ready` (0 until the host connects).
+  // Surfaced read-only in the Settings → Connection tab.
+  let hostVersion = 0;
   // Grace timer for host self-update: set when a stale host is asked to update
   // itself; if it fires the host never answered (too old) — show the manual
   // install command instead.
@@ -156,7 +162,32 @@
   let lastCwd = null;
 
   // Slash-command autocomplete (populated from each session's init event).
-  const slash = { open: false, items: [], index: 0 };
+  // `argCmd`/`argHint` track a just-accepted command that expects an argument,
+  // so the ghost placeholder in the composer can echo what to type.
+  const slash = { open: false, items: [], index: 0, argCmd: null, argHint: "" };
+
+  // Commands that take an argument after the name. The value is the hint shown
+  // both in the menu row and as a ghost placeholder once the command is picked
+  // (mirroring Claude Code's own argument-hint). Presence here also changes the
+  // accept behavior: selecting the command inserts "/cmd " and waits for input
+  // instead of firing immediately (which would run the command bare). The
+  // headless CLI's init event ships only command *names* — no hints — so this
+  // list is curated to the built-ins and skills that clearly expect an arg.
+  const SLASH_ARG_HINTS = {
+    goal: "<condition>",
+    compact: "[extra instructions]",
+    batch: "<change to make>",
+    loop: "<interval> <command>",
+    schedule: "<when> <task>",
+    "deep-research": "<research question>",
+    review: "[PR number or URL]",
+    "code-review": "[low|medium|high|max] [--fix]",
+    debug: "<what's broken>",
+    "update-config": "<setting change>",
+  };
+  function slashHint(cmd) {
+    return SLASH_ARG_HINTS[cmd] || SLASH_ARG_HINTS[String(cmd).split(":").pop()] || "";
+  }
 
   function newId() {
     try {
@@ -353,6 +384,33 @@
       diffDeletions: 0,
       diffDrawerOpen: false,
       diffCollapsedFiles: new Set(), // paths collapsed in the drawer
+      // Background work spawned by this session — mirrors Claude Code's "tasks
+      // pane", which lists subagents and background shell commands together.
+      // `agents` keys on the Task tool_use id; `bgTasks` on the launching Bash
+      // tool_use id. `bgShell` maps a shell id (parsed from the launch result)
+      // back to its bgTasks key so later BashOutput/KillShell calls and the
+      // CLI's synthetic completion notices can resolve which task finished.
+      // Each entry: { id, label, status: 'running'|'done'|'error', startedAt }.
+      // Shown only once something actually spawns (see syncGitBar).
+      agents: new Map(),
+      bgTasks: new Map(),
+      bgShell: new Map(),
+      // Async/background subagents return an immediate launch ack, then finish
+      // later via a task-notification. Maps that notification's task id back to
+      // the agent key so completion (and its real elapsed time) lands correctly.
+      agentTask: new Map(),
+      // Preview servers (dev servers started via the preview MCP) — a third kind
+      // of background work. `previews` keys on the preview_start tool_use id;
+      // `previewServer` maps a serverId back to its key so a later preview_stop
+      // can resolve which one shut down.
+      previews: new Map(),
+      previewServer: new Map(),
+      tasksDrawerOpen: false,
+      tasksFinishedCollapsed: false,
+      // Drawer view: "list" (Running/Finished) or "transcript" (one subagent's
+      // captured messages). transcriptAgentId names which agent is shown.
+      tasksView: "list",
+      transcriptAgentId: null,
       // Pending permission asks (can_use_tool): requestId -> { card, opts, … }.
       permCards: new Map(),
       // Set right before sending a bare "/usage" (or "/usage-credits" /
@@ -439,25 +497,28 @@
     tabTipTimer = setTimeout(() => {
       const tip = ensureTabTip();
       tip.innerHTML = "";
-      tip.appendChild(el("div", "chat-tab-tip-title", chat.title));
-      const folderRow = el("div", "chat-tab-tip-row");
-      folderRow.innerHTML = ICON("folder", 12);
-      folderRow.appendChild(document.createTextNode(shortPath(chat.cwd) || "No folder selected"));
-      tip.appendChild(folderRow);
-      if (chat.isRepo && chat.branch) {
-        const branchRow = el("div", "chat-tab-tip-row");
-        branchRow.innerHTML = ICON("git-branch", 12);
-        branchRow.appendChild(document.createTextNode(chat.branch));
-        tip.appendChild(branchRow);
-      }
+      // Each icon row is a flex box: a fixed 12px icon slot + gap + text. The
+      // title has no icon slot, so it sits flush at the left edge — aligned
+      // with the icons below, not with their text.
+      const tipLine = (cls, iconName, text) => {
+        const row = el("div", cls);
+        if (iconName) {
+          const ico = el("span", "chat-tab-tip-ico");
+          ico.innerHTML = ICON(iconName, 12);
+          row.appendChild(ico);
+        }
+        row.appendChild(el("span", "chat-tab-tip-text", text));
+        tip.appendChild(row);
+        return row;
+      };
+      tipLine("chat-tab-tip-title", null, chat.title);
+      tipLine("chat-tab-tip-row", "folder", shortPath(chat.cwd) || "No folder selected");
+      if (chat.isRepo && chat.branch) tipLine("chat-tab-tip-row", "git-branch", chat.branch);
       // Built fresh on every hover, so it always shows the latest reading.
       // Always present (0 before the first reply, and briefly after /compact
       // until the next reply reports the new size) so the user always knows
       // where to find it.
-      const ctxRow = el("div", "chat-tab-tip-row");
-      ctxRow.innerHTML = ICON("gauge", 12);
-      ctxRow.appendChild(document.createTextNode("Context: " + fmtTokens(chat.ctxTokens || 0) + " tokens"));
-      tip.appendChild(ctxRow);
+      tipLine("chat-tab-tip-row", "gauge", "Context: " + fmtTokens(chat.ctxTokens || 0) + " tokens");
       tip.classList.add("show");
       const r = tabEl.getBoundingClientRect();
       tip.style.top = r.bottom + 6 + "px";
@@ -842,6 +903,9 @@
       const chip = el("div", "ctx-chip");
       const ic = el("span", "ctx-chip-ic");
       let label;
+      // Only the element-selector label is actual code (`<div>`, `<button>`)
+      // — it gets the mono font. File names and page titles are plain text.
+      let code = false;
       if (c.kind === "page") {
         ic.innerHTML = ICON("globe", 12);
         label = c.title ? c.title.slice(0, 44) : c.url || "Page";
@@ -854,6 +918,7 @@
         ic.innerHTML = ICON("selection", 13);
         label = `<${c.tag}>`;
         chip.title = c.selector || c.tag;
+        code = true;
       }
       const x = el("button", "ctx-chip-x");
       x.innerHTML = ICON("x", 12);
@@ -862,7 +927,7 @@
       // Icon + × share the leading slot — the × reveals on hover (Cursor-style).
       chip.appendChild(ic);
       chip.appendChild(x);
-      chip.appendChild(el("span", "ctx-chip-label", label));
+      chip.appendChild(el("span", "ctx-chip-label" + (code ? " code" : ""), label));
       els.contextChips.appendChild(chip);
     });
   }
@@ -1102,7 +1167,8 @@
     }
   }
 
-  function systemNote(chat, text, kind) {
+  function systemNote(chat, text, kind, opts) {
+    opts = opts || {};
     const note = el("div", "sys-note" + (kind ? " " + kind : ""));
     if (kind === "warn") {
       const ic = el("span", "sys-ic");
@@ -1110,6 +1176,24 @@
       note.appendChild(ic);
     }
     note.appendChild(el("span", null, text));
+    // Transient notes (rate-limit warnings, etc.) carry a close affordance and
+    // can fade themselves out — they aren't history worth keeping around like a
+    // "Switched to branch…" record is.
+    const remove = () => {
+      if (!note.parentNode) return;
+      note.classList.add("leaving");
+      setTimeout(() => note.remove(), 180);
+    };
+    if (opts.dismissible) {
+      note.classList.add("dismissible");
+      const close = el("button", "sys-close");
+      close.type = "button";
+      close.setAttribute("aria-label", "Dismiss");
+      close.innerHTML = ICON("x", 12);
+      close.addEventListener("click", remove);
+      note.appendChild(close);
+    }
+    if (opts.ttl) setTimeout(remove, opts.ttl);
     append(chat, note);
     return note;
   }
@@ -1602,8 +1686,17 @@
     const resultEl = el("div", "tool-result hidden");
     card.appendChild(resultEl);
 
+    // A poll/kill/stop carries the id it targets in its input — stash it so the
+    // result can resolve which background task / preview it belongs to.
+    const inp = block.input || {};
+    const shellId =
+      (block.name === "KillShell" || block.name === "BashOutput")
+        ? (inp.shell_id || inp.bash_id) || null
+        : null;
+    const stopServerId = isPreviewStop(block.name) ? (inp.serverId || inp.server_id) || null : null;
     appendToolCard(chat, body, card, block.name);
-    chat.toolCards.set(block.id, { card, resultEl, toggle, name: block.name });
+    chat.toolCards.set(block.id, { card, resultEl, toggle, name: block.name, shellId, stopServerId });
+    noteToolStart(chat, block, card);
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
   }
 
@@ -1806,6 +1899,9 @@
       entry.resultEl.appendChild(R.codeBlock(text, ""));
     }
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+    // Resolve this result against any subagent / background task it belongs to
+    // before the entry is dropped (it carries the poll/kill target shell id).
+    noteToolResult(chat, toolUseId, entry.name, text, isError, entry.shellId, entry.stopServerId);
     // A tool id gets exactly one result — drop the entry so a long agent
     // session doesn't pin every resolved card's DOM in the map forever.
     // (endTurn's sweep only needs the still-running entries.)
@@ -1821,6 +1917,302 @@
     }
     if (content && content.text) return content.text;
     return content == null ? "" : String(content);
+  }
+
+  // ---- background-work tracking (Claude Code "tasks pane") -------------------
+  // Subagents (the Task tool) and background shell commands (Bash with
+  // run_in_background) are the two kinds of work that keep running alongside the
+  // main turn — Claude Code lists both together in its "tasks pane". We register
+  // each on launch and resolve it on completion so the composer's tasks chip can
+  // mirror them. Nothing shows until something actually spawns.
+
+  // While replaying a transcript this holds the current event's timestamp so
+  // task start/finish are stamped in historical time, not "now" (0 = live).
+  let replayStamp = 0;
+  function taskNow() { return replayStamp || Date.now(); }
+
+  // A preview MCP tool call, regardless of which server exposes it
+  // (mcp__…__preview_start / mcp__…__preview_stop).
+  function isPreviewStart(name) { return /(?:^|_)preview_start$/.test(name || ""); }
+  function isPreviewStop(name) { return /(?:^|_)preview_stop$/.test(name || ""); }
+
+  // A background command that's really a dev/preview server — recognised by the
+  // usual invocations. Such tasks are shown as "Preview" (with their URL once we
+  // can read it) instead of "Bash".
+  function isDevServerCmd(cmd) {
+    if (!cmd) return false;
+    return /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|preview)\b/i.test(cmd) ||
+      /\b(?:vite|next|nuxt|astro|remix|ng\s+serve|webpack(?:\s+serve|-dev-server)?|rollup\s+-\w*w|parcel|serve|http-server|live-server|browser-sync|storybook|remotion\s+(?:studio|preview)|php\s+-S|rails\s+s|flask\s+run|uvicorn|gunicorn|python3?\s+-m\s+http\.server)\b/i.test(cmd);
+  }
+
+  // Pull a localhost URL out of server output; returns a display form like
+  // "localhost:5173" (scheme + trailing slash stripped).
+  function parsePreviewUrl(text) {
+    if (!text) return null;
+    const m = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?(?:\/[^\s"'<>]*)?/i.exec(text);
+    if (m) return m[0].replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+    const p = /\blocalhost:(\d+)/i.exec(text);
+    return p ? "localhost:" + p[1] : null;
+  }
+
+  // An explicit port in the launch command (`--port 3000`, `-p 3000`, `PORT=3000`,
+  // or `http.server 8000`), so a dev server can show its address before any
+  // output is read.
+  function parseCmdPort(cmd) {
+    const m = /(?:--port[ =]|\s-p[ =]|\bPORT[ =])(\d{2,5})\b/i.exec(cmd || "") ||
+      /\bhttp\.server\s+(\d{2,5})\b/i.exec(cmd || "");
+    return m ? m[1] : null;
+  }
+
+  // Well-known default port per dev server, so a directly-named tool shows its
+  // URL immediately. A bare `npm run dev` is intentionally absent — the framework
+  // (and its port) isn't knowable from the command, so it waits for output.
+  const DEV_PORTS = [
+    [/\bvite\b/i, 5173], [/\bnext\b/i, 3000], [/\bnuxt\b/i, 3000], [/\bastro\b/i, 4321],
+    [/\bremix\b/i, 3000], [/\bng\s+serve\b/i, 4200], [/\bwebpack(?:\s+serve|-dev-server)?\b/i, 8080],
+    [/\bparcel\b/i, 1234], [/\bstorybook\b/i, 6006], [/\bgatsby\b/i, 8000],
+    [/\bhttp-server\b/i, 8080], [/\blive-server\b/i, 8080], [/\bbrowser-sync\b/i, 3000],
+    [/\bremotion\s+studio\b/i, 3000], [/\brails\s+s\b/i, 3000], [/\bflask\s+run\b/i, 5000],
+    [/\buvicorn\b/i, 8000], [/\bgunicorn\b/i, 8000],
+  ];
+  function defaultDevPort(cmd) {
+    for (const [re, port] of DEV_PORTS) if (re.test(cmd || "")) return port;
+    return null;
+  }
+
+  // If `text` reveals a localhost URL, attach it to a background task and mark it
+  // a server (so it renders as "Preview"). Returns true if anything changed.
+  function applyPreviewUrl(entry, text) {
+    if (!entry || entry.url) return false;
+    const u = parsePreviewUrl(text);
+    if (!u) return false;
+    entry.url = u;
+    entry.isServer = true;
+    return true;
+  }
+
+  // Register a just-launched tool if it's a subagent, a background command, or a
+  // preview server. `card` is the tool card the launch rendered, so "View
+  // transcript" can jump back to where the subagent's work streams inline.
+  function noteToolStart(chat, block, card) {
+    const name = block.name;
+    const input = block.input || {};
+    if (name === "Task" || name === "Agent") {
+      chat.agents.set(block.id, {
+        id: block.id, kind: "agent",
+        label: input.description || input.subagent_type || "Agent",
+        sub: input.subagent_type || "", status: "running", startedAt: taskNow(),
+        completedAt: 0, inTokens: 0, outTokens: 0, toolUses: 0, lastTool: "", card,
+        // Captured sidechain transcript: msgs keyed by message id (each event
+        // carries the message's cumulative content, so replacing dedups it);
+        // results maps a tool_use id to its output.
+        msgs: new Map(), results: new Map(),
+      });
+      syncTasks(chat);
+    } else if (name === "Bash" && input.run_in_background) {
+      const server = isDevServerCmd(input.command);
+      // Best-known port up front: explicit flag → well-known default → (else)
+      // wait for the server to print its address.
+      const port = server ? (parseCmdPort(input.command) || defaultDevPort(input.command)) : null;
+      chat.bgTasks.set(block.id, {
+        id: block.id, kind: "bg", shellId: null,
+        label: (input.command || "").split("\n")[0].slice(0, 120) || "Background command",
+        command: input.command || "", // full command — used to find the shell process to kill
+        status: "running", startedAt: taskNow(), completedAt: 0, card,
+        // Dev servers render as "Preview"; url comes from the command's port, a
+        // known default, else the first localhost address its output prints.
+        isServer: server, url: port ? "localhost:" + port : "",
+      });
+      syncTasks(chat);
+    } else if (isPreviewStart(name)) {
+      chat.previews.set(block.id, {
+        id: block.id, kind: "preview",
+        label: input.name || "Preview", url: "", serverId: null,
+        status: "running", startedAt: taskNow(), completedAt: 0, card,
+      });
+      syncTasks(chat);
+    }
+  }
+
+  // A subagent runs on its own sidechain: its assistant messages arrive tagged
+  // with parent_tool_use_id = the Task tool's id. Roll their usage / tool calls
+  // up onto the agent entry so the drawer can show live tokens, tool-use count,
+  // and what it's doing right now.
+  function noteAgentActivity(chat, parentId, message) {
+    const agent = chat.agents.get(parentId);
+    if (!agent || !message || !message.id) return;
+    // Each per-block assistant event carries the message's cumulative content, so
+    // storing by id (replace) keeps exactly one copy per message — no double
+    // counting of tokens or steps.
+    agent.msgs.set(message.id, message);
+    recomputeAgentStats(agent);
+    if (agent.status === "running" || transcriptOpenFor(chat, agent)) syncTasks(chat);
+  }
+
+  // Roll the stored messages up into the numbers the card shows.
+  function recomputeAgentStats(agent) {
+    let out = 0, inMax = 0, tools = 0, last = "";
+    for (const m of agent.msgs.values()) {
+      const u = m.usage || {};
+      out += u.output_tokens || 0;
+      inMax = Math.max(inMax, u.input_tokens || 0);
+      for (const b of m.content || []) {
+        if (b && b.type === "tool_use") {
+          tools++;
+          last = (TOOL_META[b.name] && TOOL_META[b.name].label) || b.name || last;
+        }
+      }
+    }
+    agent.outTokens = out; agent.inTokens = inMax; agent.toolUses = tools; agent.lastTool = last;
+  }
+
+  // Record a subagent's tool result so its transcript can show the output.
+  function noteAgentResult(chat, parentId, content) {
+    const agent = chat.agents.get(parentId);
+    if (!agent || !Array.isArray(content)) return;
+    for (const b of content) {
+      if (b && b.type === "tool_result") {
+        agent.results.set(b.tool_use_id, { text: normalizeResult(b.content), isError: !!b.is_error });
+      }
+    }
+    if (transcriptOpenFor(chat, agent)) syncTasks(chat);
+  }
+
+  function transcriptOpenFor(chat, agent) {
+    return chat.tasksView === "transcript" && chat.transcriptAgentId === agent.id;
+  }
+
+  // Pull a shell id ("bash_1") out of a launch/poll payload. The CLI reports it
+  // as "…background with ID: bash_1" on launch and references it inline later.
+  function parseShellId(text) {
+    if (!text) return null;
+    const m = /\bID:\s*([A-Za-z0-9_-]+)/.exec(text) || /\b(bash_[A-Za-z0-9]+)\b/.exec(text);
+    return m ? m[1] : null;
+  }
+
+  // Flip a task to a terminal state, stamping when it finished so the drawer can
+  // freeze its elapsed time. A no-op if it already finished.
+  function finishTask(entry, status) {
+    if (!entry || entry.status !== "running") return false;
+    entry.status = status;
+    entry.completedAt = taskNow();
+    return true;
+  }
+
+  // Resolve a tool result against the tracked work. `shellId` is the shell a
+  // BashOutput poll / KillShell targets (stashed on the tool card at launch).
+  function noteToolResult(chat, toolUseId, name, text, isError, shellId, stopServerId) {
+    const agent = chat.agents.get(toolUseId);
+    if (agent) {
+      // A background/async subagent's result is just a launch ack ("Async agent
+      // launched … agentId: X … notified when it completes") — keep it running
+      // and finish later on its task-notification, so the elapsed time is real
+      // instead of collapsing to ~0s. A foreground agent's result IS completion.
+      const asyncId = !isError && /agentId:\s*([A-Za-z0-9_-]+)/i.exec(text || "");
+      if (asyncId) {
+        agent.taskId = asyncId[1];
+        chat.agentTask.set(asyncId[1], toolUseId);
+        syncTasks(chat);
+        return;
+      }
+      if (finishTask(agent, isError ? "error" : "done")) syncTasks(chat);
+      return;
+    }
+    const bg = chat.bgTasks.get(toolUseId);
+    if (bg) {
+      // Launching a background command returns immediately with a shell id; the
+      // command itself keeps running, so the task stays 'running' — completion
+      // arrives later via a poll, a kill, or the CLI's synthetic notice.
+      const sid = parseShellId(text);
+      if (sid) { bg.shellId = sid; chat.bgShell.set(sid, toolUseId); }
+      if (applyPreviewUrl(bg, text)) syncTasks(chat);
+      if (isError && finishTask(bg, "error")) syncTasks(chat);
+      return;
+    }
+    const preview = chat.previews.get(toolUseId);
+    if (preview) {
+      // preview_start returns the running server's id + port; the server keeps
+      // running until an explicit preview_stop.
+      if (isError) { finishTask(preview, "error"); syncTasks(chat); return; }
+      const m = /"serverId"\s*:\s*"([^"]+)"/.exec(text);
+      const port = /"port"\s*:\s*(\d+)/.exec(text);
+      if (m) { preview.serverId = m[1]; chat.previewServer.set(m[1], toolUseId); }
+      if (port) preview.url = "localhost:" + port[1];
+      syncTasks(chat);
+      return;
+    }
+    if ((name === "KillShell" || name === "BashOutput") && shellId) {
+      const key = chat.bgShell.get(shellId);
+      const entry = key && chat.bgTasks.get(key);
+      if (entry) {
+        // A poll can be the first place a dev server's URL shows up.
+        if (name === "BashOutput" && applyPreviewUrl(entry, text)) syncTasks(chat);
+        // A kill always ends it; a poll only when its output says the process is
+        // no longer running.
+        if (entry.status === "running" &&
+            (name === "KillShell" || /\b(completed|exit code|process (?:exited|finished|completed))\b/i.test(text))) {
+          if (finishTask(entry, name === "BashOutput" && isError ? "error" : "done")) syncTasks(chat);
+        }
+      }
+    }
+    if (stopServerId) {
+      const key = chat.previewServer.get(stopServerId);
+      if (key && finishTask(chat.previews.get(key), "done")) syncTasks(chat);
+    }
+  }
+
+  // The CLI injects a synthetic user turn when a background task finishes or is
+  // killed; if it names a tracked shell, stop showing that task as running.
+  // The shell id ALSO appears in "still running" reminders, so a bare mention
+  // must not end the task — require an actual completion/kill keyword, otherwise
+  // a task gets marked done the instant it launches (elapsed collapses to ~0s).
+  const BG_DONE_RE = /\b(completed|complete|exited|exit code|finished|has (?:finished|completed|exited)|killed|terminated|stopped|no longer running)\b/i;
+  function scanBgNotice(chat, text) {
+    if (!text || !chat.bgShell.size || !BG_DONE_RE.test(text)) return;
+    let changed = false;
+    for (const [sid, key] of chat.bgShell) {
+      if (text.includes(sid) && finishTask(chat.bgTasks.get(key), "done")) changed = true;
+    }
+    if (changed) syncTasks(chat);
+  }
+
+  // A background subagent finishes via a task-notification naming its id. Match
+  // it back to the deferred agent so it moves to Finished with a real duration.
+  function scanAgentNotice(chat, text) {
+    if (!text || !chat.agentTask.size || !BG_DONE_RE.test(text)) return;
+    const failed = /\b(failed|error)\b/i.test(text);
+    let changed = false;
+    for (const [id, key] of chat.agentTask) {
+      if (text.includes(id) && finishTask(chat.agents.get(key), failed ? "error" : "done")) changed = true;
+    }
+    if (changed) syncTasks(chat);
+  }
+
+  // Running-first, then by launch order — live work surfaces at the top.
+  function sortedTasks(map) {
+    const rank = (t) => (t.status === "running" ? 0 : t.status === "error" ? 1 : 2);
+    return [...map.values()].sort((a, b) => rank(a) - rank(b) || a.startedAt - b.startedAt);
+  }
+  function taskTotals(chat) {
+    let runningAgents = 0, runningBg = 0, runningPreview = 0;
+    for (const a of chat.agents.values()) if (a.status === "running") runningAgents++;
+    for (const b of chat.bgTasks.values()) if (b.status === "running") runningBg++;
+    for (const p of chat.previews.values()) if (p.status === "running") runningPreview++;
+    return {
+      agents: chat.agents.size, bg: chat.bgTasks.size, previews: chat.previews.size,
+      total: chat.agents.size + chat.bgTasks.size + chat.previews.size,
+      runningAgents, runningBg, runningPreview,
+      running: runningAgents + runningBg + runningPreview,
+    };
+  }
+
+  // Light refresh on a task lifecycle tick: only the active tab has visible bar
+  // state, and we skip the diff-drawer work (a task tick never changes the diff).
+  function syncTasks(chat) {
+    if (chat.id !== activeId) return;
+    syncGitBar(chat, true);
+    if (chat.tasksDrawerOpen) renderTasksDrawer(chat);
+    ensurePortProbe(chat);
   }
 
   // ---- permission asks (Claude Code-style) ----------------------------------
@@ -2313,13 +2705,17 @@
       // Incremental tokens from --include-partial-messages: render assistant
       // text and thinking live, block by block.
       case "stream_event":
-        // Sub-agent (sidechain) calls run their own, separate context — only
-        // main-chain usage reflects this conversation's size.
-        if (!d.parent_tool_use_id) trackCtxStream(chat, d.event);
+        // A subagent (sidechain) runs in its own context and must NOT stream into
+        // the main transcript — it's surfaced in the tasks drawer instead.
+        if (d.parent_tool_use_id) break;
+        trackCtxStream(chat, d.event);
         handleStreamEvent(chat, d.event);
         break;
       case "assistant": {
-        if (!d.parent_tool_use_id) noteCtxUsage(chat, d.message && d.message.usage);
+        // Subagent turn — track its usage / tool calls for the drawer, but don't
+        // render its messages into the shared chat.
+        if (d.parent_tool_use_id) { noteAgentActivity(chat, d.parent_tool_use_id, d.message); break; }
+        noteCtxUsage(chat, d.message && d.message.usage);
         const msgId = d.message && d.message.id;
         const body = ensureAssistantBody(chat, msgId);
         const streamed = msgId && chat.streamedMsgIds.has(msgId);
@@ -2341,6 +2737,12 @@
         break;
       }
       case "user": {
+        // A subagent's own tool results belong to its sidechain — keep them out
+        // of the shared chat, but capture them for its transcript view.
+        if (d.parent_tool_use_id) {
+          noteAgentResult(chat, d.parent_tool_use_id, d.message && d.message.content);
+          break;
+        }
         // /compact (and other synthetic turns) emit a `user` event whose
         // content is a plain string, not a block array — iterating it with
         // for..of would walk individual characters instead of blocks.
@@ -2351,13 +2753,19 @@
               fillToolResult(chat, block.tool_use_id, block.content, block.is_error);
             }
           }
-        } else if (typeof content === "string" && /<local-command-std(out|err)>/.test(content)) {
-          // Local-command output that arrives as a plain-string user event —
-          // e.g. /compact's "Compacted", which is the only visible completion
-          // signal the command has. (/usage's card is drawn from its synthetic
-          // assistant reply instead — skip while that's pending so a stdout
-          // copy of the same text can't double-render it.)
-          if (!chat.pendingUsageCard) renderLocalCommandOutput(chat, content, Date.now());
+        } else if (typeof content === "string") {
+          // A background task / async subagent finishing arrives as a synthetic
+          // user turn naming its shell / task id — mark that work done.
+          scanBgNotice(chat, content);
+          scanAgentNotice(chat, content);
+          if (/<local-command-std(out|err)>/.test(content)) {
+            // Local-command output that arrives as a plain-string user event —
+            // e.g. /compact's "Compacted", which is the only visible completion
+            // signal the command has. (/usage's card is drawn from its synthetic
+            // assistant reply instead — skip while that's pending so a stdout
+            // copy of the same text can't double-render it.)
+            if (!chat.pendingUsageCard) renderLocalCommandOutput(chat, content, Date.now());
+          }
         }
         break;
       }
@@ -2366,7 +2774,20 @@
         break;
       case "rate_limit_event":
         if (d.rate_limit_info && d.rate_limit_info.status !== "allowed") {
-          systemNote(chat, `Rate limit: ${d.rate_limit_info.status}`, "warn");
+          const status = d.rate_limit_info.status;
+          // Soft "allowed_warning" still lets requests through — show it plainly
+          // and let it fade. Only a hard rejection earns the amber warn styling.
+          const soft = status === "allowed_warning";
+          const label = soft
+            ? "Approaching your usage limit"
+            : status === "rejected"
+            ? "Usage limit reached — requests are paused"
+            // Humanize any other enum the SDK might send (e.g. "queued").
+            : status.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+          systemNote(chat, label, soft ? null : "warn", {
+            dismissible: true,
+            ttl: soft ? 8000 : 0,
+          });
         }
         break;
     }
@@ -2555,7 +2976,9 @@
       case "ready":
         hostReady = true;
         home = msg.home || home;
+        hostVersion = msg.version || 0;
         hideOnboarding();
+        refreshSettingsIfOpen();
         if (!msg.ok) {
           const a = chats.get(activeId);
           if (a) systemNote(a, "Host is up but couldn't find the `claude` CLI. Install it: npm i -g @anthropic-ai/claude-code", "warn");
@@ -2681,6 +3104,12 @@
           if (chat.id === activeId) syncGitBar(chat);
         }
         break;
+      case "shellKilled":
+        onShellKilled(msg);
+        break;
+      case "shellPort":
+        onShellPort(msg);
+        break;
       case "needsFolder":
         // Host refused to start without a valid directory (none given, or the
         // saved one is gone). Drop the stale path, surface the empty state, and
@@ -2754,6 +3183,10 @@
     if (!chat || !Array.isArray(events)) return;
     for (const ev of events) {
       if (!ev) continue;
+      // Stamp task start/finish from the transcript's own timestamps during
+      // replay, so a replayed subagent's elapsed reflects its real historical
+      // duration instead of collapsing to ~0s (everything replayed "now").
+      replayStamp = ev.timestamp ? Date.parse(ev.timestamp) || 0 : 0;
       if (ev.type === "local_command") {
         const ts = ev.timestamp ? Date.parse(ev.timestamp) || Date.now() : Date.now();
         renderLocalCommandOutput(chat, String(ev.content || ""), ts);
@@ -2764,6 +3197,10 @@
         const content = ev.message.content;
         const ts = ev.timestamp ? Date.parse(ev.timestamp) || Date.now() : Date.now();
         if (typeof content === "string") {
+          // A background task / async subagent completion notice is a synthetic
+          // string turn — resolve it so replayed history isn't left "running".
+          scanBgNotice(chat, content);
+          scanAgentNotice(chat, content);
           // Some local-command output (/compact's "Compacted") is stored as a
           // plain-string user turn rather than a system line — render it as
           // command output, not a user bubble.
@@ -2806,6 +3243,7 @@
         finalizeAssistant(null, body, ts);
       }
     }
+    replayStamp = 0; // back to live time
     // Leave currentAssistantId pointing at the last replayed turn so a turn that
     // straddles a chunk boundary stays in one body; the next live turn arrives
     // with a fresh message id and naturally opens its own body.
@@ -2859,6 +3297,16 @@
     chat.streamBlocks.clear();
     chat.streamedMsgIds.clear();
     chat.streamMsgId = null;
+    chat.agents.clear();
+    chat.bgTasks.clear();
+    chat.bgShell.clear();
+    chat.agentTask.clear();
+    chat.previews.clear();
+    chat.previewServer.clear();
+    chat.tasksDrawerOpen = false;
+    chat.tasksFinishedCollapsed = false;
+    chat.tasksView = "list";
+    chat.transcriptAgentId = null;
     chat.ctxBase = 0;
     chat.ctxTokens = 0;
     chat.queue = []; // stale prompts from the wiped conversation shouldn't replay
@@ -3347,6 +3795,87 @@
     els.effortMenu.classList.add("hidden");
   }
 
+  // ---- settings modal -------------------------------------------------------
+  // A modal overlaying the whole panel, opened by the gear in the subbar, with
+  // a tab strip up top. Connection + About are read-only; the modal re-renders
+  // in place so the host status stays live while it's open.
+  const SETTINGS_TABS = [
+    { id: "connection", label: "Connection" },
+    { id: "about", label: "About" },
+  ];
+  let settingsTab = "connection";
+
+  function openSettings() {
+    settingsTab = "connection";
+    renderSettings();
+    els.settingsOverlay.classList.remove("hidden");
+  }
+  function closeSettings() {
+    els.settingsOverlay.classList.add("hidden");
+  }
+  // Live-refresh the modal (e.g. host (re)connected while it's open) without
+  // resetting the active tab.
+  function refreshSettingsIfOpen() {
+    if (mounted && els.settingsOverlay && !els.settingsOverlay.classList.contains("hidden")) renderSettings();
+  }
+
+  function renderSettings() {
+    els.settingsTabs.innerHTML = "";
+    for (const t of SETTINGS_TABS) {
+      const btn = el("button", "settings-tab" + (t.id === settingsTab ? " active" : ""), t.label);
+      btn.addEventListener("click", () => {
+        if (settingsTab === t.id) return;
+        settingsTab = t.id;
+        renderSettings();
+      });
+      els.settingsTabs.appendChild(btn);
+    }
+    els.settingsBody.innerHTML = "";
+    if (settingsTab === "connection") renderSettingsConnection();
+    else renderSettingsAbout();
+  }
+
+  // A read-only key → value line for the Connection / About tabs.
+  function settingsKV(key, value) {
+    const row = el("div", "settings-kv");
+    row.appendChild(el("span", "settings-kv-key", key));
+    row.appendChild(el("span", "settings-kv-val", value));
+    return row;
+  }
+
+  function renderSettingsConnection() {
+    const sec = el("div", "settings-section");
+    sec.appendChild(el("div", "settings-section-title", "Host connection"));
+
+    const ok = connected && hostReady;
+    const stat = el("div", "settings-status " + (ok ? "ok" : "bad"));
+    stat.appendChild(el("span", "settings-status-dot"));
+    stat.appendChild(el("span", "settings-status-text", ok ? "Connected" : connected ? "Connecting…" : "Not connected"));
+    sec.appendChild(stat);
+
+    sec.appendChild(settingsKV("Host version", hostVersion ? String(hostVersion) : "—"));
+    sec.appendChild(settingsKV("Required version", String(EXPECTED_HOST_VERSION)));
+    if (home) sec.appendChild(settingsKV("Home", shortPath(home)));
+    els.settingsBody.appendChild(sec);
+  }
+
+  function renderSettingsAbout() {
+    const sec = el("div", "settings-section");
+    const brand = el("div", "settings-brand");
+    brand.appendChild(el("span", "settings-brand-mark")).innerHTML = window.RKLizardHTML(28);
+    const bmeta = el("div", "settings-brand-meta");
+    bmeta.appendChild(el("div", "settings-brand-name", "Lizard Studio"));
+    bmeta.appendChild(el("div", "settings-brand-sub", "Claude Code, in your browser."));
+    brand.appendChild(bmeta);
+    sec.appendChild(brand);
+    els.settingsBody.appendChild(sec);
+
+    const dsec = el("div", "settings-section");
+    dsec.appendChild(settingsKV("Panel protocol", String(EXPECTED_HOST_VERSION)));
+    dsec.appendChild(settingsKV("Host protocol", hostVersion ? String(hostVersion) : "—"));
+    els.settingsBody.appendChild(dsec);
+  }
+
   function syncComposer() {
     if (!mounted) return;
     const chat = chats.get(activeId);
@@ -3368,6 +3897,8 @@
     if (chat.turnRunning) startStatusTicker();
     syncBranch(chat);
     syncGitBar(chat);
+    syncTasksDrawer(chat);
+    ensurePortProbe(chat);
     renderContextChips();
     renderAttachmentThumbs();
     updateSetup();
@@ -3393,42 +3924,477 @@
   // a +insertions/-deletions badge whenever the cwd has changes that aren't yet
   // on the remote's default branch (unpushed commits + uncommitted edits).
   // Clicking the badge opens a drawer with the full per-file diff.
-  function syncGitBar(chat) {
+  // `skipDrawer` is passed on a task lifecycle tick — the diff hasn't changed,
+  // so we refresh the branch/badge/tasks chip but leave the drawer untouched.
+  function syncGitBar(chat, skipDrawer) {
     if (!els.gitBar) return;
     const hasChanges = chat.isRepo && chat.diffFiles.length > 0;
-    els.gitBar.classList.toggle("hidden", !hasChanges);
+    const totals = taskTotals(chat);
+    // The bar now doubles as the tasks strip, so it shows whenever there are
+    // uncommitted changes OR any subagent / background task has spawned.
+    els.gitBar.classList.toggle("hidden", !hasChanges && totals.total === 0);
+    // Branch label + leading git icon only make sense in a repo — hide them for
+    // a tasks-only bar in a plain folder so it isn't an empty branch chip.
+    const showBranch = chat.isRepo && !!chat.branch;
+    els.gitBarIc.classList.toggle("hidden", !showBranch);
+    els.gitBarBranch.classList.toggle("hidden", !showBranch);
+    if (showBranch) els.gitBarBranch.textContent = chat.branch;
+    // Diff badge only when there are actual changes.
+    els.gitStatusBadge.classList.toggle("hidden", !hasChanges);
+    if (hasChanges) {
+      els.gitStatAdd.textContent = `+${chat.diffInsertions}`;
+      els.gitStatDel.textContent = `-${chat.diffDeletions}`;
+    }
+    renderTasksChip(chat);
+    if (skipDrawer) return;
     if (!hasChanges) {
-      els.gitDrawer.classList.add("hidden");
+      chat.diffDrawerOpen = false;
+      hideDrawer(false); // no changes → nothing to animate out of
       return;
     }
-    els.gitBarBranch.textContent = chat.branch || "";
-    els.gitStatAdd.textContent = `+${chat.diffInsertions}`;
-    els.gitStatDel.textContent = `-${chat.diffDeletions}`;
-    els.gitDrawer.classList.toggle("hidden", !chat.diffDrawerOpen);
-    if (chat.diffDrawerOpen) renderDiffDrawer(chat);
+    // A close animation in flight owns the drawer until it finishes — don't
+    // yank it hidden (or re-show it) from under the sink animation.
+    if (els.gitDrawer.classList.contains("closing")) return;
+    if (chat.diffDrawerOpen) showDrawer(chat, false);
+    else hideDrawer(false);
+  }
+
+  // ---- tasks chip (right of the diff badge) ---------------------------------
+  // Compact counts of live subagents / background commands, mirroring Claude
+  // Code's tasks pane. Clicking opens the tasks drawer (below).
+  function renderTasksChip(chat) {
+    if (!els.tasksWrap) return;
+    const t = taskTotals(chat);
+    els.tasksWrap.classList.toggle("hidden", t.total === 0);
+    if (!t.total) return;
+    els.tasksChip.classList.toggle("running", t.running > 0);
+    els.tasksChip.innerHTML = "";
+    // One fixed icon for every kind of background work; the number counts only
+    // what's *running* and is omitted entirely at zero.
+    const seg = el("span", "task-seg");
+    seg.innerHTML = ICON("stack", 14);
+    if (t.running > 0) seg.appendChild(el("span", "task-seg-n", String(t.running)));
+    els.tasksChip.appendChild(seg);
+    els.tasksChip.title = t.running
+      ? `${t.running} running · ${t.total} task${t.total > 1 ? "s" : ""} this session`
+      : `${t.total} task${t.total > 1 ? "s" : ""} this session`;
+  }
+
+  // ---- tasks drawer (opens like the diff drawer) ----------------------------
+  // "Background Tasks & Subagents": Running then Finished, each an activity card
+  // matching Claude Code's Background-tasks panel — title, kind + elapsed, and
+  // for subagents a live tokens / tool-uses / current-tool line + a link back to
+  // where the run streams inline in the transcript.
+
+  // "07s", "58s", "1m 05s", "1h 39m 34s" — zero-padded like the reference panel.
+  function taskElapsed(secs) {
+    const s = Math.max(0, Math.floor(secs));
+    if (s < 60) return String(s).padStart(2, "0") + "s";
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ${String(s % 60).padStart(2, "0")}s`;
+    return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m ${String(s % 60).padStart(2, "0")}s`;
+  }
+  function taskTokens(n) {
+    if (n < 1000) return String(n);
+    return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+  }
+
+  function buildTaskCard(chat, item) {
+    const card = el("div", "task-card " + item.status);
+    const top = el("div", "task-card-top");
+    top.appendChild(el("div", "task-card-title", item.label));
+    // Stop affordance while running.
+    if (item.status === "running") {
+      const stop = el("button", "task-card-stop");
+      stop.innerHTML = ICON("stop", 12);
+      stop.title = "Stop";
+      stop.disabled = !!item.stopping;
+      stop.addEventListener("click", (e) => { e.stopPropagation(); stopTask(chat, item); });
+      top.appendChild(stop);
+    }
+    card.appendChild(top);
+
+    const now = Date.now();
+    const secs = ((item.status === "running" ? now : item.completedAt || now) - item.startedAt) / 1000;
+    // Bottom line: kind · status · how long it took. A background command that's
+    // a dev server reads as "Preview" (like the preview MCP), not "Bash".
+    const isPreview = item.kind === "preview" || item.isServer;
+    const kindLabel = item.kind === "agent" ? "Agent" : isPreview ? "Preview" : "Bash";
+    const statusText = item.status === "running"
+      ? (item.stopping ? "Stopping…" : "Running")
+      : item.status === "error" ? "Failed" : "Completed";
+    const meta = el("div", "task-card-meta");
+    meta.appendChild(el("span", "task-card-kind", kindLabel));
+    meta.appendChild(el("span", "task-card-status " + item.status, statusText));
+    meta.appendChild(el("span", "task-card-time", taskElapsed(secs)));
+    card.appendChild(meta);
+
+    if (item.kind === "agent") {
+      const bits = [];
+      const tokens = (item.inTokens || 0) + (item.outTokens || 0);
+      if (tokens) bits.push(taskTokens(tokens) + " tokens");
+      if (item.toolUses) bits.push(item.toolUses + " tool use" + (item.toolUses > 1 ? "s" : ""));
+      if (item.status === "running" && item.lastTool) bits.push(item.lastTool);
+      const stats = el("div", "task-card-stats");
+      if (bits.length) stats.appendChild(el("span", "task-card-stat", bits.join("  ·  ")));
+      // Open this subagent's captured transcript in the drawer's transcript view.
+      if (item.msgs && item.msgs.size) {
+        const link = el("button", "task-card-link", "View transcript");
+        link.addEventListener("click", (e) => {
+          e.stopPropagation();
+          chat.tasksView = "transcript";
+          chat.transcriptAgentId = item.id;
+          els.tasksDrawerBody.scrollTop = 0;
+          renderTasksDrawer(chat);
+        });
+        stats.appendChild(link);
+      }
+      if (stats.childNodes.length) card.appendChild(stats);
+    } else if (isPreview && item.url) {
+      // The served address, mirroring the reference panel's "localhost:8791".
+      const stats = el("div", "task-card-stats");
+      stats.appendChild(el("span", "task-card-stat", item.url));
+      card.appendChild(stats);
+    }
+    return card;
+  }
+
+  function renderTasksDrawer(chat) {
+    const body = els.tasksDrawerBody;
+    if (!body) return;
+    // Transcript view: one subagent's captured messages, with a back button.
+    const agent = chat.tasksView === "transcript" && chat.agents.get(chat.transcriptAgentId);
+    if (chat.tasksView === "transcript" && !agent) { chat.tasksView = "list"; chat.transcriptAgentId = null; }
+    els.tasksDrawerBack.classList.toggle("hidden", chat.tasksView !== "transcript");
+    els.tasksDrawer.classList.toggle("in-transcript", chat.tasksView === "transcript");
+    els.tasksDrawerTitle.textContent = agent ? (agent.label || "Subagent") : "Background tasks";
+    if (agent) { renderAgentTranscript(chat, agent, body); return; }
+
+    body.innerHTML = "";
+    const all = [...sortedTasks(chat.agents), ...sortedTasks(chat.bgTasks), ...sortedTasks(chat.previews)];
+    const running = all.filter((t) => t.status === "running").sort((a, b) => a.startedAt - b.startedAt);
+    const finished = all.filter((t) => t.status !== "running").sort((a, b) => (b.completedAt || 0) - (a.completedAt || 0));
+    if (!all.length) {
+      body.appendChild(el("div", "task-empty", "No tasks yet."));
+      return;
+    }
+    if (running.length) {
+      body.appendChild(el("div", "task-section", "Running"));
+      for (const item of running) body.appendChild(buildTaskCard(chat, item));
+    }
+    if (finished.length) {
+      // Finished is collapsible (it only grows over a session) with a Clear
+      // action, mirroring the reference panel's "Finished N ⌄ … Clear" row.
+      const collapsed = chat.tasksFinishedCollapsed;
+      const head = el("div", "task-section finished-head" + (collapsed ? " collapsed" : ""));
+      const toggle = el("button", "finished-toggle");
+      toggle.appendChild(el("span", "finished-label", "Finished"));
+      toggle.appendChild(el("span", "finished-count", String(finished.length)));
+      const caret = el("span", "task-section-caret");
+      caret.innerHTML = ICON("caret-down", 12);
+      toggle.appendChild(caret);
+      toggle.addEventListener("click", () => {
+        chat.tasksFinishedCollapsed = !chat.tasksFinishedCollapsed;
+        renderTasksDrawer(chat);
+      });
+      head.appendChild(toggle);
+      const clear = el("button", "finished-clear", "Clear");
+      clear.addEventListener("click", (e) => { e.stopPropagation(); clearFinishedTasks(chat); });
+      head.appendChild(clear);
+      body.appendChild(head);
+      if (!collapsed) for (const item of finished) body.appendChild(buildTaskCard(chat, item));
+    }
+  }
+
+  // Stop a running task. Background commands / dev servers run as descendants of
+  // this session's claude, so the host kills that shell's process subtree
+  // directly (see killShell there) — no session interrupt, no chat message. A
+  // subagent has no shell to kill, so it falls back to interrupting the turn.
+  function stopTask(chat, item) {
+    if (item.stopping) return;
+    if (item.kind === "agent") { interrupt(); return; }
+    const port = item.url && /:(\d+)\b/.exec(item.url);
+    const ok = post({
+      type: "killShell",
+      id: chat.id,
+      taskId: item.id,
+      shellId: item.shellId || null,
+      command: item.command || "", // empty for preview MCP tasks → host matches by port only
+      port: port ? port[1] : null,
+    });
+    if (!ok) { interrupt(); return; } // host unreachable — best-effort fallback
+    item.stopping = true;
+    syncTasks(chat); // reflect "Stopping…" immediately
+  }
+
+  // Host reply to killShell: the shell's process tree was (or wasn't) killed.
+  function onShellKilled(msg) {
+    const chat = msg.id && chats.get(msg.id);
+    if (!chat) return;
+    const item = (msg.taskId && chat.bgTasks.get(msg.taskId)) || (msg.taskId && chat.previews.get(msg.taskId));
+    if (!item) return;
+    if (msg.ok) finishTask(item, "done");
+    else item.stopping = false; // couldn't find it — let the user try again
+    syncTasks(chat);
+  }
+
+  // Proactively learn a dev server's port: while a server task runs without a URL,
+  // poll the host (which reads the real listening port from the OS via lsof) every
+  // few seconds until it answers — so `npm run dev` still shows its link even when
+  // the port isn't in the command and the model never read the server's output.
+  let portProbeTimer = null;
+  function needsPortProbe(chat) {
+    return !!chat && [...chat.bgTasks.values()].some((t) => t.status === "running" && t.isServer && !t.url);
+  }
+  function ensurePortProbe(chat) {
+    if (portProbeTimer || chat.id !== activeId || !needsPortProbe(chat)) return;
+    portProbeTick();
+    portProbeTimer = setInterval(portProbeTick, 2500);
+  }
+  function portProbeTick() {
+    const chat = chats.get(activeId);
+    if (!needsPortProbe(chat)) { clearInterval(portProbeTimer); portProbeTimer = null; return; }
+    for (const t of chat.bgTasks.values()) {
+      if (t.status === "running" && t.isServer && !t.url) {
+        post({ type: "probeShellPort", id: chat.id, taskId: t.id, command: t.command || t.label || "" });
+      }
+    }
+  }
+  function onShellPort(msg) {
+    const chat = msg.id && chats.get(msg.id);
+    if (!chat || !msg.port) return;
+    const item = chat.bgTasks.get(msg.taskId);
+    if (item && !item.url) { item.url = "localhost:" + msg.port; item.isServer = true; syncTasks(chat); }
+  }
+
+  // Drop every finished task (running ones stay), forgetting their shell/server
+  // mappings too. If nothing's left, the drawer closes.
+  function clearFinishedTasks(chat) {
+    const purge = (map) => { for (const [k, v] of map) if (v.status !== "running") map.delete(k); };
+    purge(chat.agents); purge(chat.bgTasks); purge(chat.previews);
+    for (const [sid, key] of chat.bgShell) if (!chat.bgTasks.has(key)) chat.bgShell.delete(sid);
+    for (const [sid, key] of chat.previewServer) if (!chat.previews.has(key)) chat.previewServer.delete(sid);
+    if (taskTotals(chat).total === 0) closeTasksDrawer();
+    else syncTasks(chat);
+  }
+
+  // ---- subagent transcript view --------------------------------------------
+  // Renders a subagent's captured messages (text + tool calls with their
+  // results) into the drawer body, reusing the main chat's tool-card styling.
+  function renderAgentTranscript(chat, agent, body) {
+    const atBot = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+    body.innerHTML = "";
+    let any = false;
+    for (const msg of agent.msgs.values()) {
+      for (const block of msg.content || []) {
+        if (!block) continue;
+        if (block.type === "text" && block.text && block.text.trim()) {
+          const t = el("div", "agent-tx-text");
+          t.appendChild(R.markdown(block.text));
+          body.appendChild(t);
+          any = true;
+        } else if (block.type === "tool_use") {
+          body.appendChild(buildAgentToolCard(chat, block, agent.results.get(block.id)));
+          any = true;
+        }
+      }
+    }
+    if (!any) body.appendChild(el("div", "task-empty", agent.status === "running" ? "Working…" : "No activity captured."));
+    if (atBot) body.scrollTop = body.scrollHeight;
+  }
+
+  // A single collapsed tool card for the transcript — head (icon · name ·
+  // summary) with the result folded underneath, matching the main chat's cards.
+  function buildAgentToolCard(chat, block, result) {
+    const meta = TOOL_META[block.name] ||
+      (block.name && block.name.startsWith("mcp__") ? { icon: "server", label: block.name } : { icon: "code", label: block.name });
+    const card = el("div", "tool-card collapsed");
+    const head = el("button", "tool-head");
+    head.type = "button";
+    const ic = el("span", "tool-icon");
+    ic.innerHTML = ICON(meta.icon, 14);
+    head.appendChild(ic);
+    head.appendChild(el("span", "tool-name", meta.label));
+    head.appendChild(el("span", "tool-summary", toolSummary(chat, block.name, block.input)));
+    const toggle = el("span", "tool-toggle " + (result ? (result.isError ? "err" : "done") : "running"));
+    toggle.innerHTML = ICON("caret-down", 14);
+    head.appendChild(toggle);
+    head.addEventListener("click", () => card.classList.toggle("collapsed"));
+    card.appendChild(head);
+    const detail = toolDetail(block.name, block.input);
+    if (detail) card.appendChild(detail);
+    if (result && result.text && result.text.trim()) {
+      const resultEl = el("div", "tool-result" + (result.isError ? " err" : ""));
+      const lines = result.text.split("\n");
+      if (lines.length > 16 || result.text.length > 1400) resultEl.appendChild(el("div", "result-label", `Output · ${lines.length} lines`));
+      resultEl.appendChild(R.codeBlock(result.text, ""));
+      card.appendChild(resultEl);
+    }
+    return card;
+  }
+
+  // A 1s ticker keeps running tasks' elapsed times live while the drawer is open.
+  let tasksTimer = null;
+  function startTasksTicker() {
+    if (tasksTimer) return;
+    tasksTimer = setInterval(() => {
+      const chat = chats.get(activeId);
+      if (!chat || !chat.tasksDrawerOpen) return stopTasksTicker();
+      // Only the list view shows live elapsed times; skip in the transcript view
+      // so its scroll / expanded cards aren't reset every second.
+      if (chat.tasksView === "list" && taskTotals(chat).running > 0) renderTasksDrawer(chat);
+    }, 1000);
+  }
+  function stopTasksTicker() {
+    if (tasksTimer) { clearInterval(tasksTimer); tasksTimer = null; }
+  }
+
+  function toggleTasksDrawer() {
+    const chat = chats.get(activeId);
+    if (!chat) return;
+    if (chat.tasksDrawerOpen) closeTasksDrawer();
+    else openTasksDrawer(chat);
+  }
+  function openTasksDrawer(chat) {
+    // Both overlays live over the chat stack — only one at a time.
+    if (chat.diffDrawerOpen) closeDiffDrawer();
+    chat.tasksDrawerOpen = true;
+    chat.tasksView = "list"; // always open on the list, not a stale transcript
+    chat.transcriptAgentId = null;
+    const d = els.tasksDrawer;
+    clearTimeout(tasksCloseFallback);
+    const wasHidden = d.classList.contains("hidden");
+    d.classList.remove("closing", "hidden");
+    renderTasksDrawer(chat);
+    if (wasHidden) {
+      d.classList.remove("opening");
+      void d.offsetWidth;
+      d.classList.add("opening");
+    }
+    startTasksTicker();
+  }
+  let tasksCloseFallback = 0;
+  function closeTasksDrawer() {
+    const chat = chats.get(activeId);
+    if (chat) chat.tasksDrawerOpen = false;
+    stopTasksTicker();
+    const d = els.tasksDrawer;
+    clearTimeout(tasksCloseFallback);
+    if (d.classList.contains("hidden")) return;
+    d.classList.remove("opening");
+    void d.offsetWidth;
+    d.classList.add("closing");
+    tasksCloseFallback = setTimeout(() => {
+      if (d.classList.contains("closing")) {
+        d.classList.remove("closing");
+        d.classList.add("hidden");
+      }
+    }, 260);
   }
 
   function toggleDiffDrawer() {
     const chat = chats.get(activeId);
     if (!chat) return;
-    chat.diffDrawerOpen = !chat.diffDrawerOpen;
-    syncGitBar(chat);
+    if (chat.diffDrawerOpen) closeDiffDrawer();
+    else {
+      if (chat.tasksDrawerOpen) closeTasksDrawer(); // one overlay at a time
+      chat.diffDrawerOpen = true;
+      showDrawer(chat, true);
+    }
+  }
+
+  // Instantly reflect the active chat's tasks-drawer state (no animation) —
+  // called on tab switch so the shared drawer node follows the active chat.
+  function syncTasksDrawer(chat) {
+    const d = els.tasksDrawer;
+    if (!d) return;
+    if (chat.tasksDrawerOpen && taskTotals(chat).total > 0) {
+      clearTimeout(tasksCloseFallback);
+      d.classList.remove("closing", "hidden", "opening");
+      renderTasksDrawer(chat);
+      startTasksTicker();
+    } else {
+      chat.tasksDrawerOpen = false;
+      stopTasksTicker();
+      d.classList.remove("opening", "closing");
+      d.classList.add("hidden");
+    }
   }
 
   function closeDiffDrawer() {
     const chat = chats.get(activeId);
     if (!chat) return;
     chat.diffDrawerOpen = false;
-    syncGitBar(chat);
+    hideDrawer(true);
   }
 
-  function renderDiffDrawer(chat) {
-    els.gitDrawerBody.innerHTML = "";
-    for (const file of chat.diffFiles) {
-      els.gitDrawerBody.appendChild(buildFileSection(chat, file));
+  // Show/hide the drawer, optionally animated. Open rises out of the flap;
+  // close sinks back down into it (drawer-rise / drawer-sink in panel.css).
+  // The sink's end is finished by the animationend handler wired in mount().
+  function showDrawer(chat, animated) {
+    const d = els.gitDrawer;
+    clearTimeout(diffCloseFallback);
+    const wasHidden = d.classList.contains("hidden");
+    d.classList.remove("closing", "hidden");
+    renderDiffDrawer(chat);
+    if (animated && wasHidden) {
+      d.classList.remove("opening");
+      void d.offsetWidth; // restart the keyframes if reopened quickly
+      d.classList.add("opening");
     }
   }
 
+  let diffCloseFallback = 0;
+  function hideDrawer(animated) {
+    const d = els.gitDrawer;
+    clearTimeout(diffCloseFallback);
+    if (d.classList.contains("hidden")) return;
+    if (animated) {
+      d.classList.remove("opening");
+      void d.offsetWidth;
+      d.classList.add("closing");
+      // Safety net: if animationend never lands (interrupted, no compositor,
+      // reduced motion), still hide so the transparent overlay can't linger
+      // over the chat and eat clicks.
+      diffCloseFallback = setTimeout(() => {
+        if (d.classList.contains("closing")) {
+          d.classList.remove("closing");
+          d.classList.add("hidden");
+        }
+      }, 260);
+    } else {
+      d.classList.remove("opening", "closing");
+      d.classList.add("hidden");
+    }
+  }
+
+  // Renders file headers synchronously (cheap), then fills in the heavy diff
+  // bodies after the first paint, in time-budgeted chunks across animation
+  // frames. Building thousands of line rows up front would block that first
+  // frame and stall the drawer's rise animation — the delay the user saw.
+  // A generation counter cancels an in-flight fill when the drawer re-renders.
+  let diffFillGen = 0;
+  function renderDiffDrawer(chat) {
+    diffFillGen++;
+    els.gitDrawerBody.innerHTML = "";
+    const holders = [];
+    for (const file of chat.diffFiles) holders.push(buildFileSection(chat, file));
+    scheduleBodyFill(holders, diffFillGen);
+  }
+
+  function scheduleBodyFill(holders, gen) {
+    let i = 0;
+    const step = () => {
+      if (gen !== diffFillGen) return; // a newer render superseded this fill
+      const budgetEnd = performance.now() + 8; // ~half a 60fps frame
+      while (i < holders.length && performance.now() < budgetEnd) holders[i++]._buildBody();
+      if (i < holders.length) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
+  // Appends a file's section (header now, body on demand) to the drawer and
+  // returns the body holder — its ._buildBody() fills the diff lines lazily.
   function buildFileSection(chat, file) {
     const collapsed = chat.diffCollapsedFiles.has(file.path);
     const section = el("div", "diff-file" + (collapsed ? " collapsed" : ""));
@@ -3440,22 +4406,29 @@
     head.appendChild(el("span", "diff-file-path", file.path));
     head.appendChild(el("span", "diff-file-add", `+${file.insertions}`));
     head.appendChild(el("span", "diff-file-del", `-${file.deletions}`));
-    head.addEventListener("click", () => {
-      if (chat.diffCollapsedFiles.has(file.path)) chat.diffCollapsedFiles.delete(file.path);
-      else chat.diffCollapsedFiles.add(file.path);
-      section.classList.toggle("collapsed");
-    });
     section.appendChild(head);
 
-    if (file.binary) {
-      section.appendChild(el("div", "diff-file-binary", "Binary file not shown"));
-    } else if (!file.diff) {
-      // e.g. a pure rename with no content change — git emits no hunk at all.
-      section.appendChild(el("div", "diff-file-binary", "No content changes"));
-    } else {
-      section.appendChild(buildDiffBody(file.diff));
-    }
-    return section;
+    const holder = el("div", "diff-file-bodyholder");
+    section.appendChild(holder);
+    holder._buildBody = () => {
+      if (holder._built) return;
+      holder._built = true;
+      if (file.binary) holder.appendChild(el("div", "diff-file-binary", "Binary file not shown"));
+      else if (!file.diff) holder.appendChild(el("div", "diff-file-binary", "No content changes"));
+      else holder.appendChild(buildDiffBody(file.diff));
+    };
+
+    head.addEventListener("click", () => {
+      const nowCollapsed = section.classList.toggle("collapsed");
+      if (nowCollapsed) chat.diffCollapsedFiles.add(file.path);
+      else {
+        chat.diffCollapsedFiles.delete(file.path);
+        holder._buildBody(); // in case the async fill hasn't reached it yet
+      }
+    });
+
+    els.gitDrawerBody.appendChild(section);
+    return holder;
   }
 
   // Parses a `git diff --unified=100000` hunk body into per-line rows with the
@@ -3703,6 +4676,31 @@
   function autosize() {
     els.input.style.height = "auto";
     els.input.style.height = Math.min(els.input.scrollHeight, 200) + "px";
+    updateSlashGhost();
+  }
+
+  // Ghost placeholder shown after an argument-taking command is picked: the
+  // ghost sits behind the transparent textarea (inset:0, matching typography),
+  // mirroring the typed "/cmd " in a transparent span so the grey hint lines up
+  // right where the caret sits. It's only shown while the input is still the
+  // bare "/cmd " — the moment the user types the argument (or clears/sends), it
+  // hides. Driven from autosize(), which every value change already funnels
+  // through, so there's a single place to keep it in sync.
+  function updateSlashGhost() {
+    const g = els.slashGhost;
+    if (!g) return;
+    const want = slash.argCmd && els.input.value === "/" + slash.argCmd + " ";
+    if (!want) {
+      slash.argCmd = null;
+      slash.argHint = "";
+      g.classList.add("hidden");
+      g.textContent = "";
+      return;
+    }
+    g.textContent = "";
+    g.appendChild(el("span", "slash-ghost-pad", els.input.value));
+    g.appendChild(el("span", "slash-ghost-hint", slash.argHint));
+    g.classList.remove("hidden");
   }
 
   // ---- slash-command menu ---------------------------------------------------
@@ -3733,6 +4731,8 @@
     slash.items.forEach((c, i) => {
       const row = el("div", "slash-item" + (i === slash.index ? " active" : ""));
       row.appendChild(el("span", "slash-cmd", "/" + c));
+      const hint = slashHint(c);
+      if (hint) row.appendChild(el("span", "slash-hint", hint));
       row.addEventListener("mouseenter", () => {
         slash.index = i;
         highlightSlash();
@@ -3761,10 +4761,23 @@
   function acceptSlash(i, run) {
     const c = slash.items[i];
     if (c == null) return;
+    const hint = slashHint(c);
+    if (hint) {
+      // The command expects an argument — insert "/cmd " and wait, surfacing
+      // the hint as a ghost placeholder, instead of running it bare (a click
+      // would otherwise fire it with no argument).
+      els.input.value = "/" + c + " ";
+      hideSlash();
+      slash.argCmd = c;
+      slash.argHint = hint;
+      els.input.focus();
+      autosize();
+      return;
+    }
     els.input.value = "/" + c + (run ? "" : " ");
     hideSlash();
     if (run) {
-      // Clicking a command fires it right away.
+      // Clicking an argument-free command fires it right away.
       sendPrompt();
       return;
     }
@@ -3814,7 +4827,13 @@
     els.newChat = root.querySelector("#new-chat-btn");
     els.historyBtn = root.querySelector("#history-btn");
     els.historyMenu = root.querySelector("#history-menu");
+    els.settingsBtn = root.querySelector("#settings-btn");
+    els.settingsOverlay = root.querySelector("#settings-overlay");
+    els.settingsClose = root.querySelector("#settings-close");
+    els.settingsTabs = root.querySelector("#settings-tabs");
+    els.settingsBody = root.querySelector("#settings-body");
     els.slashMenu = root.querySelector("#slash-menu");
+    els.slashGhost = root.querySelector("#slash-ghost");
     els.onboarding = root.querySelector("#chat-onboarding");
     els.onboardingStatus = root.querySelector("#chat-onboarding-status");
     els.copyInstall = root.querySelector("#chat-copy-install");
@@ -3825,21 +4844,35 @@
     els.hostBannerCopy = root.querySelector("#host-outdated-copy");
     els.hostBannerIc = root.querySelector("#host-outdated-ic");
     els.gitBar = root.querySelector("#git-status-bar");
+    els.gitBarIc = root.querySelector("#git-bar-ic");
     els.gitBarBranch = root.querySelector("#git-bar-branch");
     els.gitStatusBadge = root.querySelector("#git-status-badge");
     els.gitStatAdd = root.querySelector("#git-stat-add");
     els.gitStatDel = root.querySelector("#git-stat-del");
+    els.tasksWrap = root.querySelector("#git-tasks");
+    els.tasksChip = root.querySelector("#git-tasks-chip");
     els.gitDrawer = root.querySelector("#git-diff-drawer");
     els.gitDrawerBody = root.querySelector("#git-diff-drawer-body");
+    els.gitDrawerHead = root.querySelector("#git-diff-drawer-head");
     els.gitDrawerClose = root.querySelector("#git-diff-drawer-close");
+    els.tasksDrawer = root.querySelector("#tasks-drawer");
+    els.tasksDrawerBody = root.querySelector("#tasks-drawer-body");
+    els.tasksDrawerHead = root.querySelector("#tasks-drawer-head");
+    els.tasksDrawerClose = root.querySelector("#tasks-drawer-close");
+    els.tasksDrawerBack = root.querySelector("#tasks-drawer-back");
+    els.tasksDrawerTitle = root.querySelector("#tasks-drawer-title");
 
     // Static icons.
     root.querySelector("#new-chat-btn").innerHTML = ICON("plus", 17);
     root.querySelector("#history-btn").innerHTML = ICON("history", 17);
+    els.settingsBtn.innerHTML = ICON("gear", 17);
+    els.settingsClose.innerHTML = ICON("x", 15);
     root.querySelector("#folder-ic").innerHTML = ICON("folder", 14);
     root.querySelector("#branch-ic").innerHTML = ICON("git-branch", 13);
     root.querySelector("#git-bar-ic").innerHTML = ICON("git-branch", 12);
-    els.gitDrawerClose.innerHTML = ICON("x", 14);
+    els.gitDrawerClose.innerHTML = ICON("caret-down", 15);
+    els.tasksDrawerClose.innerHTML = ICON("caret-down", 15);
+    els.tasksDrawerBack.innerHTML = ICON("caret-left", 16);
     els.hostBannerCopy.innerHTML = ICON("copy", 13);
     wireCopyButton(els.hostBannerCopy, () => els.hostBannerCopy.dataset.cmd, 13);
     els.send.innerHTML = ICON("send", 16);
@@ -3847,7 +4880,42 @@
     els.attachFileBtn.innerHTML = ICON("plus", 15);
 
     els.gitStatusBadge.addEventListener("click", toggleDiffDrawer);
-    els.gitDrawerClose.addEventListener("click", closeDiffDrawer);
+    els.tasksChip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleTasksDrawer();
+    });
+    // The whole header is the collapse control (title + caret). The back
+    // button lives inside it, so stop its clicks from bubbling up to close.
+    els.gitDrawerHead.addEventListener("click", closeDiffDrawer);
+    els.tasksDrawerHead.addEventListener("click", closeTasksDrawer);
+    els.tasksDrawerBack.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const chat = chats.get(activeId);
+      if (!chat) return;
+      chat.tasksView = "list";
+      chat.transcriptAgentId = null;
+      renderTasksDrawer(chat);
+    });
+    // End of the sink animation → actually hide the drawer (and clean up the
+    // one-shot classes). Ignore bubbling animationend from any child element.
+    els.gitDrawer.addEventListener("animationend", (e) => {
+      if (e.target !== els.gitDrawer) return;
+      clearTimeout(diffCloseFallback);
+      if (els.gitDrawer.classList.contains("closing")) {
+        els.gitDrawer.classList.remove("closing");
+        els.gitDrawer.classList.add("hidden");
+      }
+      els.gitDrawer.classList.remove("opening");
+    });
+    els.tasksDrawer.addEventListener("animationend", (e) => {
+      if (e.target !== els.tasksDrawer) return;
+      clearTimeout(tasksCloseFallback);
+      if (els.tasksDrawer.classList.contains("closing")) {
+        els.tasksDrawer.classList.remove("closing");
+        els.tasksDrawer.classList.add("hidden");
+      }
+      els.tasksDrawer.classList.remove("opening");
+    });
 
     els.send.addEventListener("click", sendPrompt);
     els.stop.addEventListener("click", interrupt);
@@ -3861,6 +4929,18 @@
     els.historyBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       toggleHistory();
+    });
+    els.settingsBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openSettings();
+    });
+    els.settingsClose.addEventListener("click", closeSettings);
+    // Click the dimmed backdrop (outside the modal) to dismiss.
+    els.settingsOverlay.addEventListener("click", (e) => {
+      if (e.target === els.settingsOverlay) closeSettings();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !els.settingsOverlay.classList.contains("hidden")) closeSettings();
     });
     els.folder.addEventListener("click", () => {
       const chat = chats.get(activeId);
@@ -4011,6 +5091,7 @@
       <div class="subbar-actions">
         <button id="new-chat-btn" class="icon-btn" title="New chat"></button>
         <button id="history-btn" class="icon-btn" title="Chat history"></button>
+        <button id="settings-btn" class="icon-btn" title="Settings"></button>
       </div>
     </div>
     <div id="host-outdated-banner" class="host-outdated-banner hidden">
@@ -4028,11 +5109,21 @@
            opening it reads as the flap below expanding up to the top of the
            chat. Hidden entirely when the cwd has no uncommitted changes. -->
       <div id="git-diff-drawer" class="git-diff-drawer hidden">
-        <!-- No title row — the flap right below already shows branch + stats. -->
-        <div class="git-diff-drawer-head">
-          <button id="git-diff-drawer-close" class="icon-btn" title="Close"></button>
+        <div id="git-diff-drawer-head" class="git-diff-drawer-head" role="button" tabindex="0" title="Collapse">
+          <span class="git-diff-drawer-title">Diffs</span>
+          <span id="git-diff-drawer-close" class="git-drawer-caret"></span>
         </div>
         <div id="git-diff-drawer-body" class="git-diff-drawer-body"></div>
+      </div>
+      <!-- Background tasks & subagents drawer: same overlay treatment as the
+           diff drawer, opened from the tasks chip. -->
+      <div id="tasks-drawer" class="git-diff-drawer tasks-drawer hidden">
+        <div id="tasks-drawer-head" class="git-diff-drawer-head" role="button" tabindex="0" title="Collapse">
+          <button id="tasks-drawer-back" class="icon-btn tasks-back hidden" title="Back"></button>
+          <span id="tasks-drawer-title" class="git-diff-drawer-title">Background tasks</span>
+          <span id="tasks-drawer-close" class="git-drawer-caret"></span>
+        </div>
+        <div id="tasks-drawer-body" class="git-diff-drawer-body tasks-drawer-body"></div>
       </div>
     </div>
     <div class="composer">
@@ -4062,12 +5153,21 @@
         <button id="git-status-badge" class="git-status-badge" title="View uncommitted changes">
           <span id="git-stat-add" class="git-stat-add">+0</span><span id="git-stat-del" class="git-stat-del">-0</span>
         </button>
+        <!-- Subagents + background commands, mirroring Claude Code's tasks pane.
+             Sits to the right of the diff badge; only shown once work spawns.
+             Opens the tasks drawer (in #chat-stack). -->
+        <div id="git-tasks" class="git-tasks hidden">
+          <button id="git-tasks-chip" class="git-tasks-chip" title="Background tasks &amp; subagents"></button>
+        </div>
       </div>
       <div class="composer-box">
         <div id="context-chips" class="context-chips hidden"></div>
         <div id="attach-thumbs" class="attach-thumbs hidden"></div>
-        <textarea id="composer-input" class="composer-input" rows="1"
-          placeholder="Type / for commands"></textarea>
+        <div class="composer-input-wrap">
+          <div id="slash-ghost" class="slash-ghost hidden" aria-hidden="true"></div>
+          <textarea id="composer-input" class="composer-input" rows="1"
+            placeholder="Type / for commands"></textarea>
+        </div>
         <div class="composer-toolbar">
           <button id="attach-file-btn" class="icon-btn attach-file-btn" title="Attach a file"></button>
           <input id="file-input" type="file" multiple class="hidden-file-input" />
@@ -4092,6 +5192,19 @@
     </div>
 
     <div id="history-menu" class="history-menu hidden"></div>
+
+    <!-- Settings: a modal overlaying the whole panel, with a tab strip up top.
+         Hidden until the gear button (subbar, far left) opens it. -->
+    <div id="settings-overlay" class="settings-overlay hidden">
+      <div class="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
+        <div class="settings-head">
+          <span class="settings-title">Settings</span>
+          <button id="settings-close" class="icon-btn" title="Close"></button>
+        </div>
+        <div id="settings-tabs" class="settings-tabs"></div>
+        <div id="settings-body" class="settings-body"></div>
+      </div>
+    </div>
 
     <div id="chat-onboarding" class="chat-onboarding hidden">
       <div class="onboarding-card">
@@ -4370,12 +5483,69 @@
     },
   };
 
+  // "Could not establish connection. Receiving end does not exist." (and its
+  // siblings) mean the content script isn't in the target tab — the tab was
+  // opened before the extension loaded/reloaded, was discarded, or is a page we
+  // don't inject into. That's a recoverable condition, not something to surface
+  // raw to Claude, so detect it and either fall back to CDP or say it plainly.
+  function isNoReceiver(msg) {
+    return typeof msg === "string" && /receiving end does not exist|could not establish connection|message port closed/i.test(msg);
+  }
+  function friendlyTabError(msg) {
+    if (!msg || isNoReceiver(msg)) {
+      return "Couldn't reach this tab's page helper. Open a normal web page (chrome:// pages and the Chrome Web Store are off-limits) and reload it, then try again.";
+    }
+    return msg;
+  }
+  // Runs IN the page via CDP — mirrors core.js's RK_PAGE_CONTEXT reader so
+  // browser_dom/info keep working when the content script isn't present. Only
+  // references page globals + its two args, so .toString() is safe to inject.
+  function pageContextProbe(sel, fmt) {
+    var selection = String(window.getSelection ? window.getSelection().toString() : "").trim();
+    var root = sel ? document.querySelector(sel) : null;
+    if (sel && !root) return { ok: false, error: "No element matched selector: " + sel };
+    var base = root || document.body || document.documentElement;
+    var out = { ok: true, url: location.href, title: document.title || "", selection: selection.slice(0, 4000) };
+    if (fmt === "html") {
+      var html = ((root || document.documentElement).outerHTML) || "";
+      out.html = html.slice(0, 60000);
+      out.truncated = html.length > 60000;
+    } else {
+      var raw = (base && base.innerText) || "";
+      out.text = raw.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, 14000);
+      out.truncated = raw.length > 14000;
+    }
+    return out;
+  }
+  async function pageContextViaCdp(tab, fmt, selector) {
+    try {
+      await ensureAttached(tab.id);
+    } catch (_) {
+      return null; // restricted / discarded tab — nothing we can attach to
+    }
+    const expr = "(" + pageContextProbe.toString() + ")(" + JSON.stringify(selector || null) + "," + JSON.stringify(fmt) + ")";
+    try {
+      const r = await dbgSend(tab.id, "Runtime.evaluate", { expression: expr, returnByValue: true, timeout: 5000 });
+      if (!r || r.exceptionDetails) return null;
+      return r.result ? r.result.value : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // info and dom share one reader (format decides the payload).
   async function pageContextOp({ op, args, tab }) {
     const format = op === "info" ? "info" : args.format === "html" ? "html" : "text";
-    const resp = await sendToTab(tab.id, { type: "RK_PAGE_CONTEXT", format, selector: args.selector });
+    let resp = await sendToTab(tab.id, { type: "RK_PAGE_CONTEXT", format, selector: args.selector });
+    // Content script absent → read the page over CDP instead of hard-failing.
+    if ((!resp || !resp.ok) && isNoReceiver(resp && resp.error)) {
+      const viaCdp = await pageContextViaCdp(tab, format === "html" ? "html" : "text", args.selector);
+      if (viaCdp) resp = viaCdp;
+    }
     if (!resp || !resp.ok) {
-      return opErr((resp && resp.error) || "Couldn't read this tab — open a normal web page (chrome:// and the Web Store are off-limits) and reload it so the helper is present.");
+      // A selector that genuinely didn't match is a real answer — keep it;
+      // only the connection failure gets the friendly rewrite.
+      return opErr(resp && resp.error && !isNoReceiver(resp.error) ? resp.error : friendlyTabError(resp && resp.error));
     }
     if (op === "info") return opOk({ url: resp.url, title: resp.title, selection: resp.selection || "" });
     return opOk({ url: resp.url, title: resp.title, format, content: format === "html" ? resp.html : resp.text, truncated: !!resp.truncated });
@@ -4411,7 +5581,9 @@
         b64: u.parts.join(""),
       });
       if (!resp || !resp.ok) {
-        return opErr((resp && resp.error) || "Couldn't reach this tab — open a normal web page (chrome:// and the Web Store are off-limits) and reload it so the helper is present.");
+        // Upload needs the content script (it drives a real file input), so no
+        // CDP fallback here — just rewrite the raw connection error.
+        return opErr(resp && resp.error && !isNoReceiver(resp.error) ? resp.error : friendlyTabError(resp && resp.error));
       }
       return opOk({ attached: u.name, size: u.size, mime: u.mime, via: resp.via, target: resp.target });
     },

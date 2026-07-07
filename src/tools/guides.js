@@ -116,6 +116,10 @@
   function enable() {
     guides = (settings().items || []).map((g) => ({ ...g }));
     ui = RK.h("div", {});
+    // In responsive mode, lift the edge/handle strips into a stacking context
+    // above the device frame so they can be grabbed over it. The strips keep
+    // their own fixed positions; mid-frame drags ride the bridged pointer events.
+    if (RK.viewport().framed) { ui.style.position = "fixed"; ui.style.zIndex = String(RK.FRAME_Z); }
     RK.ensureOverlay().ui.appendChild(ui);
 
     // A hit-strip on every edge: top/bottom pull horizontal guides, left/right

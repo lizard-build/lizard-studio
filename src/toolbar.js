@@ -105,7 +105,7 @@
       flex:1; width:100%; min-width:0; font:inherit; background:var(--bg-secondary);
       color:var(--text-primary); border:1px solid var(--border-primary);
       border-radius:8px; padding:7px 10px; outline:none; }
-    .rk-prow .rk-pctl input:focus, .rk-prow .rk-pctl select:focus { border-color:var(--rk-accent); }
+    .rk-prow .rk-pctl input:focus, .rk-prow .rk-pctl select:focus { border-color:#fff; }
     .rk-prow .rk-pctl input[type=number] { -moz-appearance:textfield; }
     .rk-prow .rk-pctl input[type=number]::-webkit-outer-spin-button,
     .rk-prow .rk-pctl input[type=number]::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
@@ -119,9 +119,20 @@
     .rk-hex { flex:1; min-width:0; font:inherit; text-transform:uppercase; letter-spacing:.3px;
       background:var(--bg-secondary); color:var(--text-primary);
       border:1px solid var(--border-primary); border-radius:8px; padding:7px 10px; outline:none; }
-    .rk-hex:focus { border-color:var(--rk-accent); }
+    .rk-hex:focus { border-color:#fff; }
+    /* shadcn-style slider: thin muted track, white filled range, white thumb.
+       Fill width comes from --rk-range (set in JS from the value). */
     .rk-prow input[type=range] { flex:1; width:100%; min-width:0; cursor:pointer;
-      accent-color:var(--control-primary); }
+      -webkit-appearance:none; appearance:none; height:16px; background:transparent; }
+    .rk-prow input[type=range]::-webkit-slider-runnable-track { height:6px; border-radius:9999px;
+      background:linear-gradient(#fff,#fff) 0/var(--rk-range,50%) 100% no-repeat, rgba(255,255,255,.18); }
+    .rk-prow input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; appearance:none;
+      width:16px; height:16px; margin-top:-5px; border-radius:9999px; background:#fff;
+      border:1px solid rgba(0,0,0,.12); box-shadow:0 1px 3px rgba(0,0,0,.35);
+      transition:box-shadow .15s ease; }
+    .rk-prow input[type=range]:focus-visible { outline:none; }
+    .rk-prow input[type=range]:focus-visible::-webkit-slider-thumb {
+      box-shadow:0 0 0 3px rgba(255,255,255,.3), 0 1px 3px rgba(0,0,0,.35); }
 
     /* ---- shared settings-panel field styles (unchanged) ------------------ */
     .rk-panel-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px 10px; align-items:start; }
@@ -370,19 +381,25 @@
   function toolButtons(id) {
     const t = RK.tools[id];
     const on = RK.isActive(id);
+    // `panelOnClick` tools (e.g. the grid) open their settings on left-click and
+    // never toggle from the bar — the panel's own controls drive the overlay.
     const btn = iconBtn(t.icon, t.name, "rk-tool" + (on ? " on" : ""),
-      () => { RK.toggle(id); render(id); });
+      t.panel && t.panelOnClick
+        ? () => togglePanel(id, btn)
+        : () => { RK.toggle(id); render(id); });
     btn.dataset.tid = id; // lets the tooltip surface this tool's hotkey
     if (on) btn.classList.add("on");
-    // Tools with a settings panel open it on right-click (no separate gear).
     if (t.panel) {
       btn.dataset.hasPanel = "1";
       if (pop && pop.kind === "panel" && pop.id === id) btn.classList.add("settings-open");
-      btn.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        togglePanel(id, btn);
-      });
+      // Other tools with a settings panel open it on right-click (no gear).
+      if (!t.panelOnClick) {
+        btn.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          togglePanel(id, btn);
+        });
+      }
     }
     return [btn];
   }
@@ -394,7 +411,9 @@
     if (typeof t.toggleVisible === "function") {
       const eye = RK.h("button", { class: "rk-pop-act", "aria-label": "Toggle visibility" });
       const paint = () => { eye.innerHTML = (t.isHidden && t.isHidden()) ? ICON_EYE_SLASH : ICON_EYE; };
-      eye.addEventListener("click", (e) => { e.stopPropagation(); t.toggleVisible(); paint(); });
+      // toggleVisible may flip the tool's active state (grid), so re-render the
+      // bar to keep the button's on-highlight in sync with the overlay.
+      eye.addEventListener("click", (e) => { e.stopPropagation(); t.toggleVisible(); paint(); render(t.id); });
       paint();
       kids.push(eye);
     }
@@ -480,7 +499,12 @@
     t.replaceChildren(RK.h("span", {}, text));
     const key = target.dataset.tid ? hotkeyForId(target.dataset.tid) : null;
     if (key) t.appendChild(RK.h("span", { class: "rk-kbd" }, key));
-    if (target.dataset.hasPanel) t.appendChild(RK.h("span", { class: "rk-tip-sub" }, "right-click: settings"));
+    // panelOnClick tools (grid) open settings on left-click, so the right-click
+    // hint doesn't apply — only show it for tools that actually use right-click.
+    const tipTool = target.dataset.tid ? RK.tools[target.dataset.tid] : null;
+    if (target.dataset.hasPanel && !(tipTool && tipTool.panelOnClick)) {
+      t.appendChild(RK.h("span", { class: "rk-tip-sub" }, "right-click: settings"));
+    }
     // Measure, then place centered above the anchor and clamp on-screen.
     t.style.left = "0px"; t.style.top = "0px";
     t.classList.add("show");

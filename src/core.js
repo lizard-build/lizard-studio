@@ -19,6 +19,7 @@
       toolbarPos: null, // {x,y}
     },
     overlay: null,      // { host, shadow, vec, html, ui }
+    _vp: null,          // active "viewport" — the responsive device frame, or null (top page)
     _listeners: {},
   };
 
@@ -317,12 +318,107 @@
   // The host is created with pointer-events:none and nothing changes it, so
   // elementFromPoint already passes through it — no per-call style toggling
   // (this runs on every hover frame; the write forced a style recalc).
+  //
+  // (x, y) are always SCREEN coordinates. In responsive mode the page lives in a
+  // scaled iframe (see RK.setViewport): we clip to the frame's screen rect, map
+  // the point into the device's own coordinate space, and hit-test the iframe's
+  // document instead of the top one.
   RK.elementAt = (x, y) => {
+    const vp = RK._vp;
+    if (vp) {
+      const r = vp.rect();
+      if (x < r.x || y < r.y || x > r.x + r.w || y > r.y + r.h) return null;
+      return vp.doc.elementFromPoint((x - r.x) / vp.scale, (y - r.y) / vp.scale) || null;
+    }
     const host = RK.overlay && RK.overlay.host;
     let el = document.elementFromPoint(x, y);
     if (host && (el === host || host.contains(el))) el = null;
     return el;
   };
+
+  // ---- viewport (top page, or the responsive device frame) --------------
+  // Most tools work in screen coordinates against the top document. Responsive
+  // mode swaps in a "viewport": the page is rendered inside a scaled, same-origin
+  // iframe. Registering one here re-points elementAt/boxRects at the iframe's
+  // document and bridges the frame's pointer events up to the top window, so the
+  // measurement tools operate on the device instead of the empty chrome around it.
+  //
+  // vp = { win, doc, rect() -> {x,y,w,h} (screen px), scale, vec, html }
+  //   vec/html: full-viewport draw layers sitting ABOVE the iframe, so tool
+  //   overlays are visible over the device (the top vec/html paint behind it).
+  let vpBridgeOff = null;
+
+  // Relay the frame's own pointer/scroll events to the top window as synthetic
+  // events in screen coordinates. Tools listen on the top window as usual; when
+  // the cursor is over the iframe (which otherwise swallows the events), these
+  // keep hover/drag/click alive. A tool that floats its own pointer surface above
+  // the frame gets real bubbled events instead and the iframe never fires — so
+  // there's no double dispatch.
+  function installVpBridge(vp) {
+    const win = vp.win;
+    const relay = (type) => (e) => {
+      const r = vp.rect();
+      window.dispatchEvent(new MouseEvent(type, {
+        bubbles: true, cancelable: true, composed: true,
+        clientX: r.x + e.clientX * vp.scale, clientY: r.y + e.clientY * vp.scale,
+        button: e.button, buttons: e.buttons,
+        altKey: e.altKey, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey,
+      }));
+    };
+    const onScroll = () => window.dispatchEvent(new Event("scroll"));
+    const h = {
+      mousemove: relay("mousemove"), mousedown: relay("mousedown"),
+      mouseup: relay("mouseup"), click: relay("click"), contextmenu: relay("contextmenu"),
+    };
+    try {
+      for (const t in h) win.addEventListener(t, h[t], true);
+      win.addEventListener("scroll", onScroll, true);
+    } catch (e) { /* cross-origin frame — bridge unavailable */ }
+    return () => {
+      try {
+        for (const t in h) win.removeEventListener(t, h[t], true);
+        win.removeEventListener("scroll", onScroll, true);
+      } catch (e) {}
+    };
+  }
+
+  RK.setViewport = (vp) => {
+    if (vpBridgeOff) { vpBridgeOff(); vpBridgeOff = null; }
+    RK._vp = vp || null;
+    if (vp) { try { vpBridgeOff = installVpBridge(vp); } catch (e) {} }
+    RK.emit("viewport", vp || null);
+    // Screen-space tools (grid, rulers) redraw on resize; reuse that so they
+    // re-render for the new frame geometry the moment the viewport changes.
+    RK.emit("resize", { w: window.innerWidth, h: window.innerHeight });
+  };
+
+  // Resolved viewport for the current frame — identity when on the top page.
+  //   framed  — true only inside the responsive frame
+  //   ox, oy  — screen offset of the device origin; scale — device→screen factor
+  //   w, h    — device viewport size in device px
+  RK.viewport = () => {
+    const vp = RK._vp;
+    if (!vp) return { framed: false, doc: document, win: window, ox: 0, oy: 0, scale: 1,
+                      w: window.innerWidth, h: window.innerHeight };
+    const r = vp.rect();
+    return { framed: true, doc: vp.doc, win: vp.win, ox: r.x, oy: r.y, scale: vp.scale,
+             w: r.w / vp.scale, h: r.h / vp.scale, frame: r };
+  };
+
+  // Map a device-space point to screen coordinates (identity on the top page).
+  RK.toScreen = (dx, dy) => {
+    const v = RK.viewport();
+    return { x: v.ox + dx * v.scale, y: v.oy + dy * v.scale };
+  };
+
+  // getComputedStyle bound to the element's OWN document — the top window's
+  // getComputedStyle can't read an element that lives inside the iframe.
+  RK.computedStyle = (el) =>
+    ((el.ownerDocument && el.ownerDocument.defaultView) || window).getComputedStyle(el);
+
+  // z-index for a tool's own pointer surface so it floats just above the device
+  // frame (which sits at z 90 in the ui layer) yet stays below the toolbar (100).
+  RK.FRAME_Z = 95;
 
   // ---- overlay (Shadow DOM) ---------------------------------------------
   RK.ensureOverlay = () => {
@@ -387,30 +483,44 @@
   }
   RK.sizeVec = sizeVec;
 
+  // Where tool drawings go: the frame's own layers while responsive is active
+  // (they paint above the iframe), otherwise the top overlay's layers.
+  function drawRoots() {
+    RK.ensureOverlay();
+    const vp = RK._vp;
+    if (vp && vp.vec && vp.html) return { vec: vp.vec, html: vp.html };
+    return { vec: RK.overlay.vec, html: RK.overlay.html };
+  }
+
   // Per-tool drawing groups in the vector layer, so a tool can clear only its own.
   RK.layer = (id) => {
-    RK.ensureOverlay();
-    let g = RK.overlay.vec.querySelector(`g[data-rk="${id}"]`);
+    const { vec } = drawRoots();
+    let g = vec.querySelector(`g[data-rk="${id}"]`);
     if (!g) {
       g = RK.svg("g", { "data-rk": id });
-      RK.overlay.vec.appendChild(g);
+      vec.appendChild(g);
     }
     return g;
   };
   RK.htmlLayer = (id) => {
-    RK.ensureOverlay();
-    let g = RK.overlay.html.querySelector(`div[data-rk="${id}"]`);
+    const { html } = drawRoots();
+    let g = html.querySelector(`div[data-rk="${id}"]`);
     if (!g) {
       g = RK.h("div", { "data-rk": id, class: "rk-hgroup" });
-      RK.overlay.html.appendChild(g);
+      html.appendChild(g);
     }
     return g;
   };
+  // Clear from both the top overlay AND any frame overlay — a tool may have drawn
+  // in either since the last viewport switch.
   RK.clearLayer = (id) => {
-    const g = RK.overlay && RK.overlay.vec.querySelector(`g[data-rk="${id}"]`);
-    if (g) g.replaceChildren();
-    const hg = RK.overlay && RK.overlay.html.querySelector(`div[data-rk="${id}"]`);
-    if (hg) hg.replaceChildren();
+    if (!RK.overlay) return;
+    const roots = [RK.overlay.vec, RK.overlay.html];
+    if (RK._vp && RK._vp.vec) roots.push(RK._vp.vec, RK._vp.html);
+    roots.forEach((root) => {
+      const g = root.querySelector(`[data-rk="${id}"]`);
+      if (g) g.replaceChildren();
+    });
   };
 
   // ---- clipboard + toast (shared by tools) ------------------------------

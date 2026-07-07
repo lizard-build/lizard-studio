@@ -42,10 +42,14 @@
   const CSS = `
     .rk-rf { position:fixed; inset:0; z-index:90; display:flex; flex-direction:column;
       background:var(--bg-primary); }
-    .rk-rf-bar { position:relative; display:flex; align-items:center; justify-content:center;
+    .rk-rf-bar { position:relative; z-index:60; display:flex; align-items:center; justify-content:center;
       gap:8px; padding:8px 12px; flex:none;
       background:var(--bg-secondary); border-bottom:1px solid var(--border-primary);
       color:var(--text-secondary); }
+    /* Tool drawing layers, floating above the device iframe (which is otherwise
+       opaque and would hide the top overlay). Non-interactive — pointer events
+       are bridged to the top window in core (RK.setViewport). */
+    .rk-rf-layer { position:fixed; inset:0; pointer-events:none; overflow:visible; z-index:50; }
     .rk-rf-bar select, .rk-rf-bar input {
       background:var(--bg-primary); color:var(--text-primary); border:1px solid var(--border-primary);
       border-radius:8px; padding:5px 8px; font:600 12px var(--rk-font); outline:none; }
@@ -72,9 +76,10 @@
     .rk-rf-frame { border:0; background:#fff; display:block; transform-origin:top left; }
   `;
 
-  let root = null, iframe = null, wrap = null;
+  let root = null, iframe = null, wrap = null, rfVec = null, rfHtml = null;
   let elDevice = null, elW = null, elH = null, elZoom = null;
   let styleInjected = false;
+  let curScale = 1;
 
   function injectStyle() {
     if (styleInjected) return;
@@ -117,6 +122,34 @@
     iframe.style.transform = `scale(${scale})`;
     wrap.style.width = w * scale + "px";
     wrap.style.height = h * scale + "px";
+    curScale = scale;
+    sizeLayers();
+  }
+
+  // Match the full-viewport draw layers to the window so tools can keep drawing
+  // in screen coordinates (the SVG maps 1:1 to CSS px).
+  function sizeLayers() {
+    if (!rfVec) return;
+    const w = window.innerWidth, h = window.innerHeight;
+    rfVec.setAttribute("width", w);
+    rfVec.setAttribute("height", h);
+    rfVec.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  }
+
+  // Register (or refresh) the device frame as the active viewport. Called on each
+  // iframe load — a navigation inside the frame swaps in a fresh document/window,
+  // so the pointer bridge and hit-testing must re-bind to it.
+  function registerViewport() {
+    let win, doc;
+    try { win = iframe.contentWindow; doc = iframe.contentDocument; } catch (e) { return; }
+    if (!win || !doc) return;
+    RK.setViewport({
+      win, doc, vec: rfVec, html: rfHtml,
+      // Live so zoom / device changes take effect without re-registering.
+      get scale() { return curScale; },
+      // Live screen rect of the device (post-transform, tracks stage scroll).
+      rect: () => { const b = iframe.getBoundingClientRect(); return { x: b.left, y: b.top, w: b.width, h: b.height }; },
+    });
   }
 
   function syncInputs() {
@@ -132,7 +165,16 @@
     cfg.w = RK.clamp(Math.round(w), 80, 4000);
     cfg.h = RK.clamp(Math.round(h), 80, 4000);
     cfg.device = device;
-    syncInputs(); relayout();
+    syncInputs(); refresh();
+  }
+
+  // Re-lay the frame and nudge screen-space tools (grid, rulers) to redraw for
+  // the new geometry — a device / zoom change doesn't fire a window resize, so we
+  // synthesize the signal they already listen for. relayout() itself never emits,
+  // so this can't recurse.
+  function refresh() {
+    relayout();
+    RK.emit("resize", { w: window.innerWidth, h: window.innerHeight });
   }
 
   function build() {
@@ -141,8 +183,17 @@
 
     iframe = RK.h("iframe", { class: "rk-rf-frame", src: location.href,
       allow: "clipboard-read; clipboard-write" });
+    // Register the frame as the viewport once its document is ready, and again on
+    // any in-frame navigation (which replaces contentDocument/contentWindow).
+    iframe.addEventListener("load", registerViewport);
     wrap = RK.h("div", { class: "rk-rf-wrap" }, [iframe]);
     const stage = RK.h("div", { class: "rk-rf-stage" }, [wrap]);
+
+    // Draw layers above the iframe — tools render into these while responsive is
+    // active (RK.layer / RK.htmlLayer route here via the registered viewport).
+    rfVec = document.createElementNS(RK.SVG_NS, "svg");
+    rfVec.setAttribute("class", "rk-rf-layer");
+    rfHtml = RK.h("div", { class: "rk-rf-layer rk-html" });
 
     elDevice = select(cfg.device, DEVICES.map((d) => ({ value: d.name, label: d.name })), (e) => {
       const d = DEVICES.find((x) => x.name === e.target.value);
@@ -157,7 +208,7 @@
       oninput: (e) => setDims(s().w, Number(e.target.value) || cfg.h, "Responsive") });
 
     elZoom = select(cfg.zoom, ZOOMS.map((z) => ({ value: z, label: z === "fit" ? "Fit" : z + "%" })), (e) => {
-      s().zoom = e.target.value; relayout();
+      s().zoom = e.target.value; refresh();
     });
 
     const bar = RK.h("div", { class: "rk-rf-bar" }, [
@@ -171,14 +222,16 @@
       ico(ICO_CLOSE, "Exit responsive mode", "danger rk-rf-close", () => RK.deactivate(ID)),
     ]);
 
-    root = RK.h("div", { class: "rk-rf" }, [bar, stage]);
+    root = RK.h("div", { class: "rk-rf" }, [bar, stage, rfVec, rfHtml]);
     RK.overlay.ui.appendChild(root);
     relayout();
   }
 
   function teardown() {
+    RK.setViewport(null);
     if (root) root.remove();
-    root = iframe = wrap = elDevice = elW = elH = elZoom = null;
+    root = iframe = wrap = rfVec = rfHtml = elDevice = elW = elH = elZoom = null;
+    curScale = 1;
   }
 
   RK.register({

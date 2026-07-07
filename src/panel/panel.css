@@ -177,36 +177,46 @@ body {
   transition: opacity 0.12s ease, transform 0.12s ease;
 }
 .chat-tab-tip.show { opacity: 1; transform: translateY(0); }
-.chat-tab-tip-title {
-  font-family: var(--font-family);
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  /* Sit on the same left line as the row texts below (12px icon column + 6px gap). */
-  padding-left: 18px;
-}
+/* Title and rows share one flex layout: a fixed 12px icon slot + 6px gap +
+   text. The title's slot is empty, so its text lands on the exact same left
+   line as every icon row below — no hand-tuned padding to drift out of sync. */
+.chat-tab-tip-title,
 .chat-tab-tip-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 3px;
   font-family: var(--font-family);
+}
+.chat-tab-tip-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.chat-tab-tip-row {
+  margin-top: 3px;
   font-size: 11px;
   color: var(--text-tertiary);
-  white-space: nowrap;
+}
+/* The 12px icon slot — an empty spacer in the title, and the box each icon is
+   pinned to (icons render at 11–12px; preserveAspectRatio centers the smaller
+   ones within it). */
+.chat-tab-tip-ico {
+  flex: 0 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.chat-tab-tip-ico svg {
+  width: 12px;
+  height: 12px;
+  color: var(--text-tertiary);
+}
+/* Only the text truncates; the icon slot always keeps its width. */
+.chat-tab-tip-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.chat-tab-tip-row svg {
-  /* Fixed 12px icon column — icons render at 11–12px, so pin the box width
-     (preserveAspectRatio centers the smaller ones) and every row's text
-     starts on the same left line. */
-  flex: 0 0 12px;
-  width: 12px;
-  color: var(--text-tertiary);
+  white-space: nowrap;
 }
 
 /* ---- Tabs subbar (tabs + new chat / history) ---- */
@@ -298,8 +308,6 @@ body {
   font-weight: 600;
   color: var(--text-tertiary);
   padding: 6px 8px 8px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 .branch-empty { font-size: 12px; color: var(--text-tertiary); padding: 4px 8px 8px; }
 .branch-item {
@@ -505,7 +513,6 @@ body {
   color: var(--text-primary);
   background: var(--bg-secondary);
 }
-
 .attach-file-btn { width: 26px; height: 26px; margin-right: 2px; }
 /* Sits on the composer box, which is already --bg-secondary — the shared
    .icon-btn hover (also --bg-secondary) would be invisible here, so give it
@@ -752,6 +759,13 @@ body {
   padding: 0;
   margin: 0;
 }
+/* A blank line between paragraphs collapses to an 8px margin in rendered
+   markdown, but the edit textarea keeps it as a full line — so clicking a
+   multi-paragraph message to edit made the bubble visibly grow (and reverting
+   shrank it). Give user-message paragraph breaks a full line's height (1lh) so
+   the view and the textarea occupy the same space and nothing jumps. */
+.msg-user .bubble .md p { margin-bottom: 1lh; }
+.msg-user .bubble .md > *:last-child { margin-bottom: 0; }
 /* Prompt submitted while a turn is still streaming — shown dimmed until it's
    actually dispatched (see dispatchNextQueued in chat.js). */
 .msg-user.queued .bubble {
@@ -856,6 +870,26 @@ body {
 .sys-note.warn {
   color: var(--warn-soft);
   background: rgba(245, 158, 11, 0.12);
+}
+.sys-note.dismissible { padding-right: 6px; }
+.sys-note .sys-close {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  opacity: 0.55;
+  cursor: pointer;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+.sys-note .sys-close:hover { opacity: 1; background: rgba(255, 255, 255, 0.08); }
+.sys-note.leaving {
+  opacity: 0;
+  transition: opacity 0.18s ease;
 }
 
 /* ---- /usage card ---- */
@@ -1465,6 +1499,9 @@ code.inline {
   margin-bottom: -14px;
   border-radius: 14px 14px 0 0;
   background: var(--bg-secondary);
+  /* Corners round back smoothly as the drawer sinks away, in step with the
+     close animation, instead of snapping when the drawer finally hides. */
+  transition: border-radius 0.18s ease;
 }
 .git-bar-ic { display: inline-flex; color: var(--text-tertiary); flex: 0 0 auto; }
 .git-bar-branch {
@@ -1486,7 +1523,7 @@ code.inline {
   border-radius: 999px;
   padding: 4px 10px;
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   transition: background 0.15s;
@@ -1495,10 +1532,173 @@ code.inline {
 .git-stat-add { color: var(--control-primary); }
 .git-stat-del { color: var(--other-red); }
 
+/* ---- tasks chip: subagents + background commands (Claude Code tasks pane) ----
+   Sits to the right of the diff badge; opens the tasks drawer. */
+.git-tasks { flex: 0 0 auto; }
+.git-tasks-chip {
+  appearance: none;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border: none;
+  border-radius: 999px;
+  padding: 4px 10px;
+  color: var(--text-primary); /* white by default */
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.git-tasks-chip:hover { background: rgba(255, 255, 255, 0.09); }
+.task-seg { display: inline-flex; align-items: center; gap: 4px; }
+.task-seg svg { display: block; }
+.task-seg-n {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+/* While a task is live, the whole content (icon + number) gently pulses: its
+   color eases from the normal white down to a dimmer grey and back. The icon
+   (currentColor) and number both inherit color from .task-seg, so animating it
+   here drives them together. */
+.git-tasks-chip.running .task-seg {
+  animation: task-pulse 2.4s ease-in-out infinite;
+}
+@keyframes task-pulse {
+  0%, 100% { color: var(--text-primary); }
+  50% { color: var(--text-tertiary); }
+}
+
+/* ---- tasks drawer: Running / Finished activity cards ----------------------
+   Reuses .git-diff-drawer for the overlay + rise/sink animation; only the body
+   content differs. */
+.tasks-drawer-body { padding: 6px 12px 16px; }
+.task-section {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  padding: 12px 4px 8px;
+}
+.task-section:first-child { padding-top: 4px; }
+/* Finished header: "Finished N ⌄" toggle on the left, "Clear" on the right. */
+.task-section.finished-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.finished-toggle {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.finished-toggle:hover { color: var(--text-primary); }
+.finished-count { color: var(--text-tertiary); }
+.task-section-caret {
+  display: inline-flex;
+  color: var(--text-tertiary);
+  transition: transform 0.15s ease;
+}
+.finished-head.collapsed .task-section-caret { transform: rotate(-90deg); }
+.finished-clear {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.finished-clear:hover { color: var(--text-primary); }
+.task-empty { padding: 24px 8px; color: var(--text-tertiary); font-size: 12px; font-weight: 500; text-align: center; }
+
+.task-card {
+  background: rgba(255, 255, 255, 0.035);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 8px;
+}
+.task-card-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.task-card-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+.task-card-stop {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.task-card-stop:hover { background: rgba(239, 68, 68, 0.14); color: var(--other-red); border-color: var(--other-red); }
+.task-card-stop:disabled { opacity: 0.45; cursor: default; }
+.task-card-stop:disabled:hover { background: transparent; color: var(--text-secondary); border-color: var(--border-primary); }
+
+.task-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+/* Meta line — all Label 12 / Medium (DESIGN "Body 12, metadata"). */
+.task-card-kind { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+.task-card-time { font-size: 12px; font-weight: 500; color: var(--text-tertiary); }
+.task-card-status { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+.task-card-status.running { color: var(--control-primary); }
+.task-card-status.error { color: var(--other-red); }
+
+.task-card-stats {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  column-gap: 12px;
+  row-gap: 3px;
+  margin-top: 6px;
+}
+.task-card-stat {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+/* Finished cards read quieter than running ones. */
+.task-card.done, .task-card.error { opacity: 0.82; }
+
+/* Subagent transcript view: back button + truncating title, then the captured
+   messages (text paragraphs + tool cards) reusing the main-chat styling. */
+.tasks-back { margin-right: 2px; flex: 0 0 auto; }
+.git-diff-drawer-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-tx-text { margin: 2px 2px 12px; color: var(--text-primary); }
+.agent-tx-text:last-child { margin-bottom: 0; }
+.tasks-drawer-body .tool-card { margin-bottom: 6px; }
+
 /* ---- diff drawer: full per-file diff, opened from the status badge ----
    Overlays the whole chat stack: same width as the flap below and fused to
    it (both --bg-secondary, strokeless), reaching up to the top of the chat.
-   Rises out of the flap when opened. */
+   Rises out of the flap on open, sinks back down into it on close. */
 .git-diff-drawer {
   position: absolute;
   left: 12px;
@@ -1510,25 +1710,74 @@ code.inline {
   flex-direction: column;
   border-radius: 14px 14px 0 0;
   background: var(--bg-secondary);
-  animation: drawer-rise 0.18s ease;
+  transform-origin: bottom center;
 }
+.git-diff-drawer.opening { animation: drawer-rise 0.2s cubic-bezier(0.22, 1, 0.36, 1); }
+/* `forwards` holds it sunk + transparent until the animationend handler swaps
+   in .hidden, so it never flashes back to full before disappearing. */
+.git-diff-drawer.closing { animation: drawer-sink 0.16s cubic-bezier(0.4, 0, 1, 1) forwards; }
 @keyframes drawer-rise {
-  from { transform: translateY(18px); opacity: 0.3; }
+  from { transform: translateY(14px); opacity: 0; }
   to { transform: none; opacity: 1; }
 }
-/* While open, square the flap's top corners — the drawer's bottom edge sits
-   exactly on it, so drawer + flap + composer read as one sheet. */
-.chat-stack:has(.git-diff-drawer:not(.hidden)) ~ .composer .git-status-bar {
+@keyframes drawer-sink {
+  from { transform: none; opacity: 1; }
+  to { transform: translateY(14px); opacity: 0; }
+}
+/* While open, square the flap's top corners so the drawer's bottom edge sits
+   flush on it (drawer + flap + composer read as one sheet). The moment close
+   begins (.closing), drop back to rounded — the flap's border-radius transition
+   then rounds it in step with the sink, instead of snapping when it hides. */
+.chat-stack:has(.git-diff-drawer:not(.hidden):not(.closing)) ~ .composer .git-status-bar {
   border-top-left-radius: 0;
   border-top-right-radius: 0;
 }
-/* Slim top row holding only the close button — no title, the flap below
-   already names the branch and shows the stats. */
+/* …and hide the empty-state setup chips (folder/branch), which otherwise sit
+   between the chat stack and the flap and leave a gap under the open drawer. */
+.chat-stack:has(.git-diff-drawer:not(.hidden)) ~ .composer .chat-setup {
+  display: none;
+}
+/* Top row: "Diffs" title on the left (aligned to the 16px content inset of
+   the file rows below), close button on the right. The top inset matches that
+   same 16px so the header sits symmetrically inset from the drawer's top-left
+   corner. */
+/* The whole header is the collapse control — clicking anywhere on it sinks the
+   drawer. Rounded to match the drawer's top corners so the hover tint aligns. */
 .git-diff-drawer-head {
   flex: 0 0 auto;
   display: flex;
-  justify-content: flex-end;
-  padding: 4px 6px 2px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px 2px 16px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 14px 14px 0 0;
+  transition: background 0.15s;
+}
+.git-diff-drawer-head:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.git-diff-drawer-title {
+  font-family: var(--font-family);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  transition: color 0.15s;
+}
+.git-diff-drawer-head:hover .git-diff-drawer-title,
+.git-diff-drawer-head:hover .git-drawer-caret {
+  color: var(--text-primary);
+}
+/* Decorative caret on the right — the head handles the click, not this span. */
+.git-drawer-caret {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  color: var(--text-tertiary);
+  transition: color 0.15s;
 }
 .git-diff-drawer-body {
   flex: 1 1 auto;
@@ -1548,12 +1797,12 @@ code.inline {
   align-items: center;
   gap: 8px;
   padding: 10px 16px;
-  background: #1e1e1e;
+  background: #141414;
   cursor: pointer;
   user-select: none;
   font-family: var(--font-family);
 }
-.diff-file-head:hover { background: #242424; }
+.diff-file-head:hover { background: #1e1e1e; }
 .diff-file-toggle {
   display: inline-flex;
   flex: 0 0 auto;
@@ -1561,8 +1810,8 @@ code.inline {
   transition: transform 0.15s ease;
 }
 .diff-file.collapsed .diff-file-toggle { transform: rotate(-90deg); }
-.diff-file.collapsed .diff-file-body,
-.diff-file.collapsed .diff-file-binary { display: none; }
+/* Zero-size when collapsed, so the lazy-body IntersectionObserver skips it. */
+.diff-file.collapsed .diff-file-bodyholder { display: none; }
 .diff-file-path {
   flex: 0 1 auto;
   min-width: 0;
@@ -1575,7 +1824,9 @@ code.inline {
 .diff-file-add,
 .diff-file-del {
   flex: 0 0 auto;
-  font-size: 13px;
+  /* Mono, to match the total badge in the status bar — numbers are data. */
+  font-family: var(--font-mono);
+  font-size: 12px;
   font-weight: 500;
 }
 .diff-file-add { color: var(--control-primary); }
@@ -1689,6 +1940,41 @@ code.inline {
   color: var(--text-primary);
 }
 .slash-item.active .slash-cmd { color: var(--text-primary); }
+.slash-hint {
+  margin-left: 8px;
+  font-family: var(--font-family);
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Ghost placeholder echoing the argument-hint after an arg-taking command is
+   picked. The ghost sits behind the (transparent) textarea, filling the same
+   box via inset:0; typography + padding mirror .composer-input so the
+   transparent "/cmd " pad lines the grey hint up exactly under the caret. */
+.composer-input-wrap { position: relative; width: 100%; }
+.composer-input-wrap .composer-input {
+  position: relative;
+  z-index: 1;
+}
+.slash-ghost {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  font-family: var(--font-family);
+  font-size: 14px;
+  line-height: 1.45;
+  padding: 4px 6px 2px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+.slash-ghost-pad { color: transparent; }
+.slash-ghost-hint { color: var(--text-tertiary); }
 .composer-box {
   /* Positioned so it paints over the git-status-bar flap tucked under it. */
   position: relative;
@@ -1719,7 +2005,7 @@ code.inline {
   border-radius: 7px;
   background: rgba(255, 255, 255, 0.06);
   color: var(--text-secondary);
-  font-family: var(--font-mono);
+  font-family: var(--font-family);
   font-size: 11.5px;
   line-height: 1.2;
   cursor: default;
@@ -1727,6 +2013,8 @@ code.inline {
 }
 .ctx-chip:hover { background: rgba(255, 255, 255, 0.1); color: var(--text-primary); }
 .ctx-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Only element-selector labels (`<div>`, `<button>`) are code. */
+.ctx-chip-label.code { font-family: var(--font-mono); }
 /* Icon and × occupy the same leading slot; the × reveals on hover in the
    icon's place (Cursor-style). */
 .ctx-chip-ic,
@@ -1933,3 +2221,143 @@ code.inline {
 #term-screen { padding: 6px; background: var(--bg-primary); }
 #terminal { width: 100%; height: 100%; }
 .xterm { height: 100%; }
+
+/* ===================================================================== */
+/* Settings modal                                                        */
+/* ===================================================================== */
+/* The gear sits in .subbar-actions alongside new-chat + history, so it
+   inherits their .icon-btn sizing/alignment — no extra rule needed. */
+
+/* Dimmed backdrop covering the whole panel; the modal is centred within. */
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.55);
+  animation: settings-fade 0.14s ease-out;
+}
+@keyframes settings-fade { from { opacity: 0; } to { opacity: 1; } }
+
+.settings-modal {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 440px;
+  max-height: 100%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  animation: settings-pop 0.16s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+@keyframes settings-pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 12px 12px 18px;
+  flex: 0 0 auto;
+}
+.settings-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+
+/* Tab strip: pills sitting on a hairline that spans the modal width. */
+.settings-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 12px;
+  flex: 0 0 auto;
+  box-shadow: inset 0 -1px 0 var(--border-primary);
+}
+.settings-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: var(--font-family);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 8px 12px 10px;
+  cursor: pointer;
+  position: relative;
+  transition: color 0.15s;
+}
+.settings-tab:hover { color: var(--text-secondary); }
+.settings-tab.active { color: var(--text-primary); }
+.settings-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--control-primary);
+}
+
+.settings-body {
+  padding: 18px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-primary) transparent;
+}
+.settings-body::-webkit-scrollbar { width: 8px; }
+.settings-body::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 4px; }
+
+.settings-section { margin-bottom: 22px; }
+.settings-section:last-child { margin-bottom: 0; }
+.settings-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+/* Read-only key → value rows (Connection / About). */
+.settings-kv {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border-secondary);
+}
+.settings-kv:first-of-type { border-top: none; }
+.settings-kv-key { font-size: 12px; color: var(--text-secondary); flex: 0 0 auto; }
+.settings-kv-val {
+  font-size: 12px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  text-align: right;
+  word-break: break-all;
+}
+
+.settings-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.settings-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.settings-status.ok .settings-status-dot { background: var(--control-primary); box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18); }
+.settings-status.bad .settings-status-dot { background: var(--other-red); box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.18); }
+.settings-status-text { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+
+/* About header. */
+.settings-brand { display: flex; align-items: center; gap: 12px; }
+.settings-brand-mark { display: inline-flex; color: var(--control-primary); flex: 0 0 auto; }
+.settings-brand-name { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.settings-brand-sub { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }

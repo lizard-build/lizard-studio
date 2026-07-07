@@ -102,6 +102,9 @@
 
   function buildLoupe() {
     RK.ensureOverlay();
+    // In responsive mode the device iframe sits above the html layer and would
+    // swallow the loupe's moves/clicks and hide it — float both above the frame.
+    const framed = RK.viewport().framed;
 
     canvas = RK.h("canvas", { width: DIAM, height: DIAM, style: {
       width: DIAM + "px", height: DIAM + "px", display: "block",
@@ -127,20 +130,21 @@
     } }, [sw, valEl]);
 
     wrap = RK.h("div", { style: {
-      position: "fixed", left: "0", top: "0", zIndex: "5",
+      position: "fixed", left: "0", top: "0", zIndex: framed ? String(RK.FRAME_Z + 1) : "5",
       pointerEvents: "none", display: "flex", flexDirection: "column",
       alignItems: "center", opacity: "0", visibility: "hidden",
     } }, [canvas, pill]);
     RK.overlay.ui.appendChild(wrap);
 
-    // Fullscreen pointer trap so a pick-click never reaches the page. It lives in
-    // the html layer, which paints *below* the ui toolbar — so the toolbar stays
-    // clickable (e.g. to toggle the tool back off).
+    // Fullscreen pointer trap so a pick-click never reaches the page. Normally it
+    // lives in the html layer, which paints *below* the ui toolbar — so the
+    // toolbar stays clickable (e.g. to toggle the tool back off). In responsive
+    // mode it moves into the ui layer above the frame (still below the toolbar).
     catcher = RK.h("div", { style: {
-      position: "fixed", inset: "0", zIndex: "1",
+      position: "fixed", inset: "0", zIndex: framed ? String(RK.FRAME_Z) : "1",
       pointerEvents: "auto", cursor: "crosshair", background: "transparent",
     } });
-    RK.overlay.html.appendChild(catcher);
+    (framed ? RK.overlay.ui : RK.overlay.html).appendChild(catcher);
 
     // 1×1 scratch canvas for exact center-pixel readback.
     readCv = RK.h("canvas", { width: 1, height: 1 });
