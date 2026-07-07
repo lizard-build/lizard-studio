@@ -41,6 +41,12 @@
 //   { type:"gitBranches", id, cwd }                                list local branches + current
 //   { type:"checkoutBranch", id, cwd, branch }                     git checkout <branch>
 //   { type:"gitDiff", id, cwd }                                    working-tree diff vs HEAD (+ untracked files)
+//   { type:"configRead",  id, key, scope, cwd }                    read a settings file (→ configRead reply).
+//                                                                 key: "claudemd" | "hooks" | "mcp";
+//                                                                 scope: "project" | "user"
+//   { type:"configWrite", id, key, scope, cwd, content }           write it back (→ configWrite reply). For
+//                                                                 hooks/mcp `content` is the JSON sub-object,
+//                                                                 spliced into the file's other keys
 //   { type:"browserResult", bid, ok, data?, error? }              reply to a `browser` request
 //   { type:"permissionResult", id, requestId, behavior,           answer a `permission` ask:
 //     message?, updatedPermissions?, interrupt?,                  behavior "allow" | "deny"
@@ -61,6 +67,8 @@
 //   { type:"folder",  id, path }                               null path == cancelled
 //   { type:"gitBranches", id, cwd, isRepo, current, branches, checkedOut? }
 //   { type:"gitDiff", id, cwd, isRepo, files, insertions, deletions }
+//   { type:"configRead",  id, key, scope, ok, content?, path?, exists?, error? }
+//   { type:"configWrite", id, key, scope, ok, path?, error? }
 //     files: [{ path, status: "added"|"modified"|"deleted", binary, insertions, deletions, diff }]
 //     `diff` is the unified-diff body (from the first `@@` hunk marker on) with
 //     effectively unlimited context, so the panel can unfold it client-side.
@@ -160,7 +168,7 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v12: killShell / probeShellPort (surgical background-shell stop + port probe).
 // v13: bashExec / bashKill (composer "!" bash mode — local one-off shell runs).
 // v14: kill/probe reach a dev server orphaned after a panel reopen (by port).
-const HOST_VERSION = 14;
+const HOST_VERSION = 15;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -1893,10 +1901,113 @@ function rewindSession(id, turnIndex, text, images) {
 }
 
 // ---- message dispatch -------------------------------------------------------
+// ---- settings config files (CLAUDE.md / hooks / MCP) ------------------------
+// The Settings modal edits a few on-disk config files the browser sandbox can't
+// touch. Each logical (key, scope) maps to a file and — for the JSON ones — a
+// sub-object inside it that we splice in/out while preserving every other key
+// in the file. Every write first backs the previous file up to "<path>.bak".
+const USER_CLAUDE_DIR = join(homedir(), ".claude");
+function configResolve(key, scope, cwd) {
+  const proj = scope === "project";
+  if (proj && !(cwd && existsSync(cwd))) return null; // no project dir to write into
+  switch (key) {
+    case "claudemd":
+      return { path: proj ? join(cwd, "CLAUDE.md") : join(USER_CLAUDE_DIR, "CLAUDE.md"), kind: "text" };
+    case "hooks":
+      return { path: proj ? join(cwd, ".claude", "settings.json") : join(USER_CLAUDE_DIR, "settings.json"), kind: "json", subkey: "hooks" };
+    case "mcp":
+      return { path: proj ? join(cwd, ".mcp.json") : join(homedir(), ".claude.json"), kind: "json", subkey: "mcpServers" };
+    default:
+      return null;
+  }
+}
+
+function configCwd(id, msg) {
+  const s = sessions.get(id);
+  return msg.cwd || (s && s.cwd) || null;
+}
+
+function configRead(id, msg) {
+  const spec = configResolve(msg.key, msg.scope, configCwd(id, msg));
+  const base = { type: "configRead", id, key: msg.key, scope: msg.scope };
+  if (!spec) { send({ ...base, ok: false, error: "No project folder selected." }); return; }
+  const exists = existsSync(spec.path);
+  try {
+    let content = "";
+    if (spec.kind === "text") {
+      content = exists ? readFileSync(spec.path, "utf8") : "";
+    } else {
+      const whole = exists ? JSON.parse(readFileSync(spec.path, "utf8") || "{}") : {};
+      const sub = whole[spec.subkey];
+      content = JSON.stringify(sub && typeof sub === "object" ? sub : {}, null, 2);
+    }
+    send({ ...base, ok: true, content, path: spec.path, exists });
+  } catch (e) {
+    send({ ...base, ok: false, path: spec.path, exists, error: "Couldn't read this file: " + e.message });
+  }
+}
+
+function configWrite(id, msg) {
+  const spec = configResolve(msg.key, msg.scope, configCwd(id, msg));
+  const base = { type: "configWrite", id, key: msg.key, scope: msg.scope };
+  if (!spec) { send({ ...base, ok: false, error: "No project folder selected." }); return; }
+  const raw = String(msg.content == null ? "" : msg.content);
+  let toWrite;
+  if (spec.kind === "text") {
+    toWrite = raw;
+  } else {
+    // Validate the edited sub-object as its own JSON, then splice it back into
+    // the whole file so unrelated keys (auth, projects, other settings) survive.
+    let sub;
+    try {
+      sub = raw.trim() ? JSON.parse(raw) : {};
+    } catch (e) {
+      send({ ...base, ok: false, error: "Invalid JSON: " + e.message });
+      return;
+    }
+    if (sub === null || typeof sub !== "object" || Array.isArray(sub)) {
+      send({ ...base, ok: false, error: "Expected a JSON object ({ … }) at the top level." });
+      return;
+    }
+    let whole = {};
+    if (existsSync(spec.path)) {
+      try {
+        whole = JSON.parse(readFileSync(spec.path, "utf8") || "{}");
+      } catch (e) {
+        send({ ...base, ok: false, error: "The existing file isn't valid JSON — fix it by hand first: " + e.message });
+        return;
+      }
+    }
+    if (Object.keys(sub).length) whole[spec.subkey] = sub;
+    else delete whole[spec.subkey];
+    toWrite = JSON.stringify(whole, null, 2) + "\n";
+  }
+  try {
+    mkdirSync(dirname(spec.path), { recursive: true });
+    if (existsSync(spec.path)) {
+      try {
+        writeFileSync(spec.path + ".bak", readFileSync(spec.path));
+      } catch {
+        /* best-effort backup — don't block the save on it */
+      }
+    }
+    writeFileSync(spec.path, toWrite, "utf8");
+    send({ ...base, ok: true, path: spec.path });
+  } catch (e) {
+    send({ ...base, ok: false, path: spec.path, error: e.message });
+  }
+}
+
 function handle(msg) {
   if (!msg) return;
   const id = msg.id || "default";
   switch (msg.type) {
+    case "configRead":
+      configRead(id, msg);
+      break;
+    case "configWrite":
+      configWrite(id, msg);
+      break;
     case "start":
       startClaude(msg);
       break;

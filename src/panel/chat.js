@@ -125,7 +125,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 14;
+  const EXPECTED_HOST_VERSION = 15;
 
   let els = {};
   let port = null;
@@ -3127,6 +3127,40 @@
           if (chat.id === activeId) syncGitBar(chat);
         }
         break;
+      case "configRead":
+        // Ignore replies for a (key, scope) we've since navigated away from.
+        if (settingsOpen() && cfgEdit && cfgEdit.key === msg.key && cfgEdit.scope === msg.scope) {
+          cfgEdit.loading = false;
+          if (msg.ok) {
+            cfgEdit.content = msg.content || "";
+            cfgEdit.original = msg.content || "";
+            cfgEdit.path = msg.path || "";
+            cfgEdit.exists = !!msg.exists;
+            cfgEdit.error = "";
+          } else {
+            cfgEdit.error = msg.error || "Couldn't read the file.";
+            cfgEdit.content = "";
+            cfgEdit.original = "";
+          }
+          renderSettings();
+        }
+        break;
+      case "configWrite":
+        if (settingsOpen() && cfgEdit && cfgEdit.key === msg.key && cfgEdit.scope === msg.scope) {
+          cfgEdit.saving = false;
+          if (msg.ok) {
+            cfgEdit.original = cfgEdit.content;
+            cfgEdit.exists = true;
+            cfgEdit.status = "Saved";
+            cfgEdit.statusKind = "ok";
+            cfgEdit.error = "";
+          } else {
+            cfgEdit.error = msg.error || "Save failed.";
+            cfgEdit.status = "";
+          }
+          renderSettings();
+        }
+        break;
       case "shellKilled":
         onShellKilled(msg);
         break;
@@ -4041,26 +4075,74 @@
 
   // ---- settings modal -------------------------------------------------------
   // A modal overlaying the whole panel, opened by the gear in the subbar, with
-  // a tab strip up top. Connection + About are read-only; the modal re-renders
-  // in place so the host status stays live while it's open.
+  // a tab strip up top. Connection + About are read-only status; the CLAUDE.md /
+  // Hooks / MCP tabs edit on-disk config files through the host (the browser
+  // sandbox can't touch the filesystem itself).
   const SETTINGS_TABS = [
     { id: "connection", label: "Connection" },
+    { id: "claudemd", label: "CLAUDE.md" },
+    { id: "hooks", label: "Hooks" },
+    { id: "mcp", label: "MCP" },
     { id: "about", label: "About" },
   ];
+  // Per-editable-tab metadata. `format` picks the editor (raw text vs JSON);
+  // `project`/`user` are the human-readable target paths shown under the scope
+  // toggle. Keyed by the same id the host's configResolve() understands.
+  const CONFIG_META = {
+    claudemd: {
+      title: "CLAUDE.md",
+      format: "text",
+      blurb: "Project memory prepended to every session.",
+      project: "<project>/CLAUDE.md",
+      user: "~/.claude/CLAUDE.md",
+      placeholder: "# Notes\n\nGuidance Claude should always follow in this project…",
+    },
+    hooks: {
+      title: "Hooks",
+      format: "json",
+      blurb: "Shell commands run on events (PreToolUse, PostToolUse, SessionStart…). A JSON object keyed by event.",
+      project: "<project>/.claude/settings.json → \"hooks\"",
+      user: "~/.claude/settings.json → \"hooks\"",
+      placeholder:
+        '{\n  "PostToolUse": [\n    {\n      "matcher": "Edit|Write",\n      "hooks": [{ "type": "command", "command": "echo edited" }]\n    }\n  ]\n}',
+    },
+    mcp: {
+      title: "MCP servers",
+      format: "json",
+      blurb: "Model Context Protocol servers, keyed by name. Servers needing OAuth login can't be authorized from here yet.",
+      project: "<project>/.mcp.json → \"mcpServers\"",
+      user: "~/.claude.json → \"mcpServers\"",
+      placeholder:
+        '{\n  "playwright": {\n    "command": "npx",\n    "args": ["-y", "@playwright/mcp@latest"]\n  }\n}',
+    },
+  };
   let settingsTab = "connection";
+  // Live state of the open config editor (null when on a status tab). Survives
+  // the modal's re-renders so unsaved text isn't lost; keyed by (key, scope) so
+  // late host replies for a scope we've since switched away from are ignored.
+  let cfgEdit = null;
+
+  function settingsOpen() {
+    return mounted && els.settingsOverlay && !els.settingsOverlay.classList.contains("hidden");
+  }
 
   function openSettings() {
     settingsTab = "connection";
+    cfgEdit = null;
     renderSettings();
     els.settingsOverlay.classList.remove("hidden");
   }
   function closeSettings() {
     els.settingsOverlay.classList.add("hidden");
+    cfgEdit = null;
   }
   // Live-refresh the modal (e.g. host (re)connected while it's open) without
-  // resetting the active tab.
+  // resetting the active tab. Skips config tabs — rebuilding their textarea
+  // would drop the caret and any unsaved edit.
   function refreshSettingsIfOpen() {
-    if (mounted && els.settingsOverlay && !els.settingsOverlay.classList.contains("hidden")) renderSettings();
+    if (!settingsOpen()) return;
+    if (CONFIG_META[settingsTab]) return;
+    renderSettings();
   }
 
   function renderSettings() {
@@ -4070,13 +4152,136 @@
       btn.addEventListener("click", () => {
         if (settingsTab === t.id) return;
         settingsTab = t.id;
+        if (!CONFIG_META[t.id]) cfgEdit = null;
         renderSettings();
       });
       els.settingsTabs.appendChild(btn);
     }
     els.settingsBody.innerHTML = "";
     if (settingsTab === "connection") renderSettingsConnection();
-    else renderSettingsAbout();
+    else if (settingsTab === "about") renderSettingsAbout();
+    else if (CONFIG_META[settingsTab]) renderSettingsConfig(settingsTab);
+  }
+
+  // ---- config editors (CLAUDE.md / Hooks / MCP) -----------------------------
+  function activeCwd() {
+    const c = chats.get(activeId);
+    return (c && c.cwd) || null;
+  }
+
+  // Request a config file from the host; the reply lands in onHostMessage's
+  // `configRead` case, which repaints. Starts in a loading state.
+  function loadConfig(key, scope) {
+    cfgEdit = { key, scope, loading: true, content: "", original: "", path: "", exists: false, error: "", status: "", statusKind: "", saving: false };
+    if (!post({ type: "configRead", id: activeId, key, scope, cwd: activeCwd() })) {
+      cfgEdit.loading = false;
+      cfgEdit.error = "Host disconnected — can't read the file.";
+    }
+    renderSettings();
+  }
+
+  function saveConfig() {
+    if (!cfgEdit || cfgEdit.saving) return;
+    cfgEdit.saving = true;
+    cfgEdit.error = "";
+    cfgEdit.status = "Saving…";
+    cfgEdit.statusKind = "dim";
+    const { key, scope, content } = cfgEdit;
+    if (!post({ type: "configWrite", id: activeId, key, scope, cwd: activeCwd(), content })) {
+      cfgEdit.saving = false;
+      cfgEdit.status = "";
+      cfgEdit.error = "Host disconnected — not saved.";
+    }
+    renderSettings();
+  }
+
+  function renderSettingsConfig(key) {
+    const meta = CONFIG_META[key];
+    // First open of this tab (or a stale editor from another key): kick off a
+    // load; loadConfig() re-renders once the request is in flight.
+    if (!cfgEdit || cfgEdit.key !== key) {
+      loadConfig(key, "project");
+      return;
+    }
+    const sec = el("div", "settings-section");
+    sec.appendChild(el("div", "settings-section-title", meta.title));
+    sec.appendChild(el("div", "settings-blurb", meta.blurb));
+
+    // Project / User scope toggle.
+    const toggle = el("div", "settings-scope");
+    for (const sc of ["project", "user"]) {
+      const b = el("button", "settings-scope-btn" + (cfgEdit.scope === sc ? " active" : ""), sc === "project" ? "Project" : "User");
+      b.addEventListener("click", () => {
+        if (cfgEdit.scope !== sc) loadConfig(key, sc);
+      });
+      toggle.appendChild(b);
+    }
+    sec.appendChild(toggle);
+    sec.appendChild(el("div", "settings-path", cfgEdit.scope === "project" ? meta.project : meta.user));
+    // All three files are read by claude at session start, not mid-turn.
+    sec.appendChild(el("div", "settings-note", "Applies to new or restarted chats."));
+
+    if (cfgEdit.loading) {
+      sec.appendChild(el("div", "settings-loading", "Loading…"));
+      els.settingsBody.appendChild(sec);
+      return;
+    }
+
+    const ta = el("textarea", "settings-editor" + (meta.format === "json" ? " mono" : ""));
+    ta.value = cfgEdit.content;
+    ta.placeholder = meta.placeholder;
+    ta.spellcheck = false;
+    sec.appendChild(ta);
+
+    const actions = el("div", "settings-actions");
+    const save = el("button", "settings-save-btn", "Save");
+    const dirty = () => cfgEdit.content !== cfgEdit.original;
+    save.disabled = !dirty() || cfgEdit.saving;
+    save.addEventListener("click", saveConfig);
+    actions.appendChild(save);
+
+    const revert = el("button", "settings-revert-btn", "Revert");
+    revert.addEventListener("click", () => {
+      cfgEdit.content = cfgEdit.original;
+      cfgEdit.status = "";
+      cfgEdit.error = "";
+      renderSettings();
+    });
+    actions.appendChild(revert);
+
+    const msg = el("span", "settings-msg");
+    actions.appendChild(msg);
+    const paintMsg = () => {
+      msg.className = "settings-msg";
+      if (cfgEdit.error) {
+        msg.classList.add("bad");
+        msg.textContent = cfgEdit.error;
+      } else if (cfgEdit.status) {
+        if (cfgEdit.statusKind) msg.classList.add(cfgEdit.statusKind);
+        msg.textContent = cfgEdit.status;
+      } else if (!cfgEdit.exists) {
+        msg.classList.add("dim");
+        msg.textContent = "Doesn't exist yet — saving creates it.";
+      } else {
+        msg.textContent = "";
+      }
+    };
+    paintMsg();
+
+    // Live edits: update state + toggle Save/Revert inline (no full re-render,
+    // so the caret and scroll position stay put while typing).
+    ta.addEventListener("input", () => {
+      cfgEdit.content = ta.value;
+      cfgEdit.status = "";
+      cfgEdit.error = "";
+      save.disabled = !dirty();
+      revert.classList.toggle("hidden", !dirty());
+      paintMsg();
+    });
+    revert.classList.toggle("hidden", !dirty());
+
+    sec.appendChild(actions);
+    els.settingsBody.appendChild(sec);
   }
 
   // A read-only key → value line for the Connection / About tabs.

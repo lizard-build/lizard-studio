@@ -2400,14 +2400,19 @@ code.inline {
 }
 .settings-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
 
-/* Tab strip: pills sitting on a hairline that spans the modal width. */
+/* Tab strip: pills sitting on a hairline that spans the modal width. Scrolls
+   horizontally if the tabs outgrow the modal rather than wrapping. */
 .settings-tabs {
   display: flex;
   gap: 2px;
   padding: 0 12px;
   flex: 0 0 auto;
   box-shadow: inset 0 -1px 0 var(--border-primary);
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+.settings-tabs::-webkit-scrollbar { height: 0; }
+.settings-tab { white-space: nowrap; flex: 0 0 auto; }
 .settings-tab {
   appearance: none;
   border: none;
@@ -2486,6 +2491,108 @@ code.inline {
 .settings-status.ok .settings-status-dot { background: var(--control-primary); box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18); }
 .settings-status.bad .settings-status-dot { background: var(--other-red); box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.18); }
 .settings-status-text { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+
+/* Config editors (CLAUDE.md / Hooks / MCP). */
+.settings-blurb {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+.settings-scope {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  background: var(--bg-tertiary, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+.settings-scope-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-family);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.settings-scope-btn:hover { color: var(--text-primary); }
+.settings-scope-btn.active {
+  background: var(--control-secondary, rgba(255, 255, 255, 0.09));
+  color: var(--text-primary);
+}
+.settings-path {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  margin-bottom: 10px;
+  word-break: break-all;
+}
+.settings-note { font-size: 11px; color: var(--text-tertiary); margin-bottom: 10px; }
+.settings-loading { font-size: 12.5px; color: var(--text-tertiary); padding: 8px 0; }
+.settings-editor {
+  display: block;
+  width: 100%;
+  min-height: 220px;
+  max-height: 46vh;
+  resize: vertical;
+  box-sizing: border-box;
+  background: var(--bg-primary, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+  scrollbar-width: thin;
+}
+.settings-editor.mono { font-family: var(--font-mono); font-size: 12px; }
+.settings-editor:focus { border-color: var(--control-secondary-hover); }
+.settings-editor::placeholder { color: var(--text-tertiary); }
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.settings-save-btn {
+  appearance: none;
+  border: none;
+  border-radius: 8px;
+  background: var(--control-primary);
+  color: #fff;
+  font-family: var(--font-family);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 7px 16px;
+  cursor: pointer;
+  transition: opacity 0.12s;
+}
+.settings-save-btn:disabled { opacity: 0.4; cursor: default; }
+.settings-revert-btn {
+  appearance: none;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-family);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+.settings-revert-btn:hover { color: var(--text-primary); border-color: var(--control-secondary-hover); }
+.settings-msg { font-size: 12px; }
+.settings-msg.ok { color: var(--control-primary); }
+.settings-msg.bad { color: var(--other-red); }
+.settings-msg.dim { color: var(--text-tertiary); }
 
 /* About header. */
 .settings-brand { display: flex; align-items: center; gap: 12px; }
