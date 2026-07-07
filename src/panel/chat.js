@@ -4020,12 +4020,13 @@
     // a dev server reads as "Preview" (like the preview MCP), not "Bash".
     const isPreview = item.kind === "preview" || item.isServer;
     const kindLabel = item.kind === "agent" ? "Agent" : isPreview ? "Preview" : "Bash";
+    const stopping = item.status === "running" && item.stopping;
     const statusText = item.status === "running"
-      ? (item.stopping ? "Stopping…" : "Running")
+      ? (stopping ? "Stopping…" : "Running")
       : item.status === "error" ? "Failed" : "Completed";
     const meta = el("div", "task-card-meta");
     meta.appendChild(el("span", "task-card-kind", kindLabel));
-    meta.appendChild(el("span", "task-card-status " + item.status, statusText));
+    meta.appendChild(el("span", "task-card-status " + (stopping ? "stopping" : item.status), statusText));
     meta.appendChild(el("span", "task-card-time", taskElapsed(secs)));
     card.appendChild(meta);
 
@@ -4125,6 +4126,16 @@
     if (!ok) { interrupt(); return; } // host unreachable — best-effort fallback
     item.stopping = true;
     syncTasks(chat); // reflect "Stopping…" immediately
+    // Safety net: a host that doesn't know killShell (not reinstalled yet) never
+    // replies — don't hang in "Stopping…" forever.
+    clearTimeout(item._stopTimer);
+    item._stopTimer = setTimeout(() => {
+      if (item.status === "running" && item.stopping) {
+        item.stopping = false;
+        syncTasks(chat);
+        systemNote(chat, "Couldn't stop the task — the host may be outdated. Re-run install.sh and reload.", "warn");
+      }
+    }, 6000);
   }
 
   // Host reply to killShell: the shell's process tree was (or wasn't) killed.
@@ -4133,6 +4144,7 @@
     if (!chat) return;
     const item = (msg.taskId && chat.bgTasks.get(msg.taskId)) || (msg.taskId && chat.previews.get(msg.taskId));
     if (!item) return;
+    clearTimeout(item._stopTimer);
     if (msg.ok) finishTask(item, "done");
     else item.stopping = false; // couldn't find it — let the user try again
     syncTasks(chat);

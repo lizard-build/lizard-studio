@@ -1669,7 +1669,7 @@ code.inline {
 .task-card-time { font-size: 12px; font-weight: 500; color: var(--text-tertiary); }
 .task-card-status { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
 .task-card-status.running { color: var(--control-primary); }
-.task-card-status.error { color: var(--other-red); }
+.task-card-status.error, .task-card-status.stopping { color: var(--other-red); }
 
 .task-card-stats {
   display: flex;
