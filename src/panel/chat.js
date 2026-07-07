@@ -4642,8 +4642,8 @@
     // The bar now doubles as the tasks strip, so it shows whenever there are
     // uncommitted changes OR any subagent / background task has spawned.
     els.gitBar.classList.toggle("hidden", !hasChanges && totals.total === 0);
-    // Branch label + leading git icon only make sense in a repo — hide them for
-    // a tasks-only bar in a plain folder so it isn't an empty branch chip.
+    // Left label: the branch name in a repo, otherwise the folder name with a
+    // folder icon — the bar never shows as an anonymous strip.
     const showBranch = chat.isRepo && !!chat.branch;
     // The bar must always name the branch when the cwd is a repo. If it's
     // visible but the branch is still unknown (restored tab, reply race),
@@ -4652,9 +4652,15 @@
       chat.branchRequested = true;
       requestBranches(chat);
     }
-    els.gitBarIc.classList.toggle("hidden", !showBranch);
-    els.gitBarBranch.classList.toggle("hidden", !showBranch);
-    if (showBranch) els.gitBarBranch.textContent = chat.branch;
+    // Swap the icon only when the mode flips — this runs on every task tick.
+    const icName = showBranch ? "git-branch" : "folder";
+    if (els.gitBarIc.dataset.ic !== icName) {
+      els.gitBarIc.dataset.ic = icName;
+      els.gitBarIc.innerHTML = ICON(icName, 12);
+    }
+    els.gitBarIc.classList.remove("hidden");
+    els.gitBarBranch.classList.remove("hidden");
+    els.gitBarBranch.textContent = showBranch ? chat.branch : folderLabel(chat.cwd);
     // Diff badge only when there are actual changes.
     els.gitStatusBadge.classList.toggle("hidden", !hasChanges);
     if (hasChanges) {
