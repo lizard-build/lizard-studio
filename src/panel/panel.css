@@ -1637,7 +1637,9 @@ code.inline {
   font-size: 12px;
   font-weight: 600;
   color: var(--text-primary);
-  line-height: 1.4;
+  /* Match the meta line's line-height so the title→meta gap equals the
+     meta→url gap (equal 6px margins otherwise read unequal due to leading). */
+  line-height: 1.2;
 }
 .task-card-stop {
   appearance: none;
