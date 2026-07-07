@@ -4075,22 +4075,24 @@
 
   // ---- settings modal -------------------------------------------------------
   // A modal overlaying the whole panel, opened by the gear in the subbar, with
-  // a tab strip up top. Connection + About are read-only status; the CLAUDE.md /
-  // Hooks / MCP tabs edit on-disk config files through the host (the browser
-  // sandbox can't touch the filesystem itself).
+  // a tab strip up top. Connection + About are read-only status; the single
+  // Config tab edits three on-disk files (CLAUDE.md / Hooks / MCP) through the
+  // host (the browser sandbox can't touch the filesystem itself), picked by an
+  // in-tab segmented control.
   const SETTINGS_TABS = [
     { id: "connection", label: "Connection" },
-    { id: "claudemd", label: "CLAUDE.md" },
-    { id: "hooks", label: "Hooks" },
-    { id: "mcp", label: "MCP" },
+    { id: "config", label: "Config" },
     { id: "about", label: "About" },
   ];
-  // Per-editable-tab metadata. `format` picks the editor (raw text vs JSON);
-  // `project`/`user` are the human-readable target paths shown under the scope
-  // toggle. Keyed by the same id the host's configResolve() understands.
+  // The files the Config tab can edit, in segmented-control order. `format`
+  // picks the editor (raw text vs JSON); `label` is the segment caption;
+  // `project`/`user` are the human-readable target paths. Keyed by the same id
+  // the host's configResolve() understands.
+  const CONFIG_FILES = ["claudemd", "hooks", "mcp"];
   const CONFIG_META = {
     claudemd: {
       title: "CLAUDE.md",
+      label: "CLAUDE.md",
       format: "text",
       blurb: "Project memory prepended to every session.",
       project: "<project>/CLAUDE.md",
@@ -4099,6 +4101,7 @@
     },
     hooks: {
       title: "Hooks",
+      label: "Hooks",
       format: "json",
       blurb: "Shell commands run on events (PreToolUse, PostToolUse, SessionStart…). A JSON object keyed by event.",
       project: "<project>/.claude/settings.json → \"hooks\"",
@@ -4108,6 +4111,7 @@
     },
     mcp: {
       title: "MCP servers",
+      label: "MCP",
       format: "json",
       blurb: "Model Context Protocol servers, keyed by name. Servers needing OAuth login can't be authorized from here yet.",
       project: "<project>/.mcp.json → \"mcpServers\"",
@@ -4117,6 +4121,8 @@
     },
   };
   let settingsTab = "connection";
+  // Which file the Config tab is editing (its segmented control's selection).
+  let cfgKey = "claudemd";
   // Live state of the open config editor (null when on a status tab). Survives
   // the modal's re-renders so unsaved text isn't lost; keyed by (key, scope) so
   // late host replies for a scope we've since switched away from are ignored.
@@ -4128,6 +4134,7 @@
 
   function openSettings() {
     settingsTab = "connection";
+    cfgKey = "claudemd";
     cfgEdit = null;
     renderSettings();
     els.settingsOverlay.classList.remove("hidden");
@@ -4137,11 +4144,11 @@
     cfgEdit = null;
   }
   // Live-refresh the modal (e.g. host (re)connected while it's open) without
-  // resetting the active tab. Skips config tabs — rebuilding their textarea
+  // resetting the active tab. Skips the Config tab — rebuilding its textarea
   // would drop the caret and any unsaved edit.
   function refreshSettingsIfOpen() {
     if (!settingsOpen()) return;
-    if (CONFIG_META[settingsTab]) return;
+    if (settingsTab === "config") return;
     renderSettings();
   }
 
@@ -4152,7 +4159,7 @@
       btn.addEventListener("click", () => {
         if (settingsTab === t.id) return;
         settingsTab = t.id;
-        if (!CONFIG_META[t.id]) cfgEdit = null;
+        if (t.id !== "config") cfgEdit = null;
         renderSettings();
       });
       els.settingsTabs.appendChild(btn);
@@ -4160,7 +4167,7 @@
     els.settingsBody.innerHTML = "";
     if (settingsTab === "connection") renderSettingsConnection();
     else if (settingsTab === "about") renderSettingsAbout();
-    else if (CONFIG_META[settingsTab]) renderSettingsConfig(settingsTab);
+    else if (settingsTab === "config") renderSettingsConfig();
   }
 
   // ---- config editors (CLAUDE.md / Hooks / MCP) -----------------------------
@@ -4195,16 +4202,32 @@
     renderSettings();
   }
 
-  function renderSettingsConfig(key) {
-    const meta = CONFIG_META[key];
-    // First open of this tab (or a stale editor from another key): kick off a
-    // load; loadConfig() re-renders once the request is in flight.
-    if (!cfgEdit || cfgEdit.key !== key) {
-      loadConfig(key, "project");
+  function renderSettingsConfig() {
+    const meta = CONFIG_META[cfgKey];
+    const sec = el("div", "settings-section");
+
+    // Segmented control choosing which of the three files to edit. Switching
+    // discards the current file's unsaved edits (same as leaving the tab).
+    const files = el("div", "settings-filepick");
+    for (const k of CONFIG_FILES) {
+      const b = el("button", "settings-filepick-btn" + (k === cfgKey ? " active" : ""), CONFIG_META[k].label);
+      b.addEventListener("click", () => {
+        if (k === cfgKey) return;
+        cfgKey = k;
+        loadConfig(k, (cfgEdit && cfgEdit.scope) || "project");
+      });
+      files.appendChild(b);
+    }
+    sec.appendChild(files);
+
+    // First open (or a stale editor from another file): kick off a load;
+    // loadConfig() re-renders (repainting this whole section) once the request
+    // is in flight, so there's nothing to append here yet.
+    if (!cfgEdit || cfgEdit.key !== cfgKey) {
+      loadConfig(cfgKey, "project");
       return;
     }
-    const sec = el("div", "settings-section");
-    sec.appendChild(el("div", "settings-section-title", meta.title));
+
     sec.appendChild(el("div", "settings-blurb", meta.blurb));
 
     // Project / User scope toggle.
@@ -4212,7 +4235,7 @@
     for (const sc of ["project", "user"]) {
       const b = el("button", "settings-scope-btn" + (cfgEdit.scope === sc ? " active" : ""), sc === "project" ? "Project" : "User");
       b.addEventListener("click", () => {
-        if (cfgEdit.scope !== sc) loadConfig(key, sc);
+        if (cfgEdit.scope !== sc) loadConfig(cfgKey, sc);
       });
       toggle.appendChild(b);
     }

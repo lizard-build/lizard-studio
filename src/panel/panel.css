@@ -2493,6 +2493,35 @@ code.inline {
 .settings-status-text { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 
 /* Config editors (CLAUDE.md / Hooks / MCP). */
+/* File picker: full-width segmented control choosing which file to edit. */
+.settings-filepick {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  margin-bottom: 14px;
+  background: var(--bg-primary, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+}
+.settings-filepick-btn {
+  flex: 1 1 0;
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-family);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 7px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.settings-filepick-btn:hover { color: var(--text-primary); }
+.settings-filepick-btn.active {
+  background: var(--control-secondary);
+  color: var(--text-primary);
+}
 .settings-blurb {
   font-size: 12px;
   line-height: 1.5;
