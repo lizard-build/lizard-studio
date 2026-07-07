@@ -394,6 +394,7 @@
       // Git state for the cwd (filled in from the host's gitBranches reply).
       isRepo: false,
       branch: null,
+      branchRequested: false, // in-flight guard for syncGitBar's self-heal request
       branches: [],
       // Working-tree diff vs HEAD (filled in from the host's gitDiff reply).
       // Refreshed on session start and after every turn ends.
@@ -2946,7 +2947,10 @@
     // turn is actually done, before anything queued goes out under it.
     if (chat.restartPending) restartSessionNow(chat);
     // The turn may have edited files — refresh the uncommitted-changes badge.
+    // It may also have switched or created a branch, so re-ask for that too:
+    // the git bar always names the current branch on its left.
     requestGitDiff(chat);
+    requestBranches(chat);
     // Send the next queued prompt, if any — keeps working even if the user
     // has since switched to a different tab.
     dispatchNextQueued(chat);
@@ -3202,6 +3206,10 @@
         break;
       case "gitBranches":
         if (chat) {
+          // Re-arm the self-heal guard (see syncGitBar) only when the answer
+          // was usable — a detached-HEAD repo (isRepo, no current branch)
+          // would otherwise re-request on every bar sync forever.
+          chat.branchRequested = !!msg.isRepo && !msg.current;
           chat.isRepo = !!msg.isRepo;
           chat.branch = msg.current || null;
           chat.branches = Array.isArray(msg.branches) ? msg.branches : [];
@@ -4637,6 +4645,13 @@
     // Branch label + leading git icon only make sense in a repo — hide them for
     // a tasks-only bar in a plain folder so it isn't an empty branch chip.
     const showBranch = chat.isRepo && !!chat.branch;
+    // The bar must always name the branch when the cwd is a repo. If it's
+    // visible but the branch is still unknown (restored tab, reply race),
+    // ask the host once — the gitBranches reply re-syncs and clears the flag.
+    if ((hasChanges || totals.total > 0) && chat.isRepo && !chat.branch && !chat.branchRequested) {
+      chat.branchRequested = true;
+      requestBranches(chat);
+    }
     els.gitBarIc.classList.toggle("hidden", !showBranch);
     els.gitBarBranch.classList.toggle("hidden", !showBranch);
     if (showBranch) els.gitBarBranch.textContent = chat.branch;
@@ -5391,6 +5406,7 @@
     rememberCwd(path);
     chat.isRepo = false;
     chat.branch = null;
+    chat.branchRequested = false;
     chat.branches = [];
     chat.diffFiles = [];
     chat.diffInsertions = 0;
