@@ -2856,6 +2856,12 @@
           for (const block of content) {
             if (block.type === "tool_result") {
               fillToolResult(chat, block.tool_use_id, block.content, block.is_error);
+            } else if (block.type === "text" && block.text) {
+              // Background-shell / async-subagent completion notices can arrive
+              // as a text block in an array-content user turn, not only as a
+              // plain-string turn — scan those too or the task stays "Running".
+              scanBgNotice(chat, block.text);
+              scanAgentNotice(chat, block.text);
             }
           }
         } else if (typeof content === "string") {
@@ -3404,7 +3410,13 @@
           for (const b of content) {
             if (!b) continue;
             if (b.type === "tool_result") fillToolResult(chat, b.tool_use_id, b.content, b.is_error);
-            else if (b.type === "text" && b.text) texts.push(b.text);
+            else if (b.type === "text" && b.text) {
+              // Same as the live path: completion notices can ride in a text
+              // block, not only a plain-string turn.
+              scanBgNotice(chat, b.text);
+              scanAgentNotice(chat, b.text);
+              texts.push(b.text);
+            }
           }
           const joined = texts.join("\n\n");
           const stripped =
