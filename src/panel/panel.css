@@ -1621,16 +1621,17 @@ code.inline {
 .task-empty { padding: 24px 8px; color: var(--text-tertiary); font-size: 12px; font-weight: 500; text-align: center; }
 
 .task-card {
+  position: relative;
   background: rgba(255, 255, 255, 0.035);
   border-radius: 12px;
   padding: 12px 14px;
   margin-bottom: 8px;
 }
-.task-card-top {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
+/* Just the title — the stop button is taken out of flow (below) so it can't
+   inflate this row's height and push the meta line down on running cards. */
+.task-card-top { min-width: 0; }
+/* Reserve room on the right for the stop button so a long title clears it. */
+.task-card.running .task-card-top { padding-right: 30px; }
 .task-card-title {
   flex: 1 1 auto;
   min-width: 0;
@@ -1643,7 +1644,9 @@ code.inline {
 }
 .task-card-stop {
   appearance: none;
-  flex: 0 0 auto;
+  position: absolute;
+  top: 12px;
+  right: 14px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
