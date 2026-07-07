@@ -2573,6 +2573,76 @@ code.inline {
   word-break: break-all;
 }
 .settings-list-row:first-child { border-top: none; }
+
+/* Skills filter box. */
+.settings-search-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 10px;
+  background: var(--bg-primary, rgba(0, 0, 0, 0.25));
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  padding: 7px 11px;
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  font-size: 12.5px;
+  outline: none;
+}
+.settings-search-input:focus { border-color: var(--control-secondary-hover); }
+.settings-search-input::placeholder { color: var(--text-tertiary); }
+
+/* Plugins on/off list. */
+.settings-toggle-list {
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--border-secondary);
+}
+.settings-toggle-row:first-child { border-top: none; }
+.settings-toggle-info { min-width: 0; flex: 1 1 auto; }
+.settings-toggle-name { font-size: 12.5px; color: var(--text-primary); font-weight: 600; }
+.settings-toggle-sub {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* iOS-style switch. */
+.settings-switch {
+  appearance: none;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  border: none;
+  background: var(--control-secondary);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.settings-switch.on { background: var(--control-primary); }
+.settings-switch:disabled { opacity: 0.5; cursor: default; }
+.settings-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s;
+}
+.settings-switch.on .settings-switch-knob { transform: translateX(14px); }
 .settings-loading { font-size: 12.5px; color: var(--text-tertiary); padding: 8px 0; }
 .settings-editor {
   display: block;

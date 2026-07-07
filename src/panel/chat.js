@@ -4130,10 +4130,10 @@
       title: "Plugins",
       label: "Plugins",
       format: "json",
-      blurb: "Enable or disable installed plugins. A JSON object of \"name@marketplace\": true/false.",
+      toggles: true, // rendered as an on/off list instead of a raw JSON editor
+      blurb: "Enable or disable installed plugins.",
       project: "<project>/.claude/settings.json → \"enabledPlugins\"",
       user: "~/.claude/settings.json → \"enabledPlugins\"",
-      placeholder: '{\n  "frontend-design@claude-code-plugins": true\n}',
     },
     skills: {
       title: "Skills",
@@ -4145,6 +4145,8 @@
   let settingsTab = "connection";
   // Which file the Config tab is editing (its segmented control's selection).
   let cfgKey = "claudemd";
+  // Search box text for the read-only Skills list.
+  let skillsFilter = "";
   // Live state of the open config editor (null when on a status tab). Survives
   // the modal's re-renders so unsaved text isn't lost; keyed by (key, scope) so
   // late host replies for a scope we've since switched away from are ignored.
@@ -4157,6 +4159,7 @@
   function openSettings() {
     settingsTab = "connection";
     cfgKey = "claudemd";
+    skillsFilter = "";
     cfgEdit = null;
     renderSettings();
     els.settingsOverlay.classList.remove("hidden");
@@ -4284,6 +4287,13 @@
       return;
     }
 
+    // Plugins: an on/off list of installed plugins instead of a raw editor.
+    if (meta.toggles) {
+      renderPluginToggles(sec);
+      els.settingsBody.appendChild(sec);
+      return;
+    }
+
     const ta = el("textarea", "settings-editor" + (meta.format === "json" ? " mono" : ""));
     ta.value = cfgEdit.content;
     ta.placeholder = meta.placeholder;
@@ -4338,16 +4348,11 @@
     revert.classList.toggle("hidden", !dirty());
 
     sec.appendChild(actions);
-
-    // For the plugins editor, list the installed plugins so the user knows the
-    // exact "name@marketplace" keys to toggle. Each plugin's `source` is that key.
-    if (cfgKey === "plugins") renderInstalledPlugins(sec);
-
     els.settingsBody.appendChild(sec);
   }
 
-  // Read-only list of the skills available in the active chat (populated by the
-  // host's command harvest / the session init event).
+  // Read-only, filterable list of the skills available in the active chat
+  // (populated by the host's command harvest / the session init event).
   function renderSkillsList(sec) {
     const chat = chats.get(activeId);
     const skills = (chat && Array.isArray(chat.skills) ? chat.skills.slice() : []).sort((a, b) => a.localeCompare(b));
@@ -4355,22 +4360,102 @@
       sec.appendChild(el("div", "settings-note", "No skills loaded yet — open or start a chat in this folder first."));
       return;
     }
-    sec.appendChild(el("div", "settings-note", skills.length + (skills.length === 1 ? " skill" : " skills")));
+    const search = el("input", "settings-search-input");
+    search.type = "text";
+    search.placeholder = "Filter skills";
+    search.value = skillsFilter;
+    search.spellcheck = false;
+    sec.appendChild(search);
+
+    const count = el("div", "settings-note");
+    sec.appendChild(count);
     const list = el("div", "settings-list");
-    for (const s of skills) list.appendChild(el("div", "settings-list-row", s));
+    const rows = skills.map((s) => {
+      const r = el("div", "settings-list-row", s);
+      list.appendChild(r);
+      return { s, r };
+    });
     sec.appendChild(list);
+
+    // Filter in place (toggling row visibility) so the input keeps focus while
+    // typing instead of the whole section rebuilding.
+    const applyFilter = () => {
+      const q = skillsFilter.trim().toLowerCase();
+      let n = 0;
+      for (const { s, r } of rows) {
+        const show = !q || s.toLowerCase().includes(q);
+        r.classList.toggle("hidden", !show);
+        if (show) n++;
+      }
+      count.textContent = n + (n === 1 ? " skill" : " skills");
+    };
+    search.addEventListener("input", () => {
+      skillsFilter = search.value;
+      applyFilter();
+    });
+    applyFilter();
   }
 
-  // Reference list under the plugins editor: the installed plugins and their
-  // enable-key (source), so the user can copy the exact string into the JSON.
-  function renderInstalledPlugins(sec) {
+  // Plugins as an on/off list. Each installed plugin (plus any entry already in
+  // enabledPlugins) gets a switch; flipping it writes the whole enabledPlugins
+  // object back through the normal save path. `cfgEdit.content` holds that JSON.
+  function renderPluginToggles(sec) {
+    let map;
+    try {
+      map = cfgEdit.content.trim() ? JSON.parse(cfgEdit.content) : {};
+      if (!map || typeof map !== "object" || Array.isArray(map)) throw new Error("not an object");
+    } catch {
+      sec.appendChild(el("div", "settings-msg bad", "enabledPlugins isn't a JSON object — fix the file by hand first."));
+      return;
+    }
     const chat = chats.get(activeId);
-    const plugins = (chat && Array.isArray(chat.plugins) ? chat.plugins : []).filter((p) => p && p.source);
-    if (!plugins.length) return;
-    sec.appendChild(el("div", "settings-note", "Installed"));
-    const list = el("div", "settings-list");
-    for (const p of plugins) list.appendChild(el("div", "settings-list-row", p.source));
+    const installed = (chat && Array.isArray(chat.plugins) ? chat.plugins : []).filter((p) => p && p.source);
+    const bySource = new Map(installed.map((p) => [p.source, p]));
+    const keys = Array.from(new Set([...installed.map((p) => p.source), ...Object.keys(map)])).sort();
+    if (!keys.length) {
+      sec.appendChild(el("div", "settings-note", "No plugins installed."));
+      return;
+    }
+
+    const msg = el("div", "settings-msg " + (cfgEdit.statusKind || ""));
+    msg.textContent = cfgEdit.error || cfgEdit.status || "";
+
+    const list = el("div", "settings-toggle-list");
+    for (const key of keys) {
+      const p = bySource.get(key);
+      const on = map[key] !== false; // absent or true → on; only explicit false is off
+      const row = el("div", "settings-toggle-row");
+      const info = el("div", "settings-toggle-info");
+      info.appendChild(el("div", "settings-toggle-name", p ? p.name : key.split("@")[0]));
+      info.appendChild(el("div", "settings-toggle-sub", p ? key : key + " · not installed"));
+      row.appendChild(info);
+      const sw = el("button", "settings-switch" + (on ? " on" : ""));
+      sw.type = "button";
+      sw.setAttribute("role", "switch");
+      sw.setAttribute("aria-checked", String(on));
+      sw.disabled = cfgEdit.saving;
+      sw.appendChild(el("span", "settings-switch-knob"));
+      sw.addEventListener("click", () => togglePlugin(key, !on));
+      row.appendChild(sw);
+      list.appendChild(row);
+    }
     sec.appendChild(list);
+    sec.appendChild(msg);
+  }
+
+  // Flip one plugin's enabled state and persist enabledPlugins immediately.
+  function togglePlugin(key, on) {
+    if (!cfgEdit || cfgEdit.saving) return;
+    let map;
+    try {
+      map = cfgEdit.content.trim() ? JSON.parse(cfgEdit.content) : {};
+    } catch {
+      return;
+    }
+    map[key] = on;
+    cfgEdit.content = JSON.stringify(map, null, 2);
+    cfgEdit.original = cfgEdit.content;
+    saveConfig(); // writes + re-renders with a "Saved" flash
   }
 
   // A read-only key → value line for the Connection tab.
