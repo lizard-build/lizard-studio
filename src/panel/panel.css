@@ -2337,8 +2337,10 @@ code.inline {
   padding: 4px 6px 2px;
   max-height: 200px;
   outline: none;
+  scrollbar-width: none;
 }
 .composer-input::placeholder { color: var(--text-tertiary); }
+.composer-input::-webkit-scrollbar { display: none; }
 
 .composer-toolbar {
   display: flex;
