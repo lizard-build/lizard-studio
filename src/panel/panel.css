@@ -1295,15 +1295,15 @@ code.inline {
 }
 
 /* AskUserQuestion in the transcript — the durable Q&A record the picker leaves
-   behind. Same card treatment as a user bubble (bg-secondary + hairline
-   border) so the exchange reads as one unit in the stream: a quiet
-   "Claude asked" line, the question in body type, and the chosen answer
-   checked in under it once the result lands. */
+   behind. Same flat, no-stroke card treatment as .perm-card (brighter
+   background instead of a border) so the exchange reads as one unit in the
+   stream: a quiet "Claude asked" line, the question in body type, and the
+   chosen answer checked in under it once the result lands. */
 .ask-block {
   display: flex;
   flex-direction: column;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-secondary);
+  background: #1c1c1c;
+  border: 0;
   border-radius: 10px;
   padding: 10px 12px 12px;
 }
