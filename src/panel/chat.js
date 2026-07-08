@@ -734,6 +734,18 @@
   }
 
   // ---- message rendering (per chat) -----------------------------------------
+  // Full-size preview for a thumbnail (pending attachment or sent bubble).
+  function openImageViewer(dataUrl) {
+    if (!els.imageViewerOverlay) return;
+    els.imageViewerImg.src = dataUrl;
+    els.imageViewerOverlay.classList.remove("hidden");
+  }
+  function closeImageViewer() {
+    if (!els.imageViewerOverlay) return;
+    els.imageViewerOverlay.classList.add("hidden");
+    els.imageViewerImg.src = "";
+  }
+
   // Thumbnail strip + markdown body, shared by live user bubbles and queued
   // ones (renderQueuedBubble adds the queued tag/cancel on top).
   function buildBubble(text, attachments) {
@@ -743,6 +755,11 @@
       for (const a of attachments) {
         const img = el("img", "bubble-thumb");
         img.src = a.dataUrl;
+        img.title = "Click to view full size";
+        img.addEventListener("click", (e) => {
+          e.stopPropagation(); // don't also trigger the bubble's click-to-edit
+          openImageViewer(a.dataUrl);
+        });
         thumbs.appendChild(img);
       }
       bubble.appendChild(thumbs);
@@ -1176,6 +1193,8 @@
       const thumb = el("div", "attach-thumb");
       const img = el("img", "attach-thumb-img");
       img.src = a.dataUrl;
+      img.title = "Click to view full size";
+      img.addEventListener("click", () => openImageViewer(a.dataUrl));
       thumb.appendChild(img);
       const x = el("button", "attach-thumb-x");
       x.innerHTML = ICON("x", 11);
@@ -1229,6 +1248,19 @@
     return n === row;
   }
 
+  // A background bash/subagent finishing can silently resume the model with
+  // no new prompt from the front end (see resumeTurnIfIdle) — endTurn had
+  // already cleared chat.currentAssistantBody at that point, so without this
+  // fallback the resumed reply would always open a fresh row even though its
+  // footered predecessor is still sitting at the transcript tail untouched.
+  function lastTailAssistantBody(chat) {
+    let n = chat.messagesEl.lastElementChild;
+    while (n && (n === chat.statusEl || (n.classList && n.classList.contains("perm-card")))) {
+      n = n.previousElementSibling;
+    }
+    return n && n.classList && n.classList.contains("msg-assistant") ? n.querySelector(":scope > .assistant-body") : null;
+  }
+
   function ensureAssistantBody(chat, messageId) {
     if (chat.currentAssistantId === messageId && chat.currentAssistantBody) return chat.currentAssistantBody;
     // The CLI opens a new message id after every tool result, but visually a
@@ -1236,9 +1268,10 @@
     // still the last content in the transcript (endTurn / user bubbles / notes
     // break the chain), so spacing stays even instead of jumping at message
     // boundaries. The copy footer moves back to the bottom as content grows.
-    const prev = chat.currentAssistantBody;
+    const prev = chat.currentAssistantBody || lastTailAssistantBody(chat);
     if (prev && prev.parentElement && isTranscriptTail(chat, prev.parentElement)) {
       chat.currentAssistantId = messageId;
+      chat.currentAssistantBody = prev;
       if (prev.dataset.footered) {
         const f = prev.querySelector(":scope > .msg-footer");
         if (f) f.remove();
@@ -2772,6 +2805,30 @@
     }
   }
 
+  // A finished background bash run or subagent (see scanBgNotice/scanAgentNotice)
+  // makes the CLI wake the model back up on its own — no new prompt goes through
+  // deliverPrompt/rewind, the only other places turnRunning flips true. Left
+  // false, the resumed reply's own message_stop/assistant events would sail
+  // past finalizeAssistant's turnRunning guard and footer every intermediate
+  // chunk as it lands instead of waiting for this leg's real end. Mirrors
+  // deliverPrompt's turn-start bookkeeping, but only for the idle -> running
+  // transition — a no-op mid-turn.
+  function resumeTurnIfIdle(chat) {
+    if (chat.turnRunning) return;
+    chat.turnRunning = true;
+    chat.turnStatusText = "";
+    chat.compacting = false;
+    chat.turnStartedAt = Date.now();
+    chat.turnTokens = 0;
+    chat.curMsgTokens = 0;
+    refreshStatusWord(chat);
+    if (chat.id === activeId) {
+      setRunningUI(true);
+      startStatusTicker();
+    }
+    renderTurnStatus(chat);
+  }
+
   // ---- event handling (routed per chat) -------------------------------------
   function onClaudeEvent(chat, d) {
     if (!d || !d.type) return;
@@ -2813,6 +2870,7 @@
         // A subagent (sidechain) runs in its own context and must NOT stream into
         // the main transcript — it's surfaced in the tasks drawer instead.
         if (d.parent_tool_use_id) break;
+        resumeTurnIfIdle(chat);
         trackCtxStream(chat, d.event);
         handleStreamEvent(chat, d.event);
         break;
@@ -2820,6 +2878,7 @@
         // Subagent turn — track its usage / tool calls for the drawer, but don't
         // render its messages into the shared chat.
         if (d.parent_tool_use_id) { noteAgentActivity(chat, d.parent_tool_use_id, d.message); break; }
+        resumeTurnIfIdle(chat);
         noteCtxUsage(chat, d.message && d.message.usage);
         const msgId = d.message && d.message.id;
         const body = ensureAssistantBody(chat, msgId);
@@ -5663,6 +5722,8 @@
     els.tasksDrawerClose = root.querySelector("#tasks-drawer-close");
     els.tasksDrawerBack = root.querySelector("#tasks-drawer-back");
     els.tasksDrawerTitle = root.querySelector("#tasks-drawer-title");
+    els.imageViewerOverlay = root.querySelector("#image-viewer-overlay");
+    els.imageViewerImg = root.querySelector("#image-viewer-img");
 
     // Static icons.
     root.querySelector("#new-chat-btn").innerHTML = ICON("plus", 17);
@@ -5748,7 +5809,11 @@
     });
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && !els.settingsOverlay.classList.contains("hidden")) closeSettings();
+      if (e.key === "Escape" && !els.imageViewerOverlay.classList.contains("hidden")) closeImageViewer();
     });
+    // The viewer has nothing to interact with — click anywhere (backdrop or
+    // the image itself) to dismiss it.
+    els.imageViewerOverlay.addEventListener("click", closeImageViewer);
     els.folder.addEventListener("click", () => {
       const chat = chats.get(activeId);
       if (chat) post({ type: "pickFolder", id: chat.id }) || promptForFolder(chat);
@@ -6033,6 +6098,12 @@
         <div id="settings-tabs" class="settings-tabs"></div>
         <div id="settings-body" class="settings-body"></div>
       </div>
+    </div>
+
+    <!-- Full-size preview, opened by clicking any attachment/message thumbnail.
+         Click anywhere (backdrop or image) or press Escape to dismiss. -->
+    <div id="image-viewer-overlay" class="image-viewer-overlay hidden">
+      <img id="image-viewer-img" class="image-viewer-img" alt="" />
     </div>
 
     <div id="chat-onboarding" class="chat-onboarding hidden">
