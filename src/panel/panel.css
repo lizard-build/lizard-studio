@@ -2373,10 +2373,15 @@ code.inline {
    Circles top-align so the connector lines sit at their vertical centre while
    the labels drop below. Emerald matches the app's brand accent. */
 .onboarding-steps {
+  position: absolute;
+  top: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: calc(100% - 44px);
+  max-width: 340px;
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  margin: 0 0 22px;
 }
 .ob-step {
   display: flex;
