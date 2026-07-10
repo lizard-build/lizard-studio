@@ -5768,6 +5768,8 @@
     if (lizardLogo) lizardLogo.innerHTML = window.RKLizardHTML(30);
     const installStep = root.querySelector("#ob-step-install");
     if (installStep) installStep.innerHTML = ICON("check", 14);
+    const claudeStep = root.querySelector("#ob-step-claude");
+    if (claudeStep) claudeStep.innerHTML = ICON("check", 14);
     els.send.innerHTML = ICON("send", 16);
     els.stop.innerHTML = ICON("stop", 14);
     els.attachFileBtn.innerHTML = ICON("plus", 15);
@@ -6133,12 +6135,12 @@
           <span class="ob-step-label">Install extension</span>
         </div>
         <span class="ob-step-line done"></span>
-        <div class="ob-step current">
-          <span class="ob-step-dot"></span>
+        <div class="ob-step done">
+          <span id="ob-step-claude" class="ob-step-dot"></span>
           <span class="ob-step-label">Install Claude Code</span>
         </div>
-        <span class="ob-step-line"></span>
-        <div class="ob-step">
+        <span class="ob-step-line done"></span>
+        <div class="ob-step current">
           <span class="ob-step-dot"></span>
           <span class="ob-step-label">Link up</span>
         </div>
