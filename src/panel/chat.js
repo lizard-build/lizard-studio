@@ -3122,7 +3122,9 @@
     }
     port.onMessage.addListener(onHostMessage);
     port.onDisconnect.addListener(() => {
-      const lastErr = chrome.runtime.lastError;
+      // Read (and discard) lastError so Chrome doesn't log "Unchecked
+      // runtime.lastError" — e.g. the not-yet-installed "host not found" case.
+      void chrome.runtime.lastError;
       port = null;
       connected = false;
       hostReady = false;
@@ -3139,7 +3141,10 @@
       if (expectHostRestart) {
         expectHostRestart = false;
       } else {
-        showOnboarding(lastErr && lastErr.message);
+        // Don't surface Chrome's raw "Specified native messaging host not found"
+        // — that's the expected not-yet-installed state, not an error. Keep the
+        // neutral "Waiting for the helper…" status instead.
+        showOnboarding();
       }
       scheduleReconnect();
     });
