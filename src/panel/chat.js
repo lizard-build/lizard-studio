@@ -5747,6 +5747,10 @@
       els.copyInstall.innerHTML = ICON("copy", 14);
       wireCopyButton(els.copyInstall, () => els.copyInstall.dataset.cmd, 14);
     }
+    const claudeLogo = root.querySelector("#onboarding-logo-claude");
+    const lizardLogo = root.querySelector("#onboarding-logo-lizard");
+    if (claudeLogo) claudeLogo.innerHTML = window.RKClaudeHTML(28);
+    if (lizardLogo) lizardLogo.innerHTML = window.RKLizardHTML(30);
     els.send.innerHTML = ICON("send", 16);
     els.stop.innerHTML = ICON("stop", 14);
     els.attachFileBtn.innerHTML = ICON("plus", 15);
@@ -6107,6 +6111,13 @@
 
     <div id="chat-onboarding" class="chat-onboarding hidden">
       <div class="onboarding-card">
+        <div class="onboarding-logos" aria-hidden="true">
+          <span id="onboarding-logo-claude" class="onboarding-logo"></span>
+          <span class="onboarding-arrow">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+          </span>
+          <span id="onboarding-logo-lizard" class="onboarding-logo lizard"></span>
+        </div>
         <h2>Connect the Claude Code host</h2>
         <p>The chat drives the real <code>claude</code> CLI through a tiny local helper. Install it once:</p>
         <div class="cmd-row">

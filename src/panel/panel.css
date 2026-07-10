@@ -2368,6 +2368,25 @@ code.inline {
   z-index: 5;
 }
 .onboarding-card { max-width: 340px; text-align: center; }
+.onboarding-logos {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin: 0 0 22px;
+}
+.onboarding-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 13px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+}
+.onboarding-logo.lizard { color: var(--control-primary); }
+.onboarding-arrow { display: flex; color: var(--text-tertiary); }
 .onboarding-card h2 { font-size: 18px; font-weight: 600; margin: 0 0 10px; }
 .onboarding-card p { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin: 0 0 14px; }
 
