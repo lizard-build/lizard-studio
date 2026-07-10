@@ -6117,7 +6117,7 @@
           <span id="onboarding-logo-lizard" class="onboarding-logo lizard"></span>
         </div>
         <h2>Connect the Claude Code host</h2>
-        <p>The chat drives the real <code>claude</code> CLI through a tiny local helper. Install it once:</p>
+        <p>Same Claude Code you run in the terminal, now in your sidebar. One command to link them:</p>
         <div class="cmd-row">
           <code>curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash</code>
           <button id="chat-copy-install" class="cmd-copy-btn" title="Copy" aria-label="Copy install command" data-cmd="curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash"></button>
