@@ -48,15 +48,15 @@ Tools toggle independently from a draggable, minimizable toolbar; several can ru
 
 ### 2. The Claude Code host (one-time)
 
-The chat talks to the CLI through a tiny local native-messaging host (Node, zero dependencies). Install it once, straight from GitHub:
+The chat talks to the CLI through a tiny local native-messaging host (Node, zero dependencies). Install it once with npm — works on macOS, Linux and Windows:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash
+npx @lizard-build/lizard-studio-host install
 ```
 
-Already have the repo checked out? `bash src/host/install.sh` is equivalent (and `--uninstall` removes it).
+`npx … uninstall` removes it. Have the repo checked out? `bash src/host/install.sh` (macOS/Linux) or `node src/host/install.mjs install` (any OS) installs the local copy — handy while hacking on the host. The old `curl … | install.sh | bash` one-liner still works; it now just delegates to the npm installer.
 
-It resolves your `node` and `claude` paths, copies the host to `~/.lizard-studio/host`, and registers the origin-locked `com.lizard.code` manifest. Reload the extension and the panel connects automatically. Requires the Claude Code CLI (`npm i -g @anthropic-ai/claude-code`).
+It resolves your `node` and `claude` paths, copies the host to `~/.lizard-studio/host`, and registers the origin-locked `com.lizard.code` manifest (a file per browser on macOS/Linux, a `HKCU` registry key per browser on Windows). Reload the extension and the panel connects automatically. Requires the Claude Code CLI (`npm i -g @anthropic-ai/claude-code`).
 
 > The host runs from `~/.lizard-studio/host`, **not** from the repo, on purpose: macOS TCC blocks browsers from launching native-messaging hosts under `~/Desktop`, `~/Documents`, or `~/Downloads` — they fail with a baffling *"Native host has exited"*. Re-run `install.sh` after `git pull` to refresh the copy. Logs: `~/.lizard-studio/host/host.log`.
 
@@ -69,7 +69,7 @@ It resolves your `node` and `claude` paths, copies the host to `~/.lizard-studio
 - `src/toolbar.js` — the floating toolbar; `src/main.js` — state restore + toggle command.
 - `src/background.js` — service worker: toolbar toggle, side-panel open/close, capture + chat relays.
 - `src/panel/` — the side-panel app: `chat.js` (Claude Code client: streaming, tool cards, permission asks, browser-tool executor over `chrome.debugger`/CDP), `render.js` (XSS-safe markdown / highlighting / diffs), `panel.{html,js,css}`. A terminal view (`terminal.js` + vendored xterm) is kept in the codebase but currently disabled in the UI.
-- `src/host/` — the native host: `claude-host.mjs` (spawns `claude` in stream-json mode via launchd to dodge Chrome's quarantine propagation — see the Gatekeeper note above — one process per chat tab; bridges permission control-requests and browser tool calls; replays transcripts; drives `/login`), `mcp-browser.mjs` (the MCP relay exposing `browser_*` tools), `spawn-shim.mjs` (generated at runtime by the host), `install.sh`.
+- `src/host/` — the native host: `claude-host.mjs` (spawns `claude` in stream-json mode via launchd to dodge Chrome's quarantine propagation — see the Gatekeeper note above — one process per chat tab; bridges permission control-requests and browser tool calls; replays transcripts; drives `/login`), `mcp-browser.mjs` (the MCP relay exposing `browser_*` tools), `spawn-shim.mjs` (generated at runtime by the host), `install.mjs` (cross-platform npm installer; `install.sh` is a thin wrapper over it).
 
 No build step — plain JS loaded directly as content scripts and side-panel scripts.
 

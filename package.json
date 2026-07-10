@@ -1,0 +1,42 @@
+{
+  "name": "@lizard-build/lizard-studio-host",
+  "version": "1.0.0",
+  "description": "Native-messaging host installer that lets the Lizard Studio browser extension drive the local Claude Code CLI.",
+  "type": "module",
+  "bin": {
+    "lizard-studio-host": "src/host/install.mjs"
+  },
+  "files": [
+    "src/host/install.mjs",
+    "src/host/claude-host.mjs",
+    "src/host/mcp-browser.mjs",
+    "src/host/skills/lizard/SKILL.md",
+    "src/host/skills/lizard/README.md",
+    "src/host/skills/lizard/skills.sh.json"
+  ],
+  "scripts": {
+    "install-host": "node src/host/install.mjs install",
+    "uninstall-host": "node src/host/install.mjs uninstall"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "keywords": [
+    "lizard",
+    "claude",
+    "claude-code",
+    "native-messaging",
+    "browser-extension"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lizard-build/lizard-studio.git"
+  },
+  "license": "MIT",
+  "dependencies": {}
+}
