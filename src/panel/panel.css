@@ -2485,7 +2485,7 @@ code.inline {
   height: 14px;
   flex-shrink: 0;
   border-radius: 50%;
-  border: 2px solid rgba(16, 185, 129, 0.25);
+  border: 2px solid rgba(233, 237, 244, 0.25);
   border-top-color: var(--control-primary);
   animation: spin 0.7s linear infinite;
 }
