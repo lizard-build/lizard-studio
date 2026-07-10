@@ -6116,7 +6116,7 @@
           </span>
           <span id="onboarding-logo-lizard" class="onboarding-logo lizard"></span>
         </div>
-        <h2>Connect the Claude Code host</h2>
+        <h2>Connect Claude Code</h2>
         <p>Same Claude Code you run in the terminal, now in your sidebar. One command to link them:</p>
         <div class="cmd-row">
           <code>curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash</code>
