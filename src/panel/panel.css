@@ -2461,22 +2461,22 @@ code.inline {
    --control-secondary bg, no border, opacity 0.5, --text-primary label. */
 .onboarding-wait-btn {
   position: absolute;
-  bottom: 28px;
-  left: 50%;
-  transform: translateX(-50%);
+  bottom: 24px;
+  left: 22px;
+  right: 22px;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  height: 36px;
+  height: 44px;
   padding: 0 16px;
   border: none;
   border-radius: 8px;
-  background: var(--control-secondary);
+  background: var(--control-secondary-hover);
   color: var(--text-primary);
   font-family: var(--font-family);
   font-size: 14px;
   font-weight: 600;
-  opacity: 0.5;
   cursor: default;
   white-space: nowrap;
 }
