@@ -1,52 +1,73 @@
-# Publishes @lizard-build/lizard-studio-host to npm when a v* tag is pushed.
+# Auto-publishes @lizard-build/lizard-studio-host to npm on every push to main
+# that touches the host package — same model as lizard-build/lizard-cli.
 #
-# One-time setup:
-#   1. Create an npm automation token (npmjs.com -> Access Tokens -> Granular/
-#      Automation, with publish rights to the @lizard-build scope).
-#   2. Add it as a repo secret named NPM_TOKEN
-#      (Settings -> Secrets and variables -> Actions).
+# It bumps the patch version, commits it back ([skip ci] so it doesn't re-trigger
+# itself), tags it, and publishes. No NPM_TOKEN: publishing uses npm's OIDC
+# Trusted Publisher, so the credential is the workflow's own identity.
 #
-# Release flow:
-#   npm version patch        # bumps package.json + creates the vX.Y.Z tag
-#   git push --follow-tags   # pushing the tag triggers this workflow
+# One-time setup on npmjs.com (Package -> Settings -> Trusted Publisher):
+#   Repository: lizard-build/lizard-studio
+#   Workflow filename: publish-host.yml
+# Until that's configured, the publish step fails with an auth error — the bump
+# commit still lands, so just fix the setting and push again.
 #
-# The job refuses to publish unless the tag matches package.json's version, so a
-# stray or mis-typed tag can't ship the wrong build.
+# Only host changes trigger this (see paths). To ship a change, merge it to main;
+# the new version reaches npm within a couple of minutes.
 name: Publish host to npm
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+    paths:
+      - "src/host/**"
+      - "package.json"
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      id-token: write # lets npm attach a provenance statement to the release
+      contents: write # push the version-bump commit + tag back to main
+      id-token: write # npm OIDC Trusted Publisher (+ provenance)
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           registry-url: "https://registry.npmjs.org"
 
-      - name: Verify tag matches package.json version
-        run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          PKG="$(node -p "require('./package.json').version")"
-          if [ "$TAG" != "$PKG" ]; then
-            echo "::error::Tag v$TAG does not match package.json version $PKG"
-            exit 1
-          fi
-          echo "Publishing version $PKG"
-
       - name: Sanity-check the installer parses
         run: node --check src/host/install.mjs
 
+      - name: Bump patch version, commit, tag
+        id: bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          CURRENT=$(node -p "require('./package.json').version")
+          IFS='.' read -r MAJ MIN PAT <<< "$CURRENT"
+          NEW="$MAJ.$MIN.$((PAT + 1))"
+          echo "version=$NEW" >> "$GITHUB_OUTPUT"
+
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '$NEW';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+          git add package.json
+          git commit -m "chore: bump host to v$NEW [skip ci]"
+          git tag "v$NEW"
+          git push origin main --tags
+
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
       - name: Publish
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
