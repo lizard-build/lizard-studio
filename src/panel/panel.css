@@ -2368,6 +2368,70 @@ code.inline {
   z-index: 5;
 }
 .onboarding-card { max-width: 340px; text-align: center; }
+
+/* 3-step onboarding stepper: Install (done) -> Connect (current) -> Chat.
+   Circles top-align so the connector lines sit at their vertical centre while
+   the labels drop below. Emerald matches the app's brand accent. */
+.onboarding-steps {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  margin: 0 0 22px;
+}
+.ob-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 62px;
+  flex-shrink: 0;
+}
+.ob-step-dot {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid var(--border-primary);
+  background: transparent;
+  color: #fff;
+  transition: background 0.15s, border-color 0.15s;
+}
+.ob-step.done .ob-step-dot {
+  background: var(--control-primary);
+  border-color: var(--control-primary);
+}
+.ob-step.current .ob-step-dot {
+  background: var(--control-primary);
+  border-color: var(--control-primary);
+}
+/* Inner white dot marks the current step (a filled ring, like the reference). */
+.ob-step.current .ob-step-dot::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #fff;
+}
+.ob-step-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+}
+.ob-step.done .ob-step-label { color: var(--control-primary); }
+.ob-step.current .ob-step-label { color: var(--text-primary); font-weight: 600; }
+.ob-step-line {
+  flex: 1;
+  min-width: 10px;
+  height: 2px;
+  margin-top: 12px;
+  background: var(--border-primary);
+  border-radius: 2px;
+}
+.ob-step-line.done { background: var(--control-primary); }
+
 .onboarding-logos {
   display: flex;
   align-items: center;

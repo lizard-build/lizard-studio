@@ -5749,6 +5749,8 @@
     const lizardLogo = root.querySelector("#onboarding-logo-lizard");
     if (claudeLogo) claudeLogo.innerHTML = window.RKClaudeHTML(28);
     if (lizardLogo) lizardLogo.innerHTML = window.RKLizardHTML(30);
+    const installStep = root.querySelector("#ob-step-install");
+    if (installStep) installStep.innerHTML = ICON("check", 14);
     els.send.innerHTML = ICON("send", 16);
     els.stop.innerHTML = ICON("stop", 14);
     els.attachFileBtn.innerHTML = ICON("plus", 15);
@@ -6109,6 +6111,22 @@
 
     <div id="chat-onboarding" class="chat-onboarding hidden">
       <div class="onboarding-card">
+        <div class="onboarding-steps" aria-hidden="true">
+          <div class="ob-step done">
+            <span id="ob-step-install" class="ob-step-dot"></span>
+            <span class="ob-step-label">Install</span>
+          </div>
+          <span class="ob-step-line done"></span>
+          <div class="ob-step current">
+            <span class="ob-step-dot"></span>
+            <span class="ob-step-label">Connect</span>
+          </div>
+          <span class="ob-step-line"></span>
+          <div class="ob-step">
+            <span class="ob-step-dot"></span>
+            <span class="ob-step-label">Chat</span>
+          </div>
+        </div>
         <div class="onboarding-logos" aria-hidden="true">
           <span id="onboarding-logo-claude" class="onboarding-logo"></span>
           <span class="onboarding-arrow">
