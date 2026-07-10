@@ -168,7 +168,8 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v12: killShell / probeShellPort (surgical background-shell stop + port probe).
 // v13: bashExec / bashKill (composer "!" bash mode — local one-off shell runs).
 // v14: kill/probe reach a dev server orphaned after a panel reopen (by port).
-const HOST_VERSION = 16;
+// v17: interrupt drops the killed process's trailing output (turn kept "running").
+const HOST_VERSION = 17;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -1027,6 +1028,9 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
   ensureCommands(id, s.cwd, s.model);
 
   const feedStdout = lineJsonReader((obj) => {
+      // A killed process draining its last buffered output — drop everything;
+      // the panel has already ended this turn (see killSession).
+      if (s.dead) return;
       // Control-protocol traffic (the SDK channel) is handled here, not
       // forwarded as a transcript event.
       if (obj.type === "control_request" && obj.request) {
@@ -1101,6 +1105,12 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
 function killSession(id) {
   const s = sessions.get(id);
   if (!s) return;
+  // Stop forwarding this process's output the moment we decide to kill it. A
+  // claude wedged in a tool call can ignore SIGTERM and keep streaming until
+  // the SIGKILL escalation lands — forwarded to the panel, those stragglers
+  // would flip the just-interrupted turn back to "running" and the chat looks
+  // like it never stopped.
+  s.dead = true;
   // Any ask still waiting on the user is moot once the process dies — tell the
   // panel, or its dialog would hang for a process that can't hear the answer.
   for (const requestId of s.permPending.keys()) send({ type: "permissionCancel", id, requestId });

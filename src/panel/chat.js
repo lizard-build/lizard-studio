@@ -125,7 +125,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 16;
+  const EXPECTED_HOST_VERSION = 17;
 
   let els = {};
   let port = null;
@@ -329,6 +329,10 @@
       plugins: [],
       started: false,
       turnRunning: false,
+      // Set on `interrupted`: drop events from the killed process (they'd flip
+      // the turn back to "running") until the respawn announces itself with
+      // `system init`.
+      suppressEvents: false,
       // A model/mode/effort switch made while a turn was running — applied
       // (via restartSessionNow) once endTurn() sees the reply is done.
       restartPending: false,
@@ -2832,6 +2836,14 @@
   // ---- event handling (routed per chat) -------------------------------------
   function onClaudeEvent(chat, d) {
     if (!d || !d.type) return;
+    // Between an interrupt and the respawn's first reply, anything arriving
+    // here is the killed process draining — swallow it. The fresh process
+    // always opens with `system init` (emitted on its first prompt), which
+    // lifts the gate.
+    if (chat.suppressEvents) {
+      if (d.type === "system" && d.subtype === "init") chat.suppressEvents = false;
+      else return;
+    }
     switch (d.type) {
       case "system":
         if (d.subtype === "init") {
@@ -3200,8 +3212,13 @@
         // Stop hard-kills the process and resumes in a fresh one — end the
         // turn right away instead of waiting on a `result` that isn't coming.
         // The `started` event for the respawned process follows separately.
-        if (chat && chat.turnRunning) {
-          endTurn(chat, null);
+        if (chat) {
+          // The killed process can keep streaming for a beat (a host without
+          // the killSession guard forwards it all) — those events would
+          // resumeTurnIfIdle() the chat right back to "running". Drop them
+          // until the respawned process's `system init`.
+          chat.suppressEvents = true;
+          if (chat.turnRunning) endTurn(chat, null);
         }
         break;
       case "started":
