@@ -5657,10 +5657,9 @@
   }
 
   // ---- onboarding overlay ---------------------------------------------------
-  function showOnboarding(detail) {
+  function showOnboarding() {
     if (!mounted) return;
     els.onboarding.classList.remove("hidden");
-    if (detail) els.onboardingStatus.textContent = detail;
   }
   function hideOnboarding() {
     if (!mounted) return;
@@ -5701,7 +5700,6 @@
     els.slashGhost = root.querySelector("#slash-ghost");
     els.bashPill = root.querySelector("#bash-pill");
     els.onboarding = root.querySelector("#chat-onboarding");
-    els.onboardingStatus = root.querySelector("#chat-onboarding-status");
     els.copyInstall = root.querySelector("#chat-copy-install");
     els.attachFileBtn = root.querySelector("#attach-file-btn");
     els.fileInput = root.querySelector("#file-input");
@@ -6124,8 +6122,6 @@
           <code>curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash</code>
           <button id="chat-copy-install" class="cmd-copy-btn" title="Copy" aria-label="Copy install command" data-cmd="curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash"></button>
         </div>
-        <p class="hint">Run it in a terminal, then reload the extension. This panel connects automatically.</p>
-        <div class="status"><span class="dot"></span><span id="chat-onboarding-status">Waiting for the helper…</span></div>
       </div>
     </div>
   `;
