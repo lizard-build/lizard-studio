@@ -6014,8 +6014,8 @@
       <div class="host-outdated-body">
         <div id="host-outdated-text" class="host-outdated-text">Host is outdated — run this, then reload the extension:</div>
         <div class="host-outdated-cmd">
-          <code id="host-outdated-code">curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash</code>
-          <button id="host-outdated-copy" class="host-outdated-copy-btn" title="Copy install command" data-cmd="curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash"></button>
+          <code id="host-outdated-code">npx @lizard-build/lizard-studio-host@latest install</code>
+          <button id="host-outdated-copy" class="host-outdated-copy-btn" title="Copy install command" data-cmd="npx @lizard-build/lizard-studio-host@latest install"></button>
         </div>
       </div>
     </div>
@@ -6156,8 +6156,8 @@
         <h2>Connect Claude Code</h2>
         <p>Same Claude Code you run in the terminal, now in your sidebar. One command to link them:</p>
         <div class="cmd-row">
-          <code>curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash</code>
-          <button id="chat-copy-install" class="cmd-copy-btn" title="Copy" aria-label="Copy install command" data-cmd="curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash"></button>
+          <code>npx @lizard-build/lizard-studio-host@latest install</code>
+          <button id="chat-copy-install" class="cmd-copy-btn" title="Copy" aria-label="Copy install command" data-cmd="npx @lizard-build/lizard-studio-host@latest install"></button>
         </div>
       </div>
       <button class="onboarding-wait-btn" disabled aria-live="polite">
