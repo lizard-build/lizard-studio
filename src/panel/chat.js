@@ -5743,6 +5743,10 @@
     els.tasksDrawerBack.innerHTML = ICON("caret-left", 16);
     els.hostBannerCopy.innerHTML = ICON("copy", 13);
     wireCopyButton(els.hostBannerCopy, () => els.hostBannerCopy.dataset.cmd, 13);
+    if (els.copyInstall) {
+      els.copyInstall.innerHTML = ICON("copy", 14);
+      wireCopyButton(els.copyInstall, () => els.copyInstall.dataset.cmd, 14);
+    }
     els.send.innerHTML = ICON("send", 16);
     els.stop.innerHTML = ICON("stop", 14);
     els.attachFileBtn.innerHTML = ICON("plus", 15);
@@ -5945,16 +5949,6 @@
         cycleMode();
       }
     });
-    if (els.copyInstall) {
-      els.copyInstall.addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(els.copyInstall.dataset.cmd);
-          els.copyInstall.textContent = "Copied!";
-          setTimeout(() => (els.copyInstall.textContent = "Copy"), 1500);
-        } catch (_) {}
-      });
-    }
-
     mounted = true;
 
     // Restore tabs (or open a first one), then render.
@@ -6117,7 +6111,7 @@
         <p>The chat drives the real <code>claude</code> CLI through a tiny local helper. Install it once:</p>
         <div class="cmd-row">
           <code>curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash</code>
-          <button id="chat-copy-install" data-cmd="curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash">Copy</button>
+          <button id="chat-copy-install" class="cmd-copy-btn" title="Copy" aria-label="Copy install command" data-cmd="curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash"></button>
         </div>
         <p class="hint">Run it in a terminal, then reload the extension. This panel connects automatically.</p>
         <div class="status"><span class="dot"></span><span id="chat-onboarding-status">Waiting for the helper…</span></div>

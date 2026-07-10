@@ -2400,6 +2400,16 @@ code.inline {
   flex-shrink: 0;
   margin: 4px;
 }
+/* Icon-only copy button: square instead of the text pill's horizontal padding,
+   with the glyph centred. Emerald colour/hover inherit from .cmd-row button. */
+.cmd-row .cmd-copy-btn {
+  width: 32px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.cmd-row .cmd-copy-btn.copied { background: var(--control-primary); }
 .hint { font-size: 12px; line-height: 18px; font-weight: 500; color: var(--text-tertiary); margin: 16px 0 20px; }
 .status { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 500; color: var(--text-secondary); }
 .dot {
