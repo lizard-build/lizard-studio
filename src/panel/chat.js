@@ -6113,17 +6113,17 @@
       <div class="onboarding-steps" aria-hidden="true">
         <div class="ob-step done">
           <span id="ob-step-install" class="ob-step-dot"></span>
-          <span class="ob-step-label">Install</span>
+          <span class="ob-step-label">Install extension</span>
         </div>
         <span class="ob-step-line done"></span>
         <div class="ob-step current">
           <span class="ob-step-dot"></span>
-          <span class="ob-step-label">Connect</span>
+          <span class="ob-step-label">Install Claude Code</span>
         </div>
         <span class="ob-step-line"></span>
         <div class="ob-step">
           <span class="ob-step-dot"></span>
-          <span class="ob-step-label">Chat</span>
+          <span class="ob-step-label">Link up</span>
         </div>
       </div>
       <div class="onboarding-card">
