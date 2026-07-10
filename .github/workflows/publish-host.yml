@@ -1,0 +1,52 @@
+# Publishes @lizard-build/lizard-studio-host to npm when a v* tag is pushed.
+#
+# One-time setup:
+#   1. Create an npm automation token (npmjs.com -> Access Tokens -> Granular/
+#      Automation, with publish rights to the @lizard-build scope).
+#   2. Add it as a repo secret named NPM_TOKEN
+#      (Settings -> Secrets and variables -> Actions).
+#
+# Release flow:
+#   npm version patch        # bumps package.json + creates the vX.Y.Z tag
+#   git push --follow-tags   # pushing the tag triggers this workflow
+#
+# The job refuses to publish unless the tag matches package.json's version, so a
+# stray or mis-typed tag can't ship the wrong build.
+name: Publish host to npm
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # lets npm attach a provenance statement to the release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Verify tag matches package.json version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag v$TAG does not match package.json version $PKG"
+            exit 1
+          fi
+          echo "Publishing version $PKG"
+
+      - name: Sanity-check the installer parses
+        run: node --check src/host/install.mjs
+
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
