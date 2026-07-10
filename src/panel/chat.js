@@ -6141,6 +6141,10 @@
           <button id="chat-copy-install" class="cmd-copy-btn" title="Copy" aria-label="Copy install command" data-cmd="curl -fsSL https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host/install.sh | bash"></button>
         </div>
       </div>
+      <button class="onboarding-wait-btn" disabled aria-live="polite">
+        <span class="onboarding-wait-spinner"></span>
+        Waiting for install to finish…
+      </button>
     </div>
   `;
 

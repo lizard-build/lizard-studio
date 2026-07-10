@@ -2451,6 +2451,39 @@ code.inline {
 }
 .onboarding-logo.lizard { color: var(--control-primary); }
 .onboarding-arrow { display: flex; color: var(--text-tertiary); }
+
+/* Bottom-pinned "waiting" status as a disabled Secondary button (DESIGN.md):
+   --control-secondary bg, no border, opacity 0.5, --text-primary label. */
+.onboarding-wait-btn {
+  position: absolute;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 8px;
+  background: var(--control-secondary);
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  font-size: 14px;
+  font-weight: 600;
+  opacity: 0.5;
+  cursor: default;
+  white-space: nowrap;
+}
+.onboarding-wait-spinner {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(233, 237, 244, 0.25);
+  border-top-color: var(--text-primary);
+  animation: spin 0.7s linear infinite;
+}
 .onboarding-card h2 { font-size: 18px; font-weight: 600; margin: 0 0 10px; }
 .onboarding-card p { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin: 0 0 14px; }
 
