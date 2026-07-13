@@ -555,8 +555,8 @@ body {
   background-size: 180px 100%;
   animation: usage-skel-shimmer 1.3s ease-in-out infinite;
 }
-.usage-skel-resets { width: 132px; height: 12px; }
-.usage-skel-pct { width: 26px; height: 12px; }
+.usage-skel-resets { width: 150px; height: 12px; }
+.usage-skel-pct { width: 34px; height: 12px; }
 .usage-skel-bar { display: block; width: 100%; height: 100%; border-radius: 999px; }
 @keyframes usage-skel-shimmer {
   0% { background-position: -180px 0; }
@@ -585,9 +585,24 @@ body {
   flex: 0 0 auto;
   white-space: nowrap;
 }
-/* Resets note matches the context value exactly (same size/weight/color). */
-.usage-menu-row-resets { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+/* Resets note matches the context value exactly (same size/weight/color).
+   Fixed-width + right-aligned so the plan-usage rows keep identical geometry
+   whether they show the loading skeleton or the real reset string / %, and
+   across reset strings of different lengths — the menu width never shifts. */
+.usage-menu-row-resets {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  display: inline-block;
+  width: 150px;
+  text-align: right;
+}
 .usage-menu-row-val { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+.usage-menu-row-val.usage-pct {
+  display: inline-block;
+  width: 34px;
+  text-align: right;
+}
 
 .icon-btn {
   appearance: none;

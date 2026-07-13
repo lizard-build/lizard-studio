@@ -4570,13 +4570,18 @@
   // One popover row, laid out like the desktop app's usage panel: a header line
   // with the label on the left and a value cluster (optional "Resets …" note +
   // a bold figure) on the right, then a full-width fill bar underneath.
-  function usageMenuRow(label, pct, value, resets, strongVal) {
+  function usageMenuRow(label, pct, value, resets, strongVal, pctCol) {
     const r = el("div", "usage-menu-row");
     const head = el("div", "usage-menu-row-head");
     head.appendChild(el("span", "usage-menu-row-label", label));
     const meta = el("div", "usage-menu-row-meta");
     if (resets) meta.appendChild(el("span", "usage-menu-row-resets", "Resets " + resets));
-    meta.appendChild(el("span", "usage-menu-row-val" + (strongVal ? " strong" : ""), value));
+    // pctCol → fixed-width, right-aligned % cell (plan rows) so it lines up with
+    // the loading skeleton and stays put across 5% → 100%. Context-window rows
+    // pass a long free-text value instead, so they keep their natural width.
+    meta.appendChild(
+      el("span", "usage-menu-row-val" + (strongVal ? " strong" : "") + (pctCol ? " usage-pct" : ""), value)
+    );
     head.appendChild(meta);
     r.appendChild(head);
     const bar = el("div", "usage-bar");
@@ -4631,7 +4636,7 @@
     planSec.appendChild(el("div", "usage-menu-head", "Plan usage"));
     if (usageState.rows.length) {
       for (const row of usageState.rows) {
-        planSec.appendChild(usageMenuRow(normalizeUsageLabel(row.label), row.pct, row.pct + "%", row.resets));
+        planSec.appendChild(usageMenuRow(normalizeUsageLabel(row.label), row.pct, row.pct + "%", row.resets, false, true));
       }
     } else {
       // No data yet — skeletons that occupy the exact row geometry so nothing
