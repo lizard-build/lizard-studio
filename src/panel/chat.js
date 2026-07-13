@@ -5826,8 +5826,15 @@
   }
 
   // ---- empty-chat greeting ---------------------------------------------------
-  // Gemini-style hero for a blank chat: a time-of-day hello, personalized once
-  // the host reports the OS user's name. Purely decorative — no starter chips.
+  // Gemini-style hero for a blank chat: a time-of-day hello (personalized once
+  // the host reports the OS user's name) plus three fixed starter shortcuts.
+  // The shortcuts are static strings — deliberately no model-generated
+  // suggestions, so an idle empty chat never spends the user's quota.
+  const GREETING_SHORTCUTS = [
+    "Summarize this tab",
+    "Redesign this tab dark theme",
+    "Create a vite app and open on localhost",
+  ];
   function greetFirstName() {
     const n = (hostUser || "").trim();
     if (!n) return "";
@@ -6190,6 +6197,24 @@
     els.stack = root.querySelector("#chat-stack");
     els.greeting = root.querySelector("#chat-greeting");
     els.greetingHello = root.querySelector("#greeting-hello");
+    els.greetingChips = root.querySelector("#greeting-chips");
+    // Build the fixed shortcuts once — clicking one sends its label as the
+    // prompt (sendPrompt opens the folder picker first when none is set).
+    if (els.greetingChips) {
+      for (const text of GREETING_SHORTCUTS) {
+        const b = el("button", "greeting-chip", text);
+        b.type = "button";
+        b.addEventListener("click", () => {
+          const chat = chats.get(activeId);
+          if (!chat) return;
+          if (chat.bashMode) exitBashMode(chat); // a chip is a prompt, not a shell command
+          els.input.value = text;
+          autosize();
+          sendPrompt();
+        });
+        els.greetingChips.appendChild(b);
+      }
+    }
     els.input = root.querySelector("#composer-input");
     els.contextChips = root.querySelector("#context-chips");
     els.attachThumbs = root.querySelector("#attach-thumbs");
@@ -6578,11 +6603,13 @@
         </div>
         <div id="tasks-drawer-body" class="git-diff-drawer-body tasks-drawer-body"></div>
       </div>
-      <!-- Time-of-day greeting, shown while the active chat is empty (same
-           lifecycle as the setup chips below the composer). -->
+      <!-- Time-of-day greeting + fixed starter shortcuts, shown while the
+           active chat is empty (same lifecycle as the setup chips below the
+           composer). The chips are static labels — no generated content. -->
       <div id="chat-greeting" class="chat-greeting hidden">
         <div id="greeting-hello" class="greeting-hello">Hello</div>
         <div class="greeting-sub">Where should we start?</div>
+        <div id="greeting-chips" class="greeting-chips"></div>
       </div>
     </div>
     <div class="composer">

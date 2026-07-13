@@ -724,11 +724,12 @@ body {
 .chat-messages::-webkit-scrollbar { width: 8px; }
 .chat-messages::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 4px; }
 
-/* ---- empty-chat greeting (time-of-day hello) ----
+/* ---- empty-chat greeting (time-of-day hello + starter shortcuts) ----
    Overlays the (empty) active .chat-messages, below the drawers (z 5) and
-   the onboarding overlay. Purely decorative — pointer-events none so it can
-   never swallow a click. Re-shown via display, so the entrance animation
-   replays each time a fresh chat surfaces it. */
+   the onboarding overlay. The overlay itself is pointer-events none so it
+   never swallows a stray click; only the shortcut pills re-enable them.
+   Re-shown via display, so the entrance animation replays each time a
+   fresh chat surfaces it. */
 .chat-greeting {
   position: absolute;
   /* top 12% + centered = the hello lands slightly below the true middle:
@@ -770,6 +771,39 @@ body {
   letter-spacing: -0.02em;
   line-height: 1.25;
   color: var(--text-tertiary);
+}
+/* Fixed starter shortcuts: Gemini-style stacked pills, tinted with the
+   brand emerald instead of Gemini's blue. */
+.greeting-chips {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 22px;
+  max-width: 100%;
+  pointer-events: auto;
+}
+.greeting-chip {
+  max-width: 100%;
+  appearance: none;
+  border: none;
+  cursor: pointer;
+  background: rgba(16, 185, 129, 0.12);
+  color: #6ee7b7;
+  font-family: var(--font-family);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  padding: 9px 16px;
+  border-radius: 999px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+.greeting-chip:hover {
+  background: rgba(16, 185, 129, 0.2);
+  color: #d1fae5;
 }
 
 /* ---- history dropdown ---- */
