@@ -6,5 +6,7 @@ src/host/host.log
 src/host/shell-env.json
 # Generated at runtime by claude-host.mjs (quarantine-free spawn shim).
 src/host/spawn-shim.mjs
+# Per-run spawn-shim auth token (0600); written by claude-host.mjs.
+src/host/.spawn-token
 
 .DS_Store
