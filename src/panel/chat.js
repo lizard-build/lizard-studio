@@ -6715,8 +6715,8 @@
         <p>Almost there – install Claude Code to proceed. Paste this in your terminal:</p>
         <div id="ob-os-toggle" class="ob-os-toggle" role="tablist" aria-label="Operating system">
           <button class="ob-os-tab" data-os="sh" role="tab">macOS / Linux</button>
-          <button class="ob-os-tab" data-os="ps" role="tab">PowerShell</button>
-          <button class="ob-os-tab" data-os="cmd" role="tab">CMD</button>
+          <button class="ob-os-tab" data-os="ps" role="tab">Windows PowerShell</button>
+          <button class="ob-os-tab" data-os="cmd" role="tab">Windows CMD</button>
         </div>
         <div class="cmd-row">
           <code id="ob-claude-cmd"></code>

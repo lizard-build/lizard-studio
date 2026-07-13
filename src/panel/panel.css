@@ -2655,25 +2655,25 @@ code.inline {
 .ob-os-toggle {
   display: flex;
   align-items: center;
-  width: fit-content;
-  max-width: 100%;
-  margin: 0 auto 12px;
+  width: 100%;
+  margin: 0 0 12px;
   padding: 4px;
   background: var(--bg-secondary);
   border-radius: 12px;
 }
 .ob-os-tab {
+  flex: 1 1 auto;
   min-height: 32px;
-  min-width: 32px;
-  padding: 5.5px 10px;
+  min-width: 0;
+  padding: 5.5px 8px;
   border: none;
   border-radius: 10px;
   background: transparent;
   color: var(--text-secondary);
   font-family: var(--font-family);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  line-height: 20px;
+  line-height: 18px;
   white-space: nowrap;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
