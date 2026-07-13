@@ -2591,6 +2591,45 @@ code.inline {
 }
 .onboarding-card h2 { font-size: 18px; font-weight: 600; margin: 0 0 10px; }
 .onboarding-card p { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin: 0 0 14px; }
+.onboarding-card p code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
+}
+
+/* Shell picker on the Install-Claude card: a segmented row of pills that swaps
+   the command below (macOS/Linux · PowerShell · CMD). The detected OS is
+   pre-selected; the user can override (e.g. WSL on Windows). */
+.ob-os-toggle {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+.ob-os-tab {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 6px;
+  border-radius: 7px;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-family: var(--font-family);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.ob-os-tab:hover { background: var(--control-secondary-hover); }
+.ob-os-tab.active {
+  border-color: var(--control-primary);
+  color: var(--text-primary);
+  background: var(--control-secondary-hover);
+}
 
 /* ---- shared onboarding bits (used by chat + terminal) ---- */
 .cmd-row {

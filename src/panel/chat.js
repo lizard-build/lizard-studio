@@ -155,6 +155,10 @@
   // "host not installed" onboarding flash for that one disconnect instead of
   // showing it for the ~1s it takes to reconnect.
   let expectHostRestart = false;
+  // "Install Claude Code" onboarding step: when the host is linked but can't
+  // find the `claude` CLI, we poll by forcing a reconnect — a fresh host process
+  // re-runs resolveClaude and its `ready` tells us if `claude` showed up.
+  let recheckTimer = null;
 
   // Tab model: id -> chat. `order` is the visible tab order; `history` holds
   // closed conversations you can reopen.
@@ -3320,12 +3324,7 @@
         hostReady = true;
         home = msg.home || home;
         hostVersion = msg.version || 0;
-        hideOnboarding();
         refreshSettingsIfOpen();
-        if (!msg.ok) {
-          const a = chats.get(activeId);
-          if (a) systemNote(a, "Host is up but couldn't find the `claude` CLI. Install it: npm i -g @anthropic-ai/claude-code", "warn");
-        }
         // The extension updates via git/store, but the native host runs from a
         // copy in ~/.lizard-studio that install.sh seeds — so a stale host is
         // easy to end up with and otherwise fails silently (missing tools,
@@ -3343,6 +3342,17 @@
           post({ type: "selfUpdate" });
           hostUpdateTimer = setTimeout(() => setHostBanner("manual"), 8000);
         }
+        // Host is linked but the `claude` CLI isn't installed — surface the real
+        // "Install Claude Code" onboarding step (platform-aware) and keep polling.
+        // Installing it makes a freshly-spawned host resolve `claude`, and the
+        // next `ready` falls through to a normal session. Don't start a chat
+        // here: there's no `claude` to spawn.
+        if (!msg.ok) {
+          showOnboarding("claude");
+          break;
+        }
+        stopClaudeRecheck();
+        hideOnboarding();
         // Start whichever tab is in front; others start when first shown.
         {
           const a = chats.get(activeId);
@@ -5957,12 +5967,93 @@
   }
 
   // ---- onboarding overlay ---------------------------------------------------
-  function showOnboarding() {
+  // The `claude` install commands, one per shell. Detection picks a default; the
+  // toggle in the card lets the user switch (e.g. WSL vs native Windows).
+  const CLAUDE_INSTALL = {
+    sh: "curl -fsSL https://claude.ai/install.sh | bash",
+    ps: "irm https://claude.ai/install.ps1 | iex",
+    cmd: "curl -fsSL https://claude.ai/install.cmd -o install.cmd && install.cmd",
+  };
+  let claudeInstallOs = null; // "sh" | "ps" | "cmd" — lazily detected, then sticky
+  function detectClaudeOs() {
+    // The host's home path is the strongest signal once we're linked (C:\… vs /…);
+    // fall back to the browser's platform string.
+    const winHome = home && /^[A-Za-z]:[\\/]/.test(home);
+    const plat =
+      (navigator.userAgentData && navigator.userAgentData.platform) ||
+      navigator.platform ||
+      navigator.userAgent ||
+      "";
+    return winHome || /win/i.test(plat) ? "ps" : "sh";
+  }
+  function renderClaudeCmd() {
+    if (!claudeInstallOs) claudeInstallOs = detectClaudeOs();
+    const cmd = CLAUDE_INSTALL[claudeInstallOs] || CLAUDE_INSTALL.sh;
+    if (els.obClaudeCmd) els.obClaudeCmd.textContent = cmd;
+    if (els.obCopyClaude) els.obCopyClaude.dataset.cmd = cmd;
+    if (els.obOsToggle) {
+      for (const b of els.obOsToggle.querySelectorAll(".ob-os-tab"))
+        b.classList.toggle("active", b.dataset.os === claudeInstallOs);
+    }
+  }
+  // Poll for `claude` becoming available while the Install-Claude step is up. A
+  // running host resolves the binary once at startup, so we tear the port down
+  // and reconnect: the fresh host process re-runs resolveClaude and its `ready`
+  // decides stay-or-go. (Calling port.disconnect() doesn't fire our own
+  // onDisconnect, so we drive the reconnect ourselves.)
+  function startClaudeRecheck() {
+    if (recheckTimer) return;
+    recheckTimer = setInterval(() => {
+      if (!hostReady) return; // mid-reconnect; let the pending one land first
+      hostReady = false;
+      connected = false;
+      try {
+        if (port) port.disconnect();
+      } catch (_) {}
+      port = null;
+      connect();
+    }, 4000);
+  }
+  function stopClaudeRecheck() {
+    clearInterval(recheckTimer);
+    recheckTimer = null;
+  }
+  function setObNode(node, dot, state) {
+    if (!node) return;
+    node.classList.remove("done", "current");
+    if (state === "done") {
+      node.classList.add("done");
+      if (dot) dot.innerHTML = ICON("check", 14);
+    } else {
+      if (state === "current") node.classList.add("current");
+      if (dot) dot.innerHTML = ""; // current → CSS ::after dot; idle → empty ring
+    }
+  }
+  // stage: "link" (host not connected) or "claude" (linked, but `claude` missing).
+  function showOnboarding(stage = "link") {
     if (!mounted) return;
+    const link = stage !== "claude";
+    // Stepper: Install extension (always done) → Link up → Install Claude Code.
+    setObNode(els.obNodeLink, els.obDotLink, link ? "current" : "done");
+    setObNode(els.obNodeClaude, els.obDotClaude, link ? "idle" : "current");
+    if (els.obLine2) els.obLine2.classList.toggle("done", !link);
+    if (els.obCardLink) els.obCardLink.classList.toggle("hidden", !link);
+    if (els.obCardClaude) els.obCardClaude.classList.toggle("hidden", link);
+    if (els.obWaitLabel)
+      els.obWaitLabel.textContent = link
+        ? "Waiting for install to finish…"
+        : "Waiting for Claude Code…";
+    if (link) {
+      stopClaudeRecheck();
+    } else {
+      renderClaudeCmd();
+      startClaudeRecheck();
+    }
     els.onboarding.classList.remove("hidden");
   }
   function hideOnboarding() {
     if (!mounted) return;
+    stopClaudeRecheck();
     els.onboarding.classList.add("hidden");
   }
 
@@ -6003,6 +6094,17 @@
     els.bashPill = root.querySelector("#bash-pill");
     els.onboarding = root.querySelector("#chat-onboarding");
     els.copyInstall = root.querySelector("#chat-copy-install");
+    els.obNodeLink = root.querySelector("#ob-node-link");
+    els.obDotLink = root.querySelector("#ob-step-linkdot");
+    els.obNodeClaude = root.querySelector("#ob-node-claude");
+    els.obDotClaude = root.querySelector("#ob-step-claude");
+    els.obLine2 = root.querySelector("#ob-line-2");
+    els.obCardLink = root.querySelector("#ob-card-link");
+    els.obCardClaude = root.querySelector("#ob-card-claude");
+    els.obWaitLabel = root.querySelector("#ob-wait-label");
+    els.obOsToggle = root.querySelector("#ob-os-toggle");
+    els.obClaudeCmd = root.querySelector("#ob-claude-cmd");
+    els.obCopyClaude = root.querySelector("#chat-copy-claude");
     els.attachFileBtn = root.querySelector("#attach-file-btn");
     els.fileInput = root.querySelector("#file-input");
     els.hostBanner = root.querySelector("#host-outdated-banner");
@@ -6049,12 +6151,26 @@
     }
     const claudeLogo = root.querySelector("#onboarding-logo-claude");
     const lizardLogo = root.querySelector("#onboarding-logo-lizard");
+    const claudeLogo2 = root.querySelector("#onboarding-logo-claude2");
     if (claudeLogo) claudeLogo.innerHTML = window.RKClaudeHTML(28);
     if (lizardLogo) lizardLogo.innerHTML = window.RKLizardHTML(30);
+    if (claudeLogo2) claudeLogo2.innerHTML = window.RKClaudeHTML(28);
+    // "Install extension" is always done; the "Link up" / "Install Claude Code"
+    // dots are driven by showOnboarding() (check icon / current-dot / empty ring).
     const installStep = root.querySelector("#ob-step-install");
     if (installStep) installStep.innerHTML = ICON("check", 14);
-    const claudeStep = root.querySelector("#ob-step-claude");
-    if (claudeStep) claudeStep.innerHTML = ICON("check", 14);
+    if (els.obCopyClaude) {
+      els.obCopyClaude.innerHTML = ICON("copy", 14);
+      wireCopyButton(els.obCopyClaude, () => els.obCopyClaude.dataset.cmd, 14);
+    }
+    if (els.obOsToggle) {
+      els.obOsToggle.addEventListener("click", (e) => {
+        const b = e.target.closest(".ob-os-tab");
+        if (!b) return;
+        claudeInstallOs = b.dataset.os;
+        renderClaudeCmd();
+      });
+    }
     els.send.innerHTML = ICON("send", 16);
     els.stop.innerHTML = ICON("stop", 14);
     els.attachFileBtn.innerHTML = ICON("plus", 15);
@@ -6424,23 +6540,28 @@
     </div>
 
     <div id="chat-onboarding" class="chat-onboarding hidden">
+      <!-- Steps reflect what the panel can actually verify: the extension is
+           running, then the host links up, then it reports whether the claude
+           CLI is installed. showOnboarding() drives which one is current. -->
       <div class="onboarding-steps" aria-hidden="true">
         <div class="ob-step done">
           <span id="ob-step-install" class="ob-step-dot"></span>
           <span class="ob-step-label">Install extension</span>
         </div>
-        <span class="ob-step-line done"></span>
-        <div class="ob-step done">
+        <span id="ob-line-1" class="ob-step-line done"></span>
+        <div id="ob-node-link" class="ob-step current">
+          <span id="ob-step-linkdot" class="ob-step-dot"></span>
+          <span class="ob-step-label">Link up</span>
+        </div>
+        <span id="ob-line-2" class="ob-step-line"></span>
+        <div id="ob-node-claude" class="ob-step">
           <span id="ob-step-claude" class="ob-step-dot"></span>
           <span class="ob-step-label">Install Claude Code</span>
         </div>
-        <span class="ob-step-line done"></span>
-        <div class="ob-step current">
-          <span class="ob-step-dot"></span>
-          <span class="ob-step-label">Link up</span>
-        </div>
       </div>
-      <div class="onboarding-card">
+
+      <!-- Link-up card: host not connected yet. -->
+      <div id="ob-card-link" class="onboarding-card">
         <div class="onboarding-logos" aria-hidden="true">
           <span id="onboarding-logo-claude" class="onboarding-logo"></span>
           <span class="onboarding-arrow">
@@ -6455,9 +6576,28 @@
           <button id="chat-copy-install" class="cmd-copy-btn" title="Copy" aria-label="Copy install command" data-cmd="npx @lizard-build/lizard-studio-host@latest install"></button>
         </div>
       </div>
+
+      <!-- Install-Claude card: host linked, but the claude CLI is missing. -->
+      <div id="ob-card-claude" class="onboarding-card hidden">
+        <div class="onboarding-logos" aria-hidden="true">
+          <span id="onboarding-logo-claude2" class="onboarding-logo"></span>
+        </div>
+        <h2>Install Claude Code</h2>
+        <p>The <code>claude</code> command isn't installed yet. Run this in your terminal — it links up on its own once it's done:</p>
+        <div id="ob-os-toggle" class="ob-os-toggle" role="tablist" aria-label="Operating system">
+          <button class="ob-os-tab" data-os="sh" role="tab">macOS / Linux</button>
+          <button class="ob-os-tab" data-os="ps" role="tab">PowerShell</button>
+          <button class="ob-os-tab" data-os="cmd" role="tab">CMD</button>
+        </div>
+        <div class="cmd-row">
+          <code id="ob-claude-cmd"></code>
+          <button id="chat-copy-claude" class="cmd-copy-btn" title="Copy" aria-label="Copy install command"></button>
+        </div>
+      </div>
+
       <button class="onboarding-wait-btn" disabled aria-live="polite">
         <span class="onboarding-wait-spinner"></span>
-        Waiting for install to finish…
+        <span id="ob-wait-label">Waiting for install to finish…</span>
       </button>
     </div>
   `;
