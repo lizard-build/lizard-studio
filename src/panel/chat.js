@@ -134,7 +134,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 19;
+  const EXPECTED_HOST_VERSION = 18;
 
   let els = {};
   let port = null;
@@ -3513,21 +3513,6 @@
           }
         }
         break;
-      case "suggest":
-        // Haiku-generated greeting chips (host v19). Cache under the key the
-        // request carried — never the current one, which may have moved on.
-        if (msg.key) suggestInflight.delete(msg.key);
-        if (msg.ok && msg.key && Array.isArray(msg.suggestions) && msg.suggestions.length) {
-          suggestCache.set(msg.key, msg.suggestions);
-          if (suggestCache.size > 30) suggestCache.delete(suggestCache.keys().next().value);
-          // Still looking at the same context on the same (empty) chat — swap
-          // the heuristic chips for the generated ones.
-          if (chat && msg.id === activeId && msg.key === greetingCtxKey &&
-              els.greeting && !els.greeting.classList.contains("hidden")) {
-            renderGreetingChips(chat, msg.suggestions);
-          }
-        }
-        break;
       case "configRead":
         // Ignore replies for a (key, scope) we've since navigated away from.
         if (settingsOpen() && cfgEdit && cfgEdit.key === msg.key && cfgEdit.scope === msg.scope) {
@@ -5837,16 +5822,9 @@
     const name = greetFirstName();
     els.greetingHello.textContent = name ? `${word}, ${name}` : word;
     const token = ++greetingToken;
-    const [heuristic, ctx] = await Promise.all([buildGreetingSuggestions(chat), greetingContext(chat)]);
+    const chips = await buildGreetingSuggestions(chat);
     if (token !== greetingToken || els.greeting.classList.contains("hidden")) return;
-    // Heuristic chips render instantly; a cached haiku set for this exact
-    // context wins outright, an uncached one is requested and swapped in on
-    // arrival (see the `suggest` reply in onHostMessage).
-    const key = suggestKey(ctx);
-    greetingCtxKey = key;
-    const cached = suggestCache.get(key);
-    renderGreetingChips(chat, cached || heuristic);
-    if (!cached) scheduleSuggest(chat, ctx, key);
+    renderGreetingChips(chat, chips);
   }
 
   function renderGreetingChips(chat, chips) {
@@ -5865,60 +5843,6 @@
       });
       els.greetingChips.appendChild(b);
     }
-  }
-
-  // Context blob the host feeds to a one-off haiku call (host v19 `suggest`).
-  // Small on purpose: titles/URLs only, never page content.
-  async function greetingContext(chat) {
-    const ctx = {};
-    try {
-      const [tabs, tab] = await Promise.all([listTabs(), activeTab()]);
-      const skip = (u) => !u || /^chrome(-extension)?:\/\//i.test(u);
-      const act = tab && !skip(tab.url) ? tab : null;
-      if (act) ctx.tab = { title: (act.title || "").replace(/\s+/g, " ").trim().slice(0, 120), url: (act.url || "").slice(0, 200) };
-      const others = (tabs || [])
-        .filter((t) => t && !skip(t.url) && (!act || t.id !== act.id))
-        .map((t) => (t.title || "").replace(/\s+/g, " ").trim().slice(0, 60))
-        .filter(Boolean)
-        .slice(0, 6);
-      if (others.length) ctx.otherTabs = others;
-    } catch (_) {}
-    if (chat.cwd) {
-      ctx.folder = shortPath(chat.cwd);
-      if (chat.branch) ctx.branch = chat.branch;
-      if (Array.isArray(chat.diffFiles) && chat.diffFiles.length) {
-        ctx.diff =
-          `${chat.diffFiles.length} files, +${chat.diffInsertions}/-${chat.diffDeletions} — ` +
-          chat.diffFiles.slice(0, 6).map((f) => f.path).join(", ");
-      }
-    }
-    return ctx;
-  }
-
-  // Cache key deliberately ignores otherTabs — background-tab churn shouldn't
-  // burn a fresh haiku call when nothing the chips would name has changed.
-  function suggestKey(ctx) {
-    return [(ctx.tab && ctx.tab.url) || "", ctx.folder || "", ctx.branch || "", ctx.diff || ""].join("|");
-  }
-
-  // Generated chips, keyed by suggestKey(). Session-scoped; a repeat visit to
-  // the same context (same tab, same folder, same diff) costs nothing.
-  const suggestCache = new Map();
-  let greetingCtxKey = "";
-  let suggestTimer = null;
-  const suggestInflight = new Set(); // keys with a request already at the host
-  function scheduleSuggest(chat, ctx, key) {
-    if (!hostReady || hostVersion < 19) return; // old host doesn't know the op
-    if (!ctx.tab && !ctx.folder) return; // nothing to riff on — heuristics are fine
-    if (suggestInflight.has(key)) return;
-    // Debounce: rapid tab switches each produce a new key — only the one the
-    // user settles on gets sent.
-    clearTimeout(suggestTimer);
-    suggestTimer = setTimeout(() => {
-      if (key !== greetingCtxKey || els.greeting.classList.contains("hidden")) return;
-      if (chats.get(activeId) !== chat) return;
-      if (post({ type: "suggest", id: chat.id, key, context: ctx })) suggestInflight.add(key);
-    }, 800);
   }
 
   async function buildGreetingSuggestions(chat) {

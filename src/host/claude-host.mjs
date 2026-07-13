@@ -172,8 +172,7 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v18: `ready` carries `user` (OS user's name) for the panel's greeting;
 //      rewind counting skips bare /usage-family turns so it can't desync from
 //      the panel's turnIndex after any /usage has run.
-// v19: suggest — one-off haiku inference for the greeting's starter chips.
-const HOST_VERSION = 19;
+const HOST_VERSION = 18;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -1972,64 +1971,6 @@ function rewindSession(id, turnIndex, text, images) {
   }
 }
 
-// ---- greeting starter suggestions --------------------------------------------
-// One-off haiku inference through the user's own claude CLI, powering the
-// empty-chat greeting chips. Headless (-p, --max-turns 1, no MCP) so it's a
-// single cheap model call that never touches the panel's chat sessions; the
-// panel shows heuristic chips instantly and swaps these in when they land.
-// Runs in $HOME, not the project folder — no tool turns means no file access
-// is wanted, and the throwaway transcript shouldn't join the project's list.
-function suggestChips(id, msg) {
-  const ctx = msg.context || {};
-  const lines = [];
-  if (ctx.tab) lines.push(`Active browser tab: "${ctx.tab.title || ""}" — ${ctx.tab.url || ""}`);
-  if (Array.isArray(ctx.otherTabs) && ctx.otherTabs.length) lines.push("Other open tabs: " + ctx.otherTabs.join(" | "));
-  if (ctx.folder) lines.push(`Project folder: ${ctx.folder}${ctx.branch ? ` (git branch: ${ctx.branch})` : ""}`);
-  if (ctx.diff) lines.push(`Uncommitted changes: ${ctx.diff}`);
-  if (!lines.length) {
-    send({ type: "suggest", id, key: msg.key, ok: false, error: "no context" });
-    return;
-  }
-  const prompt =
-    "You write starter prompts for a chat panel connected to Claude Code (an AI coding agent) in the user's browser sidebar. " +
-    "Based on the context below, suggest exactly 3 prompts the user is plausibly about to ask. " +
-    "Each: imperative, specific (name the actual page/project/files), max 48 characters, no trailing period. " +
-    "At most one about the browser tab; prefer the project and its changes. " +
-    'Reply with ONLY a JSON array of 3 strings, e.g. ["…","…","…"].\n\n' +
-    lines.join("\n");
-  execFile(
-    CLAUDE,
-    ["-p", prompt, "--model", "haiku", "--max-turns", "1", "--strict-mcp-config", "--output-format", "json"],
-    // MAX_THINKING_TOKENS=0: without it haiku burns ~20s (and ~1.6k tokens)
-    // thinking about three chip labels; with thinking off it answers in ~5s.
-    { cwd: homedir(), env: { ...CHILD_ENV, MAX_THINKING_TOKENS: "0" }, timeout: 40000, maxBuffer: 4 * 1024 * 1024 },
-    (err, stdout) => {
-      if (err) {
-        log("suggest failed", err.message);
-        send({ type: "suggest", id, key: msg.key, ok: false, error: String(err.message || err).slice(0, 200) });
-        return;
-      }
-      let suggestions = null;
-      try {
-        const res = JSON.parse(String(stdout || ""));
-        const text = String(res.result || "").replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, "");
-        const arr = JSON.parse(text);
-        if (Array.isArray(arr)) {
-          suggestions = arr
-            .filter((s) => typeof s === "string" && s.trim())
-            .map((s) => s.trim().slice(0, 60))
-            .slice(0, 3);
-        }
-      } catch (_) {}
-      if (!suggestions || !suggestions.length) {
-        send({ type: "suggest", id, key: msg.key, ok: false, error: "unparseable reply" });
-        return;
-      }
-      send({ type: "suggest", id, key: msg.key, ok: true, suggestions });
-    }
-  );
-}
-
 // ---- message dispatch -------------------------------------------------------
 // ---- settings config files (CLAUDE.md / hooks / MCP) ------------------------
 // The Settings modal edits a few on-disk config files the browser sandbox can't
@@ -2192,9 +2133,6 @@ function handle(msg) {
       break;
     case "gitDiff":
       gitDiff(id, msg.cwd);
-      break;
-    case "suggest":
-      suggestChips(id, msg);
       break;
     case "browserResult":
       resolveBrowser(msg);
