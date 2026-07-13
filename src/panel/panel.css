@@ -722,6 +722,81 @@ body {
 .chat-messages::-webkit-scrollbar { width: 8px; }
 .chat-messages::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 4px; }
 
+/* ---- empty-chat greeting (time-of-day hello + starter chips) ----
+   Overlays the (empty) active .chat-messages: z-index 2 keeps its chips
+   clickable above the transparent messages layer, below the drawers (z 5)
+   and the onboarding overlay. Re-shown via display, so the entrance
+   animation replays each time a fresh chat surfaces it. */
+.chat-greeting {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 18px 20px 56px;
+  overflow: hidden;
+  animation: greeting-in 0.35s ease both;
+}
+@keyframes greeting-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.greeting-hello {
+  max-width: 100%;
+  font-size: 25px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  /* brand emerald melting into blue — the panel's take on Gemini's gradient */
+  background: linear-gradient(90deg, #34d399, #3b82f6 90%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.greeting-sub {
+  font-size: 25px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  color: var(--text-tertiary);
+}
+.greeting-chips {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 26px;
+  max-width: 100%;
+}
+.greeting-chip {
+  max-width: 100%;
+  appearance: none;
+  border: none;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+  font-family: var(--font-family);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  padding: 9px 14px;
+  border-radius: 999px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+.greeting-chip:hover {
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-primary);
+}
+
 /* ---- history dropdown ---- */
 .history-menu {
   position: absolute;

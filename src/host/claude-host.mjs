@@ -169,7 +169,10 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v13: bashExec / bashKill (composer "!" bash mode — local one-off shell runs).
 // v14: kill/probe reach a dev server orphaned after a panel reopen (by port).
 // v17: interrupt drops the killed process's trailing output (turn kept "running").
-const HOST_VERSION = 17;
+// v18: `ready` carries `user` (OS user's name) for the panel's greeting;
+//      rewind counting skips bare /usage-family turns so it can't desync from
+//      the panel's turnIndex after any /usage has run.
+const HOST_VERSION = 18;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -1884,6 +1887,24 @@ function loadTranscript(id, sessionId, cwd) {
 // finishes, so a second message sent by the panel right after would race
 // that gap. Writing the prompt ourselves, right after startClaude returns,
 // closes it.
+// A slash command is persisted to the transcript as an XML wrapper
+// (`<command-name>/usage</command-name>…`). Detect a bare usage-family command
+// the same way the panel does (its USAGE_CMD_RE), so rewind counting skips the
+// exact turns the panel never renders as editable bubbles. content may be a
+// string or an array of blocks.
+const CMD_NAME_RE = /<command-name>\s*([^<]*?)\s*<\/command-name>/;
+const USAGE_CMD_RE = /^\/(usage|usage-credits|extra-usage)\b/;
+function isUsageCommandTurn(content) {
+  const str =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content.filter((b) => b && b.type === "text" && b.text).map((b) => b.text).join("\n")
+        : "";
+  const m = CMD_NAME_RE.exec(str);
+  return !!(m && USAGE_CMD_RE.test(m[1].trim()));
+}
+
 function rewindSession(id, turnIndex, text, images) {
   const s = sessions.get(id);
   if (!s || !s.sessionId) return;
@@ -1916,6 +1937,13 @@ function rewindSession(id, turnIndex, text, images) {
               ? content.replace(SYNTH_RE, "").trim().length > 0
               : Array.isArray(content) && content.some((b) => b && b.type === "text" && b.text);
           if (!hasText) continue;
+          // A bare /usage-family command (typed, or the panel's silent probe) is
+          // a zero-turn side query: the panel renders it as a usage card, never
+          // an editable bubble, so it must not consume a turnIndex here either —
+          // otherwise the count runs ahead of the panel's and an edit-rewind cuts
+          // at the wrong line once any /usage has run. Mirrors the panel's
+          // USAGE_CMD_RE against the command's <command-name> wrapper.
+          if (isUsageCommandTurn(content)) continue;
           count++;
           if (count === turnIndex) {
             cut = i;
@@ -2172,5 +2200,17 @@ function shutdown(code) {
 process.on("SIGTERM", () => shutdown(0));
 process.on("SIGINT", () => shutdown(0));
 
+// The OS user's name, for the panel's empty-chat greeting. macOS knows the
+// account's full display name (`id -F`); everywhere else the username will do.
+function osUserName() {
+  try {
+    if (process.platform === "darwin") {
+      const full = execSync("id -F", { encoding: "utf8", timeout: 2000 }).trim();
+      if (full) return full;
+    }
+  } catch (_) {}
+  try { return userInfo().username || null; } catch (_) { return null; }
+}
+
 // Announce ourselves so the panel can leave its onboarding screen.
-send({ type: "ready", version: HOST_VERSION, home: homedir(), claudePath: CLAUDE, ok: existsSync(CLAUDE) || CLAUDE === "claude" });
+send({ type: "ready", version: HOST_VERSION, home: homedir(), claudePath: CLAUDE, user: osUserName(), ok: existsSync(CLAUDE) || CLAUDE === "claude" });

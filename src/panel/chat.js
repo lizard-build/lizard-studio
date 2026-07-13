@@ -134,7 +134,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 17;
+  const EXPECTED_HOST_VERSION = 18;
 
   let els = {};
   let port = null;
@@ -143,6 +143,9 @@
   let reconnectTimer = null;
   let mounted = false;
   let home = null;
+  // OS user's name, reported by the host in `ready` (v18+) — full name on macOS
+  // when available, else the account username. Personalizes the empty-chat greeting.
+  let hostUser = null;
   // Host protocol version last reported in `ready` (0 until the host connects).
   // Surfaced read-only in the Settings → Connection tab.
   let hostVersion = 0;
@@ -3323,8 +3326,10 @@
       case "ready":
         hostReady = true;
         home = msg.home || home;
+        hostUser = msg.user || hostUser;
         hostVersion = msg.version || 0;
         refreshSettingsIfOpen();
+        updateGreeting(); // the greeting may have rendered nameless before `ready`
         // The extension updates via git/store, but the native host runs from a
         // copy in ~/.lizard-studio that install.sh seeds — so a stale host is
         // easy to end up with and otherwise fails silently (missing tools,
@@ -3471,7 +3476,10 @@
           const paths = new Set(chat.diffFiles.map((f) => f.path));
           for (const p of chat.diffCollapsedFiles) if (!paths.has(p)) chat.diffCollapsedFiles.delete(p);
           if (!chat.diffFiles.length) chat.diffDrawerOpen = false;
-          if (chat.id === activeId) syncGitBar(chat);
+          if (chat.id === activeId) {
+            syncGitBar(chat);
+            updateGreeting(); // the "review my changes" chip keys off the diff
+          }
         }
         break;
       case "configRead":
@@ -3793,6 +3801,7 @@
     const run = { row, bodyEl, outEl, footEl, stopBtn, spin, command, ts, outText: "", running: true };
     chat.bashRuns.set(execId, run);
     append(chat, row);
+    if (chat.id === activeId) updateGreeting(); // bash card lands while `empty` is still true
     if (stopBtn) stopBtn.addEventListener("click", () => post({ type: "bashKill", id: chat.id, execId }));
     if (!post({ type: "bashExec", id: chat.id, execId, command, cwd: chat.cwd })) {
       finishBashRun(chat, execId, 1, null, "Host disconnected — command not run.");
@@ -4022,6 +4031,7 @@
     els.input.value = "";
     autosize();
     entry.el = renderQueuedBubble(chat, entry);
+    if (chat.id === activeId) updateGreeting(); // queued bubble lands while `empty` is still true
   }
 
   // opts.atFront: this entry was unshifted back to the head of the queue (the
@@ -4062,6 +4072,14 @@
   }
 
   async function deliverPrompt(chat, text) {
+    // Claim the turn synchronously, BEFORE the first await below
+    // (buildTabsContextBlock does a chrome.tabs.query round-trip). sendPrompt's
+    // `turnRunning` guard and dispatchNextQueued both funnel here; if the flag
+    // were only flipped after that await, a second Enter — or a queued dispatch
+    // — could slip past the guard during the gap and post a concurrent turn,
+    // clobbering this one's bookkeeping (turnStartedAt, streamedMsgIds) and
+    // reordering the conversation. The failed-post path below hands it back.
+    chat.turnRunning = true;
     // A real turn always wins over an in-flight silent usage probe: release its
     // event-swallowing gate now so this prompt's stream renders normally. The
     // CLI runs prompts in order, so the probe's own reply has already landed.
@@ -4121,10 +4139,16 @@
         renderContextChips();
         renderAttachmentThumbs();
       }
+      chat.turnRunning = false; // hand the turn back — nothing reached the host
       systemNote(chat, "Host disconnected — message queued until it reconnects.", "warn");
       return;
     }
-    userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments, { real: true });
+    // A /usage-family command is a zero-turn side query — its reply is a
+    // synthetic usage card, not a conversation turn. Render its bubble plain,
+    // never as an editable/rewind target: the host's rewind counter and the
+    // replay path both refuse to count /usage, so marking it `real` here would
+    // consume a turnIndex they don't, desyncing every later edit-rewind.
+    userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments, USAGE_CMD_RE.test(text) ? null : { real: true });
     if (!isCommand) {
       chat.contexts = []; // command turns don't consume context chips
       chat.bashPending = []; // the model has now seen these local runs
@@ -4135,7 +4159,6 @@
       renderAttachmentThumbs();
     }
     chat.empty = false;
-    chat.turnRunning = true;
     chat.turnStatusText = "";
     chat.compacting = false;
     // Reset the running-status metrics for this turn.
@@ -4571,8 +4594,8 @@
   // filesystem) — CLAUDE.md / Hooks / MCP / Plugins editors plus a read-only
   // Skills list — picked by an in-tab segmented control.
   const SETTINGS_TABS = [
-    { id: "connection", label: "Connection" },
     { id: "config", label: "Config" },
+    { id: "connection", label: "Connection" },
   ];
   // The files the Config tab can edit, in segmented-control order. `format`
   // picks the editor (raw text vs JSON); `label` is the segment caption;
@@ -5731,6 +5754,82 @@
     if (!els.setup) return;
     const chat = chats.get(activeId);
     els.setup.classList.toggle("hidden", !(chat && chat.empty));
+    updateGreeting();
+  }
+
+  // ---- empty-chat greeting ---------------------------------------------------
+  // Gemini-style hero for a blank chat: a time-of-day hello (personalized once
+  // the host reports the OS user's name) plus starter chips that adapt to what's
+  // actually in front of the user — the active browser tab, the picked folder's
+  // git state, and any uncommitted changes. Chips send their label as a prompt.
+  function greetFirstName() {
+    const n = (hostUser || "").trim();
+    if (!n) return "";
+    const first = n.split(/\s+/)[0];
+    return first.charAt(0).toUpperCase() + first.slice(1);
+  }
+
+  // Monotonic token so a slow activeTab() lookup from a superseded pass can't
+  // overwrite the chips a newer pass rendered.
+  let greetingToken = 0;
+  async function updateGreeting() {
+    if (!els.greeting) return;
+    const chat = chats.get(activeId);
+    // `empty` alone isn't enough: bash-mode runs and queued bubbles land in
+    // messagesEl while the chat is still technically empty — hide behind those.
+    const show = !!(chat && chat.empty && !chat.turnRunning && !chat.messagesEl.childElementCount);
+    els.greeting.classList.toggle("hidden", !show);
+    if (!show) return;
+    const h = new Date().getHours();
+    const word =
+      h >= 5 && h < 12 ? "Good morning" :
+      h >= 12 && h < 18 ? "Good afternoon" :
+      h >= 18 && h < 23 ? "Good evening" : "Up late";
+    const name = greetFirstName();
+    els.greetingHello.textContent = name ? `${word}, ${name}` : word;
+    const token = ++greetingToken;
+    const chips = await buildGreetingSuggestions(chat);
+    if (token !== greetingToken || els.greeting.classList.contains("hidden")) return;
+    els.greetingChips.replaceChildren();
+    for (const text of chips.slice(0, 3)) {
+      const b = el("button", "greeting-chip", text);
+      b.type = "button";
+      b.title = text;
+      b.addEventListener("click", () => {
+        // Stale chip on a switched-away tab — sendPrompt targets activeId.
+        if (chats.get(activeId) !== chat) return;
+        if (chat.bashMode) exitBashMode(chat); // a chip is a prompt, not a shell command
+        els.input.value = text;
+        autosize();
+        sendPrompt();
+      });
+      els.greetingChips.appendChild(b);
+    }
+  }
+
+  async function buildGreetingSuggestions(chat) {
+    const out = [];
+    // Active browser tab (skip chrome:// and the extension's own pages). The
+    // model already receives every open tab's title+URL as auto-context, so a
+    // title-quoting prompt is enough for it to know which page is meant.
+    try {
+      const tab = await activeTab();
+      const url = (tab && tab.url) || "";
+      if (url && !/^chrome(-extension)?:\/\//i.test(url)) {
+        const title = ((tab.title || "").replace(/\s+/g, " ").trim());
+        out.push(title ? `Summarize "${title.length > 34 ? title.slice(0, 33) + "…" : title}"` : "Summarize my current tab");
+      }
+    } catch (_) {}
+    if (chat.cwd) {
+      const name = folderLabel(chat.cwd);
+      if (Array.isArray(chat.diffFiles) && chat.diffFiles.length) out.push("Review my uncommitted changes");
+      else if (chat.isRepo) out.push(`What changed recently in ${name}?`);
+      out.push(`Explain how ${name} works`);
+    } else {
+      // No folder yet — sendPrompt() opens the picker first, keeping the text.
+      out.push("What can you help me with?");
+    }
+    return out;
   }
 
   // ---- git branch chip ------------------------------------------------------
@@ -6064,6 +6163,9 @@
     els.tabs = root.querySelector("#chat-tabs");
     els.setup = root.querySelector("#chat-setup");
     els.stack = root.querySelector("#chat-stack");
+    els.greeting = root.querySelector("#chat-greeting");
+    els.greetingHello = root.querySelector("#greeting-hello");
+    els.greetingChips = root.querySelector("#greeting-chips");
     els.input = root.querySelector("#composer-input");
     els.contextChips = root.querySelector("#context-chips");
     els.attachThumbs = root.querySelector("#attach-thumbs");
@@ -6381,6 +6483,20 @@
     });
     mounted = true;
 
+    // Keep the greeting chips honest while the panel idles on an empty chat:
+    // re-derive them when the user switches/loads browser tabs, and refresh
+    // the time-of-day line every few minutes (it can cross a boundary while
+    // the panel sits open). All no-ops once a conversation starts.
+    if (chrome.tabs && chrome.tabs.onActivated) {
+      chrome.tabs.onActivated.addListener(() => updateGreeting());
+      chrome.tabs.onUpdated.addListener((tabId, info) => {
+        if (info.title || info.url) updateGreeting();
+      });
+    }
+    setInterval(() => {
+      if (els.greeting && !els.greeting.classList.contains("hidden")) updateGreeting();
+    }, 5 * 60 * 1000);
+
     // Restore tabs (or open a first one), then render.
     loadPrefs(() => {
       if (!order.length) {
@@ -6446,6 +6562,14 @@
           <span id="tasks-drawer-close" class="git-drawer-caret"></span>
         </div>
         <div id="tasks-drawer-body" class="git-diff-drawer-body tasks-drawer-body"></div>
+      </div>
+      <!-- Time-of-day greeting + context-aware starter chips. Shown while the
+           active chat is empty (same lifecycle as the setup chips); the chips
+           adapt to the active browser tab and the picked folder's git state. -->
+      <div id="chat-greeting" class="chat-greeting hidden">
+        <div id="greeting-hello" class="greeting-hello">Hello</div>
+        <div class="greeting-sub">Where should we start?</div>
+        <div id="greeting-chips" class="greeting-chips"></div>
       </div>
     </div>
     <div class="composer">
