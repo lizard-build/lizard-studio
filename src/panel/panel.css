@@ -771,7 +771,7 @@ body {
   font-weight: 600;
   letter-spacing: -0.02em;
   line-height: 1.25;
-  color: var(--text-tertiary);
+  color: var(--text-primary);
 }
 /* Fixed starter shortcuts: Gemini-style stacked pills in the panel's
    neutral grey (same treatment as the folder/branch chips). */
