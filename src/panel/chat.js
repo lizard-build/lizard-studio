@@ -4473,6 +4473,24 @@
     return r;
   }
 
+  // Loading placeholder for one plan-usage row: same markup as usageMenuRow so
+  // the geometry is identical, with the resets note, %, and bar fill swapped for
+  // shimmering skeletons. The label stays real text (fixes the row height).
+  function usageSkeletonRow(label) {
+    const r = el("div", "usage-menu-row");
+    const head = el("div", "usage-menu-row-head");
+    head.appendChild(el("span", "usage-menu-row-label", label));
+    const meta = el("div", "usage-menu-row-meta");
+    meta.appendChild(el("span", "usage-skel usage-skel-resets"));
+    meta.appendChild(el("span", "usage-skel usage-skel-pct"));
+    head.appendChild(meta);
+    r.appendChild(head);
+    const bar = el("div", "usage-bar");
+    bar.appendChild(el("div", "usage-skel usage-skel-bar"));
+    r.appendChild(bar);
+    return r;
+  }
+
   function renderUsageMenu() {
     const menu = els.usageMenu;
     menu.innerHTML = "";
@@ -4502,7 +4520,12 @@
         planSec.appendChild(usageMenuRow(normalizeUsageLabel(row.label), row.pct, row.pct + "%", row.resets));
       }
     } else {
-      planSec.appendChild(el("div", "usage-menu-empty", usageState.fetching ? "Loading…" : "Not available yet"));
+      // No data yet — skeletons that occupy the exact row geometry so nothing
+      // shifts when values land. The label (real text) fixes the row height;
+      // only the reset note, %, and bar fill are masked.
+      for (const label of ["5-hour limit", "Weekly · all models"]) {
+        planSec.appendChild(usageSkeletonRow(label));
+      }
     }
     menu.appendChild(planSec);
   }
