@@ -732,18 +732,17 @@ body {
    fresh chat surfaces it. */
 .chat-greeting {
   position: absolute;
-  /* top 12% + centered = the hello lands slightly below the true middle:
-     low enough to lead the eye toward the composer, high enough not to
-     stick to it. */
-  inset: 12% 0 0;
+  inset: 0;
   z-index: 2;
   pointer-events: none;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  /* Bottom-anchored: with the shortcut pills the block is tall enough to
+     own the lower half, ending just above the composer's folder chip. */
+  justify-content: flex-end;
   align-items: flex-start;
   gap: 4px;
-  padding: 18px 20px 24px;
+  padding: 18px 20px 12px;
   overflow: hidden;
   animation: greeting-in 0.35s ease both;
 }
