@@ -731,16 +731,18 @@ body {
    replays each time a fresh chat surfaces it. */
 .chat-greeting {
   position: absolute;
-  inset: 0;
+  /* top 12% + centered = the hello lands slightly below the true middle:
+     low enough to lead the eye toward the composer, high enough not to
+     stick to it. */
+  inset: 12% 0 0;
   z-index: 2;
   pointer-events: none;
   display: flex;
   flex-direction: column;
-  /* Bottom-anchored: the hello sits just above the composer's folder chip. */
-  justify-content: flex-end;
+  justify-content: center;
   align-items: flex-start;
   gap: 4px;
-  padding: 18px 20px 10px;
+  padding: 18px 20px 24px;
   overflow: hidden;
   animation: greeting-in 0.35s ease both;
 }
