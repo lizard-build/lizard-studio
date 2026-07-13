@@ -38,7 +38,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: "https://registry.npmjs.org"
 
       - name: Sanity-check the installer parses
@@ -67,8 +67,10 @@ jobs:
           git tag "v$NEW"
           git push origin main --tags
 
-      - name: Upgrade npm
-        run: npm install -g npm@latest
+      - name: Upgrade npm for OIDC Trusted Publishing
+        # OIDC publishing needs npm >= 11.5. Pin to 11 rather than @latest so a
+        # future npm major can't demand a newer Node than we run here.
+        run: npm install -g npm@11
 
       - name: Publish
         run: npm publish --provenance --access public
