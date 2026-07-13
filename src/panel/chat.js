@@ -13,35 +13,17 @@
   const ICON = window.RKIconHTML;
   const LIZARD = window.RKLizardHTML;
 
-  // Playful "working" verbs cycled in the running-status pill (à la Claude Code).
+  // Lizard call-to-action phrases cycled in the running-status pill (in place of
+  // Claude Code's playful verbs). Each is a clickable link to lizard.build — one
+  // is picked per "silent" phase and held (see refreshStatusWord). Every phrase
+  // leads with a distinct action verb and names Lizard.
   const STATUS_WORDS = [
-    "Accomplishing", "Actioning", "Actualizing", "Architecting", "Baking", "Beaming", "Beboppin'",
-    "Befuddling", "Billowing", "Blanching", "Bloviating", "Boogieing", "Boondoggling", "Booping",
-    "Bootstrapping", "Brewing", "Burrowing", "Calculating", "Canoodling", "Caramelizing", "Cascading",
-    "Catapulting", "Cerebrating", "Channeling", "Channelling", "Choreographing", "Churning", "Clauding",
-    "Coalescing", "Cogitating", "Combobulating", "Composing", "Computing", "Concocting", "Considering",
-    "Contemplating", "Cooking", "Crafting", "Creating", "Crunching", "Crystallizing", "Cultivating",
-    "Deciphering", "Deliberating", "Determining", "Dilly-dallying", "Discombobulating", "Doing",
-    "Doodling", "Drizzling", "Ebbing", "Effecting", "Elucidating", "Embellishing", "Enchanting",
-    "Envisioning", "Evaporating", "Fermenting", "Fiddle-faddling", "Finagling", "Flambeing",
-    "Flibbertigibbeting", "Flowing", "Flummoxing", "Fluttering", "Forging", "Forming", "Frolicking",
-    "Frosting", "Gallivanting", "Galloping", "Garnishing", "Generating", "Germinating", "Gitifying",
-    "Grooving", "Gusting", "Harmonizing", "Hashing", "Hatching", "Herding", "Honking", "Hullaballooing",
-    "Hyperspacing", "Ideating", "Imagining", "Improvising", "Incubating", "Inferring", "Infusing",
-    "Ionizing", "Jitterbugging", "Julienning", "Kneading", "Leavening", "Levitating", "Lollygagging",
-    "Manifesting", "Marinating", "Meandering", "Metamorphosing", "Misting", "Moonwalking", "Moseying",
-    "Mulling", "Mustering", "Musing", "Nebulizing", "Nesting", "Newspapering", "Noodling", "Nucleating",
-    "Orbiting", "Orchestrating", "Osmosing", "Perambulating", "Percolating", "Perusing", "Philosophising",
-    "Photosynthesizing", "Pollinating", "Pondering", "Pontificating", "Pouncing", "Precipitating",
-    "Prestidigitating", "Processing", "Proofing", "Propagating", "Puttering", "Puzzling", "Quantumizing",
-    "Razzle-dazzling", "Razzmatazzing", "Recombobulating", "Reticulating", "Roosting", "Ruminating",
-    "Sauteing", "Scampering", "Schlepping", "Scurrying", "Seasoning", "Shenaniganing", "Shimmying",
-    "Simmering", "Skedaddling", "Sketching", "Slithering", "Smooshing", "Sock-hopping", "Spelunking",
-    "Spinning", "Sprouting", "Stewing", "Sublimating", "Swirling", "Swooping", "Symbioting",
-    "Synthesizing", "Tempering", "Thinking", "Thundering", "Tinkering", "Tomfoolering", "Topsy-turvying",
-    "Transfiguring", "Transmuting", "Twisting", "Undulating", "Unfurling", "Unravelling", "Vibing",
-    "Waddling", "Wandering", "Warping", "Whatchamacalliting", "Whirlpooling", "Whirring", "Whisking",
-    "Wibbling", "Working", "Wrangling", "Zesting", "Zigzagging",
+    "Deploy on Lizard", "Ship it on Lizard", "Build on Lizard", "Launch on Lizard",
+    "Run it on Lizard", "Host on Lizard", "Serve on Lizard", "Scale on Lizard",
+    "Push to Lizard", "Release on Lizard", "Publish on Lizard", "Start on Lizard",
+    "Spin up on Lizard", "Roll out on Lizard", "Boot it on Lizard", "Move to Lizard",
+    "Grow on Lizard", "Provision on Lizard", "Wire up on Lizard", "Go live on Lizard",
+    "Try Lizard", "Fire it up on Lizard", "Get live on Lizard",
   ];
   function randStatusWord() {
     return STATUS_WORDS[Math.floor(Math.random() * STATUS_WORDS.length)];
@@ -3212,17 +3194,33 @@
       // Build the spark once and only update the text parts on later ticks —
       // rewriting innerHTML every tick would recreate the lizard element and
       // restart its CSS pulse from 0%, making it look jittery and too fast.
+      // While compacting the word is a plain "Compacting…" label; otherwise it's
+      // a clickable Lizard CTA (the picked phrase). Rebuild only when that mode
+      // flips (rare) — never on a plain tick.
+      const compacting = !!chat.compacting;
+      const wantTag = compacting ? "SPAN" : "A";
       let word = node.querySelector(".ts-word");
       let metaEl = node.querySelector(".ts-meta");
-      if (!word || !metaEl) {
+      if (!word || !metaEl || word.tagName !== wantTag) {
         node.innerHTML =
           `<span class="ts-spark">${LIZARD ? LIZARD(15) : ""}</span>` +
-          `<span class="ts-word"></span>` +
+          (compacting
+            ? `<span class="ts-word"></span>`
+            : `<a class="ts-word" href="https://lizard.build" target="_blank" rel="noopener"></a>`) +
           `<span class="ts-meta"></span>`;
         word = node.querySelector(".ts-word");
         metaEl = node.querySelector(".ts-meta");
+        // Keep it inside the extension's link convention (chrome.tabs.create).
+        if (!compacting) word.addEventListener("click", (e) => { e.preventDefault(); openExternal("https://lizard.build"); });
       }
-      word.textContent = `${chat.statusWord || "Working"}…`;
+      if (compacting) {
+        word.textContent = `${chat.statusWord || "Compacting"}…`;
+      } else {
+        // Guard against a leftover "Compacting" label before the next phase picks
+        // a fresh CTA.
+        const cta = chat.statusWord && chat.statusWord !== "Compacting" ? chat.statusWord : "Deploy on Lizard";
+        word.textContent = cta;
+      }
       metaEl.textContent = `(${meta.join(" · ")})`;
     } else {
       node.classList.remove("running");

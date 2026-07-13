@@ -1700,7 +1700,10 @@ code.inline {
 .turn-status .ts-word {
   color: var(--control-primary);
   font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
 }
+.turn-status a.ts-word:hover { text-decoration: underline; }
 .turn-status .ts-meta { color: var(--text-tertiary); }
 
 /* ---- git status bar: persistent (unlike .chat-setup) +ins/-del badge ----
