@@ -771,8 +771,8 @@ body {
   line-height: 1.25;
   color: var(--text-tertiary);
 }
-/* Fixed starter shortcuts: Gemini-style stacked pills, tinted with the
-   brand emerald instead of Gemini's blue. */
+/* Fixed starter shortcuts: Gemini-style stacked pills in the panel's
+   neutral grey (same treatment as the folder/branch chips). */
 .greeting-chips {
   display: flex;
   flex-direction: column;
@@ -787,8 +787,8 @@ body {
   appearance: none;
   border: none;
   cursor: pointer;
-  background: rgba(16, 185, 129, 0.12);
-  color: #6ee7b7;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
   font-family: var(--font-family);
   font-size: 13px;
   font-weight: 500;
@@ -801,8 +801,8 @@ body {
   transition: background 0.15s, color 0.15s;
 }
 .greeting-chip:hover {
-  background: rgba(16, 185, 129, 0.2);
-  color: #d1fae5;
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text-primary);
 }
 
 /* ---- history dropdown ---- */
