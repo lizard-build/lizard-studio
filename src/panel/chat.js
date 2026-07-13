@@ -134,7 +134,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 20;
+  const EXPECTED_HOST_VERSION = 22;
 
   let els = {};
   let port = null;
@@ -2312,6 +2312,7 @@
         id: block.id, kind: "bg", shellId: null,
         label: (input.command || "").split("\n")[0].slice(0, 120) || "Background command",
         command: input.command || "", // full command — used to find the shell process to kill
+        outputFile: "", // task output file from the launch ack — the exact kill/liveness handle
         status: "running", startedAt: taskNow(), completedAt: 0, card,
         // Dev servers render as "Preview"; url comes from the command's port, a
         // known default, else the first localhost address its output prints.
@@ -2419,6 +2420,11 @@
       // arrives later via a poll, a kill, or the CLI's synthetic notice.
       const sid = parseShellId(text);
       if (sid) { bg.shellId = sid; chat.bgShell.set(sid, toolUseId); }
+      // The launch ack may name the task's output file — the most precise
+      // handle for killing / liveness-probing this exact shell later (the
+      // process tree holds it open, immune to command re-quoting).
+      const of = /Output is being written to:\s*(.+?\.output)\b/.exec(text || "");
+      if (of) bg.outputFile = of[1];
       if (applyPreviewUrl(bg, text)) syncTasks(chat);
       if (isError && finishTask(bg, "error")) syncTasks(chat);
       return;
@@ -2517,6 +2523,7 @@
     syncGitBar(chat, true);
     if (chat.tasksDrawerOpen) renderTasksDrawer(chat);
     ensurePortProbe(chat);
+    ensureLivenessProbe(chat);
   }
 
   // ---- permission asks (Claude Code-style) ----------------------------------
@@ -3582,6 +3589,9 @@
         break;
       case "shellPort":
         onShellPort(msg);
+        break;
+      case "shellsAlive":
+        onShellsAlive(msg);
         break;
       case "bashStart":
         break; // the card already shows a spinner; nothing more to do
@@ -5325,25 +5335,20 @@
   // this session's claude, so the host kills that shell's process subtree
   // directly (see killShell there) — surgical, no chat message.
   //
-  // But if the model is mid-turn it's likely watching this very process; killing
-  // it out from under the model makes it notice the "unexpected" death and try to
+  // If the model is mid-turn it's likely watching this very process; killing it
+  // out from under the model makes it notice the "unexpected" death and try to
   // restart / investigate it. So when a turn is running we also interrupt it —
-  // silently (no chat message), which stops the model AND tears down the shell.
-  // Idle sessions get the surgical kill only.
+  // silently (no chat message). The surgical kill is sent either way: the host
+  // finds the shell even after the interrupt orphans it (by output file,
+  // quote-normalized command, or port), so the process provably dies and the
+  // card flips on the host's shellKilled reply instead of on faith.
   function stopTask(chat, item) {
     if (item.stopping) return;
     if (item.kind === "agent") { interrupt(); return; }
     item.stopping = true;
     syncTasks(chat); // reflect "Stopping…" immediately
 
-    if (chat.turnRunning) {
-      // Interrupt kills + resumes the claude process, which tears down its child
-      // shells (this task included) and stops the model from reacting to the kill.
-      interrupt();
-      clearTimeout(item._stopTimer);
-      item._stopTimer = setTimeout(() => { finishTask(item, "done"); syncTasks(chat); }, 400);
-      return;
-    }
+    if (chat.turnRunning) interrupt();
 
     const port = item.url && /:(\d+)\b/.exec(item.url);
     const ok = post({
@@ -5352,6 +5357,7 @@
       taskId: item.id,
       shellId: item.shellId || null,
       command: item.command || "", // empty for preview MCP tasks → host matches by port only
+      outputFile: item.outputFile || null,
       port: port ? port[1] : null,
     });
     if (!ok) { item.stopping = false; syncTasks(chat); return; } // host unreachable
@@ -5368,14 +5374,18 @@
   }
 
   // Host reply to killShell: the shell's process tree was (or wasn't) killed.
+  // "shell not found" from a host with quote-proof matching (v22+) means the
+  // process is genuinely gone already — finish the card instead of leaving it
+  // "Running" forever. Older hosts miss quoted commands, so for them not-found
+  // stays retryable.
   function onShellKilled(msg) {
     const chat = msg.id && chats.get(msg.id);
     if (!chat) return;
     const item = (msg.taskId && chat.bgTasks.get(msg.taskId)) || (msg.taskId && chat.previews.get(msg.taskId));
     if (!item) return;
     clearTimeout(item._stopTimer);
-    if (msg.ok) finishTask(item, "done");
-    else item.stopping = false; // couldn't find it — let the user try again
+    if (msg.ok || (hostVersion >= 22 && /not found/i.test(msg.error || ""))) finishTask(item, "done");
+    else item.stopping = false; // transient failure — let the user try again
     syncTasks(chat);
   }
 
@@ -5406,6 +5416,49 @@
     if (!chat || !msg.port) return;
     const item = chat.bgTasks.get(msg.taskId);
     if (item && !item.url) { item.url = "localhost:" + msg.port; item.isServer = true; syncTasks(chat); }
+  }
+
+  // While background tasks show as running, poll the host for their ground-truth
+  // liveness. Completion normally arrives via tool results or the CLI's
+  // synthetic notifications, but a shell can also die with nobody watching —
+  // orphaned by an interrupt, finished on its own, killed from a terminal —
+  // and without this its card would show "Running" forever. Needs a host with
+  // quote-proof matching (v22+); requires two consecutive "not found" strikes
+  // before flipping a card, so one blurry ps snapshot (mid-spawn, mid-respawn)
+  // can't end a live task.
+  let livenessTimer = null;
+  function needsLivenessProbe(chat) {
+    return !!chat && hostVersion >= 22 && [...chat.bgTasks.values()].some((t) => t.status === "running");
+  }
+  function ensureLivenessProbe(chat) {
+    if (livenessTimer || chat.id !== activeId || !needsLivenessProbe(chat)) return;
+    livenessTimer = setInterval(livenessTick, 5000);
+  }
+  function livenessTick() {
+    const chat = chats.get(activeId);
+    if (!needsLivenessProbe(chat)) { clearInterval(livenessTimer); livenessTimer = null; return; }
+    const now = Date.now();
+    const tasks = [];
+    for (const t of chat.bgTasks.values()) {
+      // Skip just-launched tasks — the shell may not be in the process table yet.
+      if (t.status !== "running" || now - t.startedAt < 10000) continue;
+      const port = t.url && /:(\d+)\b/.exec(t.url);
+      tasks.push({ taskId: t.id, command: t.command || "", outputFile: t.outputFile || null, port: port ? port[1] : null });
+    }
+    if (tasks.length) post({ type: "probeShells", id: chat.id, tasks });
+  }
+  function onShellsAlive(msg) {
+    const chat = msg.id && chats.get(msg.id);
+    if (!chat || !msg.alive) return;
+    let changed = false;
+    for (const [taskId, isAlive] of Object.entries(msg.alive)) {
+      const t = chat.bgTasks.get(taskId);
+      if (!t || t.status !== "running") continue;
+      if (isAlive) { t._deadStrikes = 0; continue; }
+      t._deadStrikes = (t._deadStrikes || 0) + 1;
+      if (t._deadStrikes >= 2 && finishTask(t, "done")) changed = true;
+    }
+    if (changed) syncTasks(chat);
   }
 
   // Drop every finished task (running ones stay), forgetting their shell/server
@@ -5513,6 +5566,10 @@
       d.classList.add("opening");
     }
     startTasksTicker();
+    // The drawer is where stale "Running" cards would be stared at — make sure
+    // the ground-truth liveness poll is armed even if no task event fired since
+    // the panel (re)connected.
+    ensureLivenessProbe(chat);
   }
   let tasksCloseFallback = 0;
   function closeTasksDrawer() {

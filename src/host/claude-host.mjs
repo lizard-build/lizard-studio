@@ -19,10 +19,12 @@
 //   { type:"start",   id, cwd, model?, effort?, permissionMode?, resume? }  spawn (or respawn) claude
 //   { type:"prompt",  id, text, images? }                          send one user turn (images: [{mediaType,data}])
 //   { type:"interrupt", id }                                       hard-stop: kill + resume the session
-//   { type:"killShell", id, taskId, shellId?, command?, port? }    kill just one background shell / dev
-//                                                                 server's process subtree (→ shellKilled)
+//   { type:"killShell", id, taskId, shellId?, command?,            kill just one background shell / dev
+//     outputFile?, port? }                                         server's process subtree (→ shellKilled)
 //   { type:"probeShellPort", id, taskId, command }                 ask what TCP port a dev server listens
 //                                                                 on (→ shellPort)
+//   { type:"probeShells", id, tasks:[{taskId, command?,            are these background shells still alive?
+//     outputFile?, port?}] }                                       (→ shellsAlive)
 //   { type:"bashExec", id, execId, command, cwd }                  run a one-off shell command (composer
 //                                                                 "!" bash mode) → bashStart/bashOut/bashExit
 //   { type:"bashKill", id, execId }                                stop a running bash-mode command
@@ -59,6 +61,7 @@
 //   { type:"interrupted", id }                                 the turn was hard-stopped; a respawn follows
 //   { type:"shellKilled", id, taskId, shellId, ok, error }     reply to killShell
 //   { type:"shellPort", id, taskId, port }                     reply to probeShellPort (null if unknown)
+//   { type:"shellsAlive", id, alive }                          reply to probeShells: { taskId: bool }
 //   { type:"bashStart", id, execId, pid }                      a bash-mode command started
 //   { type:"bashOut", id, execId, stream, chunk }              stdout/stderr chunk from a bash-mode command
 //   { type:"bashExit", id, execId, code, signal?, error? }     a bash-mode command finished
@@ -189,7 +192,15 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v21: Windows `spawn EINVAL` fix — the npm claude.cmd shim can't be spawned
 //      directly on modern Node (CVE-2024-27980), so we resolve its cli.js and
 //      run it with node instead. macOS/Linux and the .exe installer unchanged.
-const HOST_VERSION = 21;
+// v22: reliable background-task stop/tracking. killShell/probeShellPort match
+//      shells quote-insensitively (claude's zsh wrapper re-escapes quotes, so
+//      the old raw substring match missed any command containing one), accept
+//      the panel's outputFile handle for exact lsof-based resolution, find
+//      shells orphaned by an interrupt (snapshot-marker whole-table fallback;
+//      works with no live claude), and never signal a subtree that reaches a
+//      protected pid. New probeShells op reports which shells are still alive
+//      so the panel's drawer converges to ground truth.
+const HOST_VERSION = 22;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -1289,9 +1300,22 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
   });
 }
 
+// Claude pids we killed moments ago. A killShell racing an interrupt can see
+// the old claude already dropped from `sessions` but still in the process
+// table — without this, shellRoot would walk "through" the dying claude up to
+// its spawn shim and take every other background shell of the session along.
+// Kept protected for 30s, comfortably past the SIGKILL escalation.
+const recentClaudePids = new Set();
+
 function killSession(id) {
   const s = sessions.get(id);
   if (!s) return;
+  if (s.child && s.child.pid) {
+    const pid = s.child.pid;
+    recentClaudePids.add(pid);
+    const forget = setTimeout(() => recentClaudePids.delete(pid), 30000);
+    forget.unref?.();
+  }
   // Stop forwarding this process's output the moment we decide to kill it. A
   // claude wedged in a tool call can ignore SIGTERM and keep streaming until
   // the SIGKILL escalation lands — forwarded to the panel, those stragglers
@@ -1331,16 +1355,15 @@ function killAll() {
 }
 
 // Enumerate the WHOLE process table and hand back helpers to navigate it.
-// Background commands (dev servers) normally run under this session's claude, but
-// after a panel close the host+claude die and those shells get orphaned onto
-// launchd — so we keep the full tree, not just claude's descendants, and a
-// `shellRoot` that stops at a protected boundary (claude / this host / init) so
-// we can find an orphan's own root without ever walking into something we must
-// not signal.
+// Background commands (dev servers) normally run under this session's claude,
+// but an interrupt (kill + resume) or a panel close orphans those shells onto
+// launchd — so we keep the full tree, not just claude's descendants, work even
+// when the session has no live claude at all, and expose a `shellRoot` that
+// stops at a protected boundary (claude / this host / init) so we can find an
+// orphan's own root without ever walking into something we must not signal.
 function enumClaudeTree(id, cb) {
   const s = sessions.get(id);
-  const rootPid = s && s.child && s.child.pid;
-  if (!rootPid) return cb(new Error("no session"));
+  const rootPid = (s && s.child && s.child.pid) || null;
   // COLUMNS wide so ps doesn't clip the command column to the terminal width
   // (which would break the command match below).
   execFile("ps", ["-Ao", "pid=,ppid=,command="], { maxBuffer: 8 * 1024 * 1024, env: { ...process.env, COLUMNS: "100000" } }, (err, out) => {
@@ -1362,10 +1385,19 @@ function enumClaudeTree(id, cb) {
       }
       return acc;
     };
-    const descSet = new Set(subtree(rootPid)); // processes under THIS claude
-    // Never signal these: init, this host, and any live claude session.
+    const descSet = new Set(rootPid ? subtree(rootPid) : []); // processes under THIS claude
+    // Never signal these: init, this host, any live claude session, and any
+    // claude killed in the last moments (see recentClaudePids).
     const protectedPids = new Set([1, process.pid]);
     for (const sess of sessions.values()) if (sess.child && sess.child.pid) protectedPids.add(sess.child.pid);
+    for (const pid of recentClaudePids) protectedPids.add(pid);
+    // Processes living under OTHER live claude sessions — a whole-table command
+    // match must never resolve into a different tab's shells.
+    const otherClaudeDesc = new Set();
+    for (const sess of sessions.values()) {
+      const p = sess.child && sess.child.pid;
+      if (p && p !== rootPid) for (const c of subtree(p)) otherClaudeDesc.add(c);
+    }
     // Highest ancestor of `pid` that isn't protected — the shell's own root,
     // whether it's still under claude or orphaned to launchd.
     const shellRoot = (pid) => {
@@ -1377,39 +1409,95 @@ function enumClaudeTree(id, cb) {
       }
       return cur;
     };
-    cb(null, { rootPid, cmdOf, parentOf, kids, subtree, descSet, protectedPids, shellRoot });
+    cb(null, { rootPid, cmdOf, parentOf, kids, subtree, descSet, protectedPids, otherClaudeDesc, shellRoot });
   });
 }
 
-// Resolve a shell (by command, or the port it listens on) to the FULL set of PIDs
-// in its subtree — the whole `bash → npm → node → vite` tree — never including a
-// protected pid.
+// Quote-insensitive fingerprint of a shell command. Claude runs Bash tool
+// commands through a zsh wrapper (`zsh -c source <snapshot> && eval '<cmd>' …`)
+// that re-escapes embedded quotes (' becomes '"'"'), and `ps` prints embedded
+// newlines/control chars as \012-style octal escapes — so a raw substring
+// match against the process table misses any command containing either.
+// Mapping octal escapes to spaces and stripping quote/escape characters from
+// BOTH sides before comparing makes the match immune to that re-encoding.
+function cmdFingerprint(s) {
+  return String(s || "")
+    .replace(/\\0[0-7]{2}/g, " ") // ps renders embedded \n, \t, … as \012 etc.
+    .replace(/["'\\]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Every shell claude spawns sources its snapshot file, and that path survives
+// in the orphan's argv after claude itself is gone — the only safe anchor for
+// a whole-table search.
+const CLAUDE_SHELL_MARKER = /\.claude[\/\\]shell-snapshots[\/\\]/;
+
+// Resolve a shell (by the task output file it writes, its command, or the port
+// it listens on) to the FULL set of PIDs in its subtree — the whole
+// `zsh → npm → node → vite` tree — never including a protected pid.
 function resolveShellPids(tree, opts, cb) {
-  const { cmdOf, subtree, descSet, protectedPids, shellRoot } = tree;
+  const { cmdOf, subtree, descSet, protectedPids, otherClaudeDesc, shellRoot } = tree;
+  // Roots first (via shellRoot), then their whole subtrees. Skip any tree that
+  // reaches a protected pid — that would mean the walk went above a claude /
+  // host boundary, and signalling it would take innocent siblings along.
   const collect = (targetPids) => {
-    const roots = new Set(targetPids.map(shellRoot).filter((p) => p && !protectedPids.has(p)));
+    const roots = new Set(
+      targetPids.filter((p) => p && !protectedPids.has(p)).map(shellRoot).filter((p) => p && !protectedPids.has(p))
+    );
     const all = new Set();
-    for (const r of roots) { all.add(r); for (const c of subtree(r)) all.add(c); }
-    return [...all].filter((p) => !protectedPids.has(p));
+    for (const r of roots) {
+      const fam = [r, ...subtree(r)];
+      if (fam.some((p) => protectedPids.has(p))) continue;
+      for (const p of fam) all.add(p);
+    }
+    return [...all];
   };
-  // 1) Match by command among THIS claude's descendants (the in-session case —
-  //    scoped tight so a stray match elsewhere can't be killed).
-  const cmd = String(opts.command || "").replace(/\s+/g, " ").trim();
-  if (cmd) {
-    const needle = cmd.slice(0, 48);
-    const hits = [...descSet].filter((pid) => (cmdOf.get(pid) || "").replace(/\s+/g, " ").includes(needle));
-    if (hits.length) return cb(collect(hits));
-  }
-  // 2) Kill whatever listens on the port — precise, and works even for a process
-  //    orphaned after a panel reopen (no longer under this claude).
-  if (opts.port) {
+  const byCommand = () => {
+    const needle = cmdFingerprint(opts.command).slice(0, 48);
+    if (needle) {
+      // In-session: match among THIS claude's descendants (scoped tight so a
+      // stray match elsewhere can't be killed).
+      let hits = [...descSet].filter((pid) => cmdFingerprint(cmdOf.get(pid)).includes(needle));
+      // Orphaned (claude was interrupted / the panel reopened): the shell is no
+      // longer under any claude — search the whole table, but only true orphans
+      // (not under this or any other live session's claude) carrying claude's
+      // snapshot marker, so an unrelated lookalike can't be hit.
+      if (!hits.length) {
+        hits = [...cmdOf.keys()].filter(
+          (pid) =>
+            !descSet.has(pid) &&
+            !otherClaudeDesc.has(pid) &&
+            CLAUDE_SHELL_MARKER.test(cmdOf.get(pid) || "") &&
+            cmdFingerprint(cmdOf.get(pid)).includes(needle)
+        );
+      }
+      if (hits.length) return cb(collect(hits));
+    }
+    byPort();
+  };
+  // Whatever listens on the port — precise, and works even for a process
+  // orphaned after a panel reopen (no longer under this claude).
+  const byPort = () => {
+    if (!opts.port) return cb([]);
     execFile("lsof", ["-nP", "-iTCP:" + opts.port, "-sTCP:LISTEN", "-t"], (e2, lout) => {
       const pids = e2 || !lout ? [] : lout.split(/\s+/).map(Number).filter(Boolean);
       cb(collect(pids));
     });
+  };
+  // The task's output file is the one handle that survives any re-quoting and
+  // re-parenting: the shell (and everything that inherited its stdout) keeps
+  // it open, so lsof resolves it to exactly the right processes.
+  if (opts.outputFile) {
+    execFile("lsof", ["-t", "--", String(opts.outputFile)], (e, lout) => {
+      const pids = e || !lout ? [] : lout.split(/\s+/).map(Number).filter(Boolean);
+      const found = collect(pids);
+      if (found.length) return cb(found);
+      byCommand();
+    });
     return;
   }
-  cb([]);
+  byCommand();
 }
 
 // Kill just ONE background shell / dev server, surgically — the clean equivalent
@@ -1438,12 +1526,12 @@ function killShell(id, opts) {
 function probeShellPort(id, opts) {
   opts = opts || {};
   const reply = (port) => send({ type: "shellPort", id, taskId: opts.taskId || null, port: port || null });
-  const needle = String(opts.command || "").replace(/\s+/g, " ").trim().slice(0, 48);
+  const needle = cmdFingerprint(opts.command).slice(0, 48);
   if (!needle) return reply(null);
   enumClaudeTree(id, (err, tree) => {
     if (err) return reply(null);
     const { cmdOf, subtree, descSet } = tree;
-    const matchIn = (pids) => pids.filter((pid) => (cmdOf.get(pid) || "").replace(/\s+/g, " ").includes(needle));
+    const matchIn = (pids) => pids.filter((pid) => cmdFingerprint(cmdOf.get(pid)).includes(needle));
     // Prefer the in-session process; fall back to a match anywhere (a server
     // orphaned to launchd after the panel was reopened). Read-only, so a wider
     // search is safe.
@@ -1459,6 +1547,27 @@ function probeShellPort(id, opts) {
       ports.sort((a, b) => a - b);
       reply(ports[0] || null);
     });
+  });
+}
+
+// Are these background shells still alive? Read-only twin of killShell's
+// resolution — the panel polls while tasks show as "Running", so a shell that
+// dies without a CLI notification (orphaned by an interrupt, finished on its
+// own, killed externally) doesn't stay running in the drawer forever.
+function probeShells(id, msg) {
+  const tasks = (Array.isArray(msg && msg.tasks) ? msg.tasks : []).filter((t) => t && t.taskId).slice(0, 32);
+  const reply = (alive) => send({ type: "shellsAlive", id, alive });
+  if (!tasks.length) return reply({});
+  enumClaudeTree(id, (err, tree) => {
+    if (err) return reply({}); // can't tell — report nothing, never "all dead"
+    const alive = {};
+    let pending = tasks.length;
+    for (const t of tasks) {
+      resolveShellPids(tree, t, (pids) => {
+        alive[t.taskId] = pids.length > 0;
+        if (--pending === 0) reply(alive);
+      });
+    }
   });
 }
 
@@ -2293,6 +2402,9 @@ function handle(msg) {
       break;
     case "probeShellPort":
       probeShellPort(id, msg);
+      break;
+    case "probeShells":
+      probeShells(id, msg);
       break;
     case "bashExec":
       bashExec(id, msg);
