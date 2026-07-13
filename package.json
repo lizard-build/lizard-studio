@@ -1,6 +1,6 @@
 {
   "name": "@lizard-build/lizard-studio-host",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "description": "Native-messaging host installer that lets the Lizard Studio browser extension drive the local Claude Code CLI.",
   "type": "module",
   "bin": {
