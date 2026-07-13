@@ -742,7 +742,9 @@ body {
   justify-content: flex-end;
   align-items: flex-start;
   gap: 4px;
-  padding: 18px 20px 12px;
+  /* 14px sides = the composer's 12px padding + the setup row's 2px, so the
+     hello and pills share a left edge with the folder chip below. */
+  padding: 18px 14px 12px;
   overflow: hidden;
   animation: greeting-in 0.35s ease both;
 }
