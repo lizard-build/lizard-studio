@@ -2511,7 +2511,9 @@ code.inline {
   padding: 28px 22px;
   z-index: 5;
 }
-.onboarding-card { max-width: 340px; text-align: center; }
+/* Full width so block children (OS toggle, cmd-row) line up edge-to-edge with
+   the bottom wait button — both are inset by the onboarding's 22px padding. */
+.onboarding-card { width: 100%; text-align: center; }
 
 /* 3-step onboarding stepper: Install (done) -> Connect (current) -> Chat.
    Circles top-align so the connector lines sit at their vertical centre while
