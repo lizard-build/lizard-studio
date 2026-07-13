@@ -22,6 +22,7 @@ on:
     paths:
       - "src/host/**"
       - "package.json"
+  workflow_dispatch: {} # manual "release now" button (Actions tab / gh workflow run)
 
 jobs:
   publish:
