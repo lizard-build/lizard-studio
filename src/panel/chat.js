@@ -134,7 +134,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 18;
+  const EXPECTED_HOST_VERSION = 19;
 
   let els = {};
   let port = null;
@@ -349,6 +349,7 @@
       // the turn back to "running") until the respawn announces itself with
       // `system init`.
       suppressEvents: false,
+      suppressTimer: null,
       // A model/mode/effort switch made while a turn was running — applied
       // (via restartSessionNow) once endTurn() sees the reply is done.
       restartPending: false,
@@ -2432,11 +2433,21 @@
   // must not end the task — require an actual completion/kill keyword, otherwise
   // a task gets marked done the instant it launches (elapsed collapses to ~0s).
   const BG_DONE_RE = /\b(completed|complete|exited|exit code|finished|has (?:finished|completed|exited)|killed|terminated|stopped|no longer running)\b/i;
+  // Whole-token membership: does `text` name `id` as a standalone identifier and
+  // not merely as a prefix of a longer one? "bash_1" must NOT match inside
+  // "bash_10", or one shell completing would flip unrelated running tasks to
+  // "done". Ids are [A-Za-z0-9_-]+ (see parseShellId / the agentId regex), so
+  // guard both sides against those characters.
+  function mentionsId(text, id) {
+    if (!id) return false;
+    const esc = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp("(?<![A-Za-z0-9_-])" + esc + "(?![A-Za-z0-9_-])").test(text);
+  }
   function scanBgNotice(chat, text) {
     if (!text || !chat.bgShell.size || !BG_DONE_RE.test(text)) return;
     let changed = false;
     for (const [sid, key] of chat.bgShell) {
-      if (text.includes(sid) && finishTask(chat.bgTasks.get(key), "done")) changed = true;
+      if (mentionsId(text, sid) && finishTask(chat.bgTasks.get(key), "done")) changed = true;
     }
     if (changed) syncTasks(chat);
   }
@@ -2448,7 +2459,7 @@
     const failed = /\b(failed|error)\b/i.test(text);
     let changed = false;
     for (const [id, key] of chat.agentTask) {
-      if (text.includes(id) && finishTask(chat.agents.get(key), failed ? "error" : "done")) changed = true;
+      if (mentionsId(text, id) && finishTask(chat.agents.get(key), failed ? "error" : "done")) changed = true;
     }
     if (changed) syncTasks(chat);
   }
@@ -2959,6 +2970,17 @@
     renderTurnStatus(chat);
   }
 
+  // The interrupt→respawn event gate (see the `interrupted` handler). Normally
+  // lifted by the respawned process's `system init`, but a failed respawn or a
+  // stop of an idle session may never produce one — so arming the gate always
+  // schedules a self-heal too. It only guards the killed process's brief output
+  // drain; it must never outlive that and wedge the chat's event stream shut.
+  const SUPPRESS_MAX_MS = 5000;
+  function liftSuppress(chat) {
+    chat.suppressEvents = false;
+    if (chat.suppressTimer) { clearTimeout(chat.suppressTimer); chat.suppressTimer = null; }
+  }
+
   // ---- event handling (routed per chat) -------------------------------------
   function onClaudeEvent(chat, d) {
     if (!d || !d.type) return;
@@ -2967,7 +2989,7 @@
     // always opens with `system init` (emitted on its first prompt), which
     // lifts the gate.
     if (chat.suppressEvents) {
-      if (d.type === "system" && d.subtype === "init") chat.suppressEvents = false;
+      if (d.type === "system" && d.subtype === "init") liftSuppress(chat);
       else return;
     }
     // A silent `/usage` probe is in flight on this session — harvest its output
@@ -3375,8 +3397,16 @@
           // The killed process can keep streaming for a beat (a host without
           // the killSession guard forwards it all) — those events would
           // resumeTurnIfIdle() the chat right back to "running". Drop them
-          // until the respawned process's `system init`.
+          // until the respawned process's `system init`. That init may never
+          // come (failed respawn, or a stop of an idle session), so arm a
+          // self-heal timer alongside the gate — it must never wedge the chat's
+          // event stream shut permanently.
+          if (chat.suppressTimer) clearTimeout(chat.suppressTimer);
           chat.suppressEvents = true;
+          chat.suppressTimer = setTimeout(() => {
+            chat.suppressTimer = null;
+            chat.suppressEvents = false;
+          }, SUPPRESS_MAX_MS);
           if (chat.turnRunning) endTurn(chat, null);
         }
         break;
@@ -3439,6 +3469,7 @@
         if (chat) {
           chat.started = false;
           clearPermCards(chat);
+          liftSuppress(chat); // no respawn coming — don't leave the event gate shut
           if (chat.turnRunning) endTurn(chat, null);
           systemNote(chat, `Claude session ended (code ${msg.code}).`, "warn");
         }
@@ -3479,6 +3510,21 @@
           if (chat.id === activeId) {
             syncGitBar(chat);
             updateGreeting(); // the "review my changes" chip keys off the diff
+          }
+        }
+        break;
+      case "suggest":
+        // Haiku-generated greeting chips (host v19). Cache under the key the
+        // request carried — never the current one, which may have moved on.
+        if (msg.key) suggestInflight.delete(msg.key);
+        if (msg.ok && msg.key && Array.isArray(msg.suggestions) && msg.suggestions.length) {
+          suggestCache.set(msg.key, msg.suggestions);
+          if (suggestCache.size > 30) suggestCache.delete(suggestCache.keys().next().value);
+          // Still looking at the same context on the same (empty) chat — swap
+          // the heuristic chips for the generated ones.
+          if (chat && msg.id === activeId && msg.key === greetingCtxKey &&
+              els.greeting && !els.greeting.classList.contains("hidden")) {
+            renderGreetingChips(chat, msg.suggestions);
           }
         }
         break;
@@ -3548,7 +3594,10 @@
         if (chat) loginDone(chat, msg.ok, msg.message);
         break;
       case "error":
-        if (chat) systemNote(chat, msg.message || "Host error", "warn");
+        if (chat) {
+          liftSuppress(chat); // a respawn error must not leave the event gate shut
+          systemNote(chat, msg.message || "Host error", "warn");
+        }
         break;
     }
   }
@@ -5788,8 +5837,19 @@
     const name = greetFirstName();
     els.greetingHello.textContent = name ? `${word}, ${name}` : word;
     const token = ++greetingToken;
-    const chips = await buildGreetingSuggestions(chat);
+    const [heuristic, ctx] = await Promise.all([buildGreetingSuggestions(chat), greetingContext(chat)]);
     if (token !== greetingToken || els.greeting.classList.contains("hidden")) return;
+    // Heuristic chips render instantly; a cached haiku set for this exact
+    // context wins outright, an uncached one is requested and swapped in on
+    // arrival (see the `suggest` reply in onHostMessage).
+    const key = suggestKey(ctx);
+    greetingCtxKey = key;
+    const cached = suggestCache.get(key);
+    renderGreetingChips(chat, cached || heuristic);
+    if (!cached) scheduleSuggest(chat, ctx, key);
+  }
+
+  function renderGreetingChips(chat, chips) {
     els.greetingChips.replaceChildren();
     for (const text of chips.slice(0, 3)) {
       const b = el("button", "greeting-chip", text);
@@ -5805,6 +5865,60 @@
       });
       els.greetingChips.appendChild(b);
     }
+  }
+
+  // Context blob the host feeds to a one-off haiku call (host v19 `suggest`).
+  // Small on purpose: titles/URLs only, never page content.
+  async function greetingContext(chat) {
+    const ctx = {};
+    try {
+      const [tabs, tab] = await Promise.all([listTabs(), activeTab()]);
+      const skip = (u) => !u || /^chrome(-extension)?:\/\//i.test(u);
+      const act = tab && !skip(tab.url) ? tab : null;
+      if (act) ctx.tab = { title: (act.title || "").replace(/\s+/g, " ").trim().slice(0, 120), url: (act.url || "").slice(0, 200) };
+      const others = (tabs || [])
+        .filter((t) => t && !skip(t.url) && (!act || t.id !== act.id))
+        .map((t) => (t.title || "").replace(/\s+/g, " ").trim().slice(0, 60))
+        .filter(Boolean)
+        .slice(0, 6);
+      if (others.length) ctx.otherTabs = others;
+    } catch (_) {}
+    if (chat.cwd) {
+      ctx.folder = shortPath(chat.cwd);
+      if (chat.branch) ctx.branch = chat.branch;
+      if (Array.isArray(chat.diffFiles) && chat.diffFiles.length) {
+        ctx.diff =
+          `${chat.diffFiles.length} files, +${chat.diffInsertions}/-${chat.diffDeletions} — ` +
+          chat.diffFiles.slice(0, 6).map((f) => f.path).join(", ");
+      }
+    }
+    return ctx;
+  }
+
+  // Cache key deliberately ignores otherTabs — background-tab churn shouldn't
+  // burn a fresh haiku call when nothing the chips would name has changed.
+  function suggestKey(ctx) {
+    return [(ctx.tab && ctx.tab.url) || "", ctx.folder || "", ctx.branch || "", ctx.diff || ""].join("|");
+  }
+
+  // Generated chips, keyed by suggestKey(). Session-scoped; a repeat visit to
+  // the same context (same tab, same folder, same diff) costs nothing.
+  const suggestCache = new Map();
+  let greetingCtxKey = "";
+  let suggestTimer = null;
+  const suggestInflight = new Set(); // keys with a request already at the host
+  function scheduleSuggest(chat, ctx, key) {
+    if (!hostReady || hostVersion < 19) return; // old host doesn't know the op
+    if (!ctx.tab && !ctx.folder) return; // nothing to riff on — heuristics are fine
+    if (suggestInflight.has(key)) return;
+    // Debounce: rapid tab switches each produce a new key — only the one the
+    // user settles on gets sent.
+    clearTimeout(suggestTimer);
+    suggestTimer = setTimeout(() => {
+      if (key !== greetingCtxKey || els.greeting.classList.contains("hidden")) return;
+      if (chats.get(activeId) !== chat) return;
+      if (post({ type: "suggest", id: chat.id, key, context: ctx })) suggestInflight.add(key);
+    }, 800);
   }
 
   async function buildGreetingSuggestions(chat) {
