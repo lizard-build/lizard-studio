@@ -172,7 +172,10 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v18: `ready` carries `user` (OS user's name) for the panel's greeting;
 //      rewind counting skips bare /usage-family turns so it can't desync from
 //      the panel's turnIndex after any /usage has run.
-const HOST_VERSION = 18;
+// v19: ready.ok actually reflects whether claude resolved (the bare-name
+//      fallback used to count as installed), and resolution works on Windows
+//      (`where claude`, .exe/.cmd well-known spots).
+const HOST_VERSION = 19;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -395,16 +398,38 @@ function buildChildEnv() {
 const CHILD_ENV = buildChildEnv();
 log("env built", "PATH=", (CHILD_ENV.PATH || "").slice(0, 200), "HOME=", CHILD_ENV.HOME, "SHELL=", CHILD_ENV.SHELL);
 
-// Resolve the claude binary: config first, then the captured PATH, then well-known spots.
+// Resolve the claude binary: config first, then the captured PATH, then
+// well-known spots. Returns the bare name "claude" only when nothing was
+// found — `ready.ok` treats that as "not installed", the panel shows the
+// Install Claude Code step, and its 4s recheck respawns us until a fresh
+// resolve finds the binary.
 function resolveClaude() {
   if (CONFIG.claudePath && existsSync(CONFIG.claudePath)) return CONFIG.claudePath;
+  const home = homedir();
+  if (process.platform === "win32") {
+    try {
+      const found = execSync("where claude", { encoding: "utf8", env: CHILD_ENV })
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .find(Boolean);
+      if (found && existsSync(found)) return found;
+    } catch {
+      /* not on PATH — fall through */
+    }
+    for (const c of [
+      join(home, ".local", "bin", "claude.exe"),
+      join(process.env.APPDATA || join(home, "AppData", "Roaming"), "npm", "claude.cmd"),
+    ]) {
+      if (existsSync(c)) return c;
+    }
+    return "claude";
+  }
   try {
     const found = execSync("command -v claude", { encoding: "utf8", env: CHILD_ENV }).trim();
     if (found && existsSync(found)) return found;
   } catch {
     /* not on PATH — fall through */
   }
-  const home = homedir();
   for (const c of [
     "/opt/homebrew/bin/claude",
     "/usr/local/bin/claude",
@@ -414,7 +439,7 @@ function resolveClaude() {
   ]) {
     if (existsSync(c)) return c;
   }
-  return "claude"; // last resort: hope it's on PATH
+  return "claude";
 }
 const CLAUDE = resolveClaude();
 log("claude resolved to", CLAUDE, "exists=", existsSync(CLAUDE));
@@ -2216,4 +2241,8 @@ function osUserName() {
 }
 
 // Announce ourselves so the panel can leave its onboarding screen.
-send({ type: "ready", version: HOST_VERSION, home: homedir(), claudePath: CLAUDE, user: osUserName(), ok: existsSync(CLAUDE) || CLAUDE === "claude" });
+// `ok` must be REAL: the bare "claude" fallback means resolveClaude found
+// nothing, so report not-installed — the panel's Install Claude Code step
+// (with its 4s recheck) is what gets the user out of that state. The old
+// `|| CLAUDE === "claude"` made ok always-true and the step unreachable.
+send({ type: "ready", version: HOST_VERSION, home: homedir(), claudePath: CLAUDE, user: osUserName(), ok: existsSync(CLAUDE) });

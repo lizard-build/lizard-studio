@@ -134,7 +134,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 18;
+  const EXPECTED_HOST_VERSION = 19;
 
   let els = {};
   let port = null;
@@ -153,6 +153,10 @@
   // itself; if it fires the host never answered (too old) — show the manual
   // install command instead.
   let hostUpdateTimer = null;
+  // True while a stale host is self-updating. The Install-Claude recheck kills
+  // and respawns the host every 4s — doing that mid-update would tear the
+  // fetch down before it finishes, and the host would come back stale forever.
+  let hostUpdatePending = false;
   // Set once a stale host confirms it's about to restart itself (selfUpdate
   // `updated:true`). The disconnect that follows is expected — suppress the
   // "host not installed" onboarding flash for that one disconnect instead of
@@ -3387,11 +3391,16 @@
         // which reads as 0 and takes the same path.
         clearTimeout(hostUpdateTimer);
         if ((msg.version || 0) >= EXPECTED_HOST_VERSION) {
+          hostUpdatePending = false;
           setHostBanner("hidden");
         } else {
+          hostUpdatePending = true;
           setHostBanner("updating");
           post({ type: "selfUpdate" });
-          hostUpdateTimer = setTimeout(() => setHostBanner("manual"), 8000);
+          hostUpdateTimer = setTimeout(() => {
+            hostUpdatePending = false; // gave up — let the recheck resume
+            setHostBanner("manual");
+          }, 8000);
         }
         // Host is linked but the `claude` CLI isn't installed — surface the real
         // "Install Claude Code" onboarding step (platform-aware) and keep polling.
@@ -6115,6 +6124,7 @@
     if (recheckTimer) return;
     recheckTimer = setInterval(() => {
       if (!hostReady) return; // mid-reconnect; let the pending one land first
+      if (hostUpdatePending) return; // self-update in flight — killing the host now would abort it
       hostReady = false;
       connected = false;
       try {
