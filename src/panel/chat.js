@@ -109,10 +109,10 @@
   // system overhead), so the panel's ring reads 1:1 with the terminal. Tune a
   // row here if a model's window changes; unknown models fall back to 200k.
   const CONTEXT_LIMITS = {
-    "claude-sonnet-5": 967000,   // 1M beta context, ~967k usable (see screenshot)
-    "claude-opus-4-8": 200000,
+    "claude-opus-4-8": 1000000,
+    "claude-sonnet-5": 1000000,
+    "claude-fable-5": 1000000,
     "claude-haiku-4-5-20251001": 200000,
-    "claude-fable-5": 200000,
   };
   const DEFAULT_CONTEXT_LIMIT = 200000;
   function contextLimit(chat) {
@@ -4482,7 +4482,8 @@
     const used = chat ? chat.ctxTokens || 0 : 0;
     const limit = chat ? contextLimit(chat) : DEFAULT_CONTEXT_LIMIT;
     const ctxPct = Math.round((used / limit) * 100);
-    const kOneDec = (n) => (n / 1000).toFixed(1) + "k"; // "113.6k" / "967.0k" — matches the app
+    // "113.6k" / "1.0M" — mirrors the app: one decimal, M above a million.
+    const kOneDec = (n) => (n >= 1000000 ? (n / 1000000).toFixed(1) + "M" : (n / 1000).toFixed(1) + "k");
     const ctxSec = el("div", "usage-menu-sec");
     ctxSec.appendChild(
       usageMenuRow(
