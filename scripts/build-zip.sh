@@ -20,16 +20,6 @@ MANIFEST="manifest.json"
 VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -1)"
 [ -n "$VERSION" ] || { echo "error: could not read version from $MANIFEST"; exit 1; }
 
-# The "key" field pins the published extension ID to the one the native host
-# trusts (allowed_origins). Refuse to build without it — dropping it would give
-# the store a different ID and break native messaging.
-if ! grep -q '"key"' "$MANIFEST"; then
-  echo "error: manifest.json has no \"key\" field."
-  echo "       Publishing without it changes the extension ID and breaks the"
-  echo "       native host's allowed_origins. Restore the key before building."
-  exit 1
-fi
-
 OUT_DIR="$ROOT/dist"
 ZIP="$OUT_DIR/lizard-studio-$VERSION.zip"
 STAGE="$(mktemp -d)"
@@ -39,7 +29,15 @@ trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/lizard-studio"
 DEST="$STAGE/lizard-studio"
 
-cp "$MANIFEST" "$DEST/"
+# Copy the manifest but strip the "key" field: the Chrome Web Store rejects it
+# ("key field is not allowed in manifest"). The key stays in the repo manifest
+# for local unpacked development; only the uploaded copy has it removed.
+node -e '
+  const fs = require("fs");
+  const m = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  delete m.key;
+  fs.writeFileSync(process.argv[2], JSON.stringify(m, null, 2) + "\n");
+' "$MANIFEST" "$DEST/manifest.json"
 
 # Icons referenced by the manifest.
 mkdir -p "$DEST/icons"

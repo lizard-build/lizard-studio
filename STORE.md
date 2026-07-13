@@ -124,10 +124,17 @@ section of the Dashboard.
 
 ## Pre-submit reminders
 
-- Keep the manifest `"key"` field so the published extension ID stays
-  `nhcgkijjijdinhldjohkmbbgjokobecd`, matching the native host's
-  `allowed_origins`. Removing it will assign a new ID and break native
-  messaging. (See README / host `install.mjs`.)
+- **The `"key"` field must NOT be in the uploaded manifest** — the Web Store
+  rejects it ("key field is not allowed in manifest"). `scripts/build-zip.sh`
+  strips it automatically from the zipped copy; the repo manifest keeps it for
+  local unpacked development.
+- **The published extension ID will change.** Without the `key`, the store
+  assigns its own ID (not the dev ID `nhcgkijjijdinhldjohkmbbgjokobecd`). After
+  the first upload, copy the store-assigned ID from the Dashboard and update the
+  native host so native messaging works for store users:
+  - `src/host/install.mjs` → `DEFAULT_EXT_ID`
+  - anything documenting the ID in `README.md`
+  Then republish the host to npm so installs trust the new ID.
 - Expect manual review because of `debugger` + `nativeMessaging` + `<all_urls>`.
 - Build the upload zip with `./scripts/build-zip.sh` (excludes `.git`, the host
-  `.tgz`, and docs).
+  `.tgz`, docs, and `src/host`).
