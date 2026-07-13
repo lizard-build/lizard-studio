@@ -6712,7 +6712,7 @@
           <span id="onboarding-logo-claude2" class="onboarding-logo"></span>
         </div>
         <h2>Install Claude Code</h2>
-        <p>The <code>claude</code> command isn't installed yet. Run this in your terminal — it links up on its own once it's done:</p>
+        <p>Almost there – install Claude Code to proceed. Paste this in your terminal:</p>
         <div id="ob-os-toggle" class="ob-os-toggle" role="tablist" aria-label="Operating system">
           <button class="ob-os-tab" data-os="sh" role="tab">macOS / Linux</button>
           <button class="ob-os-tab" data-os="ps" role="tab">PowerShell</button>
