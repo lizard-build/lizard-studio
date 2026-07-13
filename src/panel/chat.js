@@ -350,6 +350,9 @@
       // `system init`.
       suppressEvents: false,
       suppressTimer: null,
+      // The one-time open-tabs snapshot is sent with the first prompt only;
+      // this flips true once it's delivered (reset on a session reset).
+      tabsContextSent: false,
       // A model/mode/effort switch made while a turn was running — applied
       // (via restartSessionNow) once endTurn() sees the reply is done.
       restartPending: false,
@@ -1079,27 +1082,48 @@
   }
 
   // ---- auto tab context -------------------------------------------------
-  // Lightweight, always-on context: title + URL for every open tab, with the
-  // active one flagged, so the model knows what the user has open without an
-  // explicit "attach tab" action. No page content (cheap), and only resent
-  // when the open tabs or the active tab actually changed since the last
-  // turn, so it doesn't balloon on long conversations.
+  // Shorten a tab's URL for the context block: keep scheme+host+path, drop the
+  // query string and #fragment (where session tokens / auth codes / long ids
+  // live), and hard-cap the length. `origin` also drops any embedded
+  // user:pass credentials. The model calls browser_tabs for the full, live URL
+  // when it genuinely needs one.
+  function shortTabUrl(raw) {
+    let out;
+    try {
+      const u = new URL(raw);
+      // protocol+host (not origin — origin is the literal "null" for file:/data:)
+      // and host excludes any user:pass credentials.
+      out = u.protocol + "//" + u.host + u.pathname;
+      if (u.search || u.hash) out += "?…";
+    } catch {
+      out = String(raw || "");
+    }
+    return out.length > 100 ? out.slice(0, 100) + "…" : out;
+  }
+
+  // A ONE-TIME, lightweight snapshot: title + shortened URL for every open tab,
+  // active one flagged, sent only with the first prompt of a session so the
+  // model starts out knowing what the user has open. We don't re-inject it every
+  // turn (that silently shipped all tab URLs on each send) — the model refreshes
+  // via browser_tabs on demand, and reads the current page via browser_info /
+  // browser_snapshot. Returns "" once it's already been delivered.
   async function buildTabsContextBlock(chat) {
     if (!(chrome.tabs && chrome.tabs.query)) return "";
+    if (chat.tabsContextSent) return "";
     const [tabs, current] = await Promise.all([listTabs(), activeTab()]);
     const real = tabs.filter((t) => t.id != null && t.url && !/^chrome(-extension)?:\/\//i.test(t.url));
     if (!real.length) return "";
     const activeTabId = current ? current.id : null;
-    const snapshot = real.map((t) => `${t.id}:${t.url}`).sort().join("|") + `|active:${activeTabId}`;
-    if (chat.lastTabsSnapshot === snapshot) return "";
-    chat.lastTabsSnapshot = snapshot;
     const MAX = 30;
     const shown = real.slice(0, MAX);
-    const lines = ["[Open browser tabs — for context on what the user has open; not something they typed]"];
+    const lines = [
+      "[Open browser tabs — a one-time snapshot of what the user has open right now; not something they typed. " +
+        "URLs are shortened (query string and #fragment removed) — call browser_tabs for the full or current URL of any tab.]",
+    ];
     for (const t of shown) {
       const mark = t.id === activeTabId ? "→ " : "  ";
       const title = (t.title || "").replace(/\s+/g, " ").trim().slice(0, 80);
-      lines.push(`${mark}${title || "(untitled)"} — ${t.url}`);
+      lines.push(`${mark}${title || "(untitled)"} — ${shortTabUrl(t.url)}`);
     }
     if (real.length > shown.length) lines.push(`  …and ${real.length - shown.length} more tabs`);
     lines.push("(→ marks the tab the user is currently viewing)");
@@ -3942,7 +3966,7 @@
     chat.currentAssistantId = null;
     chat.currentAssistantBody = null;
     chat.sessionId = null;
-    chat.lastTabsSnapshot = null;
+    chat.tabsContextSent = false; // a fresh session re-sends the one-time tab snapshot
     pinnedTabBySession.delete(chat.id);
     chat.empty = true;
     chat.turnStatusText = "";
@@ -4128,7 +4152,9 @@
     // untouched, so the next real prompt still sends it) and leave any attached
     // context chips in place for the next real prompt instead of consuming them.
     const isCommand = /^\//.test(text);
-    // Silent, always-on context: what tabs are open right now, active one flagged.
+    // One-time snapshot of what tabs are open, active one flagged (empty after
+    // the first send). The `tabsContextSent` flag is only committed once the
+    // post below actually succeeds, so a failed send doesn't swallow it.
     const tabsBlock = isCommand ? "" : await buildTabsContextBlock(chat);
     // Prepend any attached page/element context as a block, then clear it.
     const ctx = isCommand ? "" : formatContexts(chat);
@@ -4177,6 +4203,8 @@
       systemNote(chat, "Host disconnected — message queued until it reconnects.", "warn");
       return;
     }
+    // The post reached the host — the one-time tab snapshot is now delivered.
+    if (tabsBlock) chat.tabsContextSent = true;
     // A /usage-family command is a zero-turn side query — its reply is a
     // synthetic usage card, not a conversation turn. Render its bubble plain,
     // never as an editable/rewind target: the host's rewind counter and the
