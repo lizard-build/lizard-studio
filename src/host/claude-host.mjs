@@ -344,7 +344,9 @@ function parseShellEnv(out) {
 function writeShellEnvCache(shell, env) {
   try {
     const tmp = SHELL_ENV_CACHE + ".tmp";
-    writeFileSync(tmp, JSON.stringify({ shell, ts: Date.now(), env }), "utf8");
+    // The captured login-shell env can hold tokens/keys, so keep the cache
+    // owner-only (0600) — the default umask would leave it world-readable.
+    writeFileSync(tmp, JSON.stringify({ shell, ts: Date.now(), env }), { encoding: "utf8", mode: 0o600 });
     renameSync(tmp, SHELL_ENV_CACHE);
   } catch {
     /* cache is best-effort */
@@ -2134,7 +2136,12 @@ function configWrite(id, msg) {
     mkdirSync(dirname(spec.path), { recursive: true });
     if (existsSync(spec.path)) {
       try {
-        writeFileSync(spec.path + ".bak", readFileSync(spec.path));
+        // The config being backed up may hold auth data, so keep the .bak
+        // owner-only (0600). writeFileSync's mode only applies on create, so
+        // chmod explicitly to cover an existing .bak with looser perms.
+        const bak = spec.path + ".bak";
+        writeFileSync(bak, readFileSync(spec.path), { mode: 0o600 });
+        chmodSync(bak, 0o600);
       } catch {
         /* best-effort backup — don't block the save on it */
       }
