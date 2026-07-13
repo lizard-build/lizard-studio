@@ -103,6 +103,33 @@
   ];
   const DEFAULT_EFFORT = "medium";
 
+  // Usable context window per model (tokens) — the denominator behind the
+  // toolbar's context meter. These mirror what Claude Code's own `/context`
+  // meter shows as the max (window minus the reserve it keeps for the reply +
+  // system overhead), so the panel's ring reads 1:1 with the terminal. Tune a
+  // row here if a model's window changes; unknown models fall back to 200k.
+  const CONTEXT_LIMITS = {
+    "claude-sonnet-5": 967000,   // 1M beta context, ~967k usable (see screenshot)
+    "claude-opus-4-8": 200000,
+    "claude-haiku-4-5-20251001": 200000,
+    "claude-fable-5": 200000,
+  };
+  const DEFAULT_CONTEXT_LIMIT = 200000;
+  function contextLimit(chat) {
+    return (chat && CONTEXT_LIMITS[chat.model]) || DEFAULT_CONTEXT_LIMIT;
+  }
+
+  // Account-wide plan usage (5-hour + weekly windows), shared across every tab
+  // since it tracks the account, not the conversation. Filled by a silent
+  // `/usage` probe (see refreshUsage) and read by the toolbar usage popover.
+  // `at` is when it was last refreshed; `fetching` guards against overlapping
+  // probes. A probe reuses a live, idle session — its events are swallowed by
+  // the chat.usageProbe gate in onClaudeEvent so nothing renders into the chat.
+  const usageState = { rows: [], at: 0, fetching: false };
+  const USAGE_STALE_MS = 30000;   // re-probe on popover open if older than this
+  const USAGE_THROTTLE_MS = 45000; // min gap between background (post-turn) probes
+  let usageProbeTimer = 0;
+
   // Friendly tool labels + Phosphor icon names.
   const TOOL_META = {
     Bash: { icon: "terminal", label: "Bash" },
@@ -1351,6 +1378,100 @@
     }
     if (parsed.intro) card.appendChild(el("div", "usage-card-caption", parsed.intro));
     return card;
+  }
+
+  // True when a persisted transcript chunk is nothing but plan-usage lines —
+  // i.e. the output of a (possibly background) `/usage`. Used to keep those
+  // snapshots out of transcript replay: a usage card from hours ago is stale
+  // and misleading, and background probes would otherwise stack up on reload.
+  // The live toolbar meter is the source of truth instead.
+  function isUsageDump(raw) {
+    if (!raw) return false;
+    const out = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(String(raw));
+    return !!parseUsageText(out ? out[1] : String(raw));
+  }
+  const USAGE_CMD_RE = /^\/(usage|usage-credits|extra-usage)\b/;
+
+  // Screenshot-matching labels for the two standard windows the CLI reports as
+  // "Current session" / "Current week (all models)".
+  function normalizeUsageLabel(label) {
+    if (/session|5[\s-]?hour/i.test(label)) return "5-hour limit";
+    if (/week/i.test(label)) return "Weekly · all models";
+    return label;
+  }
+
+  // ---- silent /usage probe --------------------------------------------------
+  // Runs a bare `/usage` in a live, idle session purely to refresh usageState.
+  // The session's events for it are intercepted by handleUsageProbe (via the
+  // chat.usageProbe gate) so nothing lands in the transcript and the turn UI
+  // never flips. `force` bypasses the throttle (used when the popover opens).
+  function refreshUsage(force) {
+    if (usageState.fetching) return;
+    if (!connected || !hostReady) return;
+    if (!force && Date.now() - usageState.at < USAGE_THROTTLE_MS) return;
+    // A session is probe-eligible only when it's live and fully idle — no turn
+    // running, no queued prompts waiting, and not already probing.
+    const idle = (c) => c && c.started && !c.turnRunning && !c.usageProbe && !(c.queue && c.queue.length);
+    // Prefer the active tab; otherwise any started, idle session will do.
+    let chat = chats.get(activeId);
+    if (!idle(chat)) {
+      chat = null;
+      for (const c of chats.values()) {
+        if (idle(c)) { chat = c; break; }
+      }
+    }
+    if (!chat) return;
+    chat.usageProbe = { buf: "" };
+    usageState.fetching = true;
+    if (!post({ type: "prompt", id: chat.id, text: "/usage" })) {
+      chat.usageProbe = null;
+      usageState.fetching = false;
+      return;
+    }
+    // Safety net: if no `result` comes back (e.g. the session died mid-probe),
+    // parse whatever we captured and release the gate so it can't wedge.
+    clearTimeout(usageProbeTimer);
+    usageProbeTimer = setTimeout(() => finishUsageProbe(chat), 8000);
+  }
+
+  function collectUsageText(probe, d) {
+    if (d.type === "assistant") {
+      for (const b of (d.message && d.message.content) || []) {
+        if (b && b.type === "text" && b.text) probe.buf += (probe.buf ? "\n" : "") + b.text;
+      }
+    } else if (d.type === "user") {
+      const content = d.message && d.message.content;
+      if (typeof content === "string") {
+        const out = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(content);
+        if (out) probe.buf += (probe.buf ? "\n" : "") + out[1];
+      } else if (Array.isArray(content)) {
+        for (const b of content) {
+          if (b && b.type === "text" && b.text) probe.buf += (probe.buf ? "\n" : "") + b.text;
+        }
+      }
+    }
+  }
+
+  // The probe gate: while chat.usageProbe is set, every event for that chat is
+  // routed here and swallowed (never rendered). We only harvest usage text and
+  // wait for the turn's `result` (or the safety timeout) to finalize.
+  function handleUsageProbe(chat, d) {
+    if (!d || !d.type) return;
+    collectUsageText(chat.usageProbe, d);
+    if (d.type === "result") finishUsageProbe(chat);
+  }
+
+  function finishUsageProbe(chat) {
+    if (!chat || !chat.usageProbe) return;
+    clearTimeout(usageProbeTimer);
+    const parsed = parseUsageText(chat.usageProbe.buf);
+    chat.usageProbe = null;
+    usageState.fetching = false;
+    if (parsed && parsed.rows.length) {
+      usageState.rows = parsed.rows;
+      usageState.at = Date.now();
+    }
+    refreshUsageUI();
   }
 
   function addText(chat, body, text) {
@@ -2807,6 +2928,7 @@
       const u = ev.usage || {};
       if (typeof u.output_tokens === "number") chat.ctxTokens = chat.ctxBase + u.output_tokens;
     }
+    if (chat.id === activeId) scheduleUsageUI();
   }
 
   // A finished background bash run or subagent (see scanBgNotice/scanAgentNotice)
@@ -2844,6 +2966,9 @@
       if (d.type === "system" && d.subtype === "init") chat.suppressEvents = false;
       else return;
     }
+    // A silent `/usage` probe is in flight on this session — harvest its output
+    // and swallow every event so nothing renders and the turn UI stays idle.
+    if (chat.usageProbe) { handleUsageProbe(chat, d); return; }
     switch (d.type) {
       case "system":
         if (d.subtype === "init") {
@@ -2867,6 +2992,9 @@
           requestBranches(chat);
           requestGitDiff(chat);
           savePrefs();
+          // First live, idle session — seed the plan-usage meter (throttled, so
+          // a burst of tab restarts doesn't fire a probe each).
+          setTimeout(() => refreshUsage(), 400);
         } else if (d.subtype === "status" && d.status === "compacting") {
           // /compact runs a real summarization call with no assistant text or
           // tool card of its own — pin the spinner word so a long compact
@@ -3031,6 +3159,9 @@
     // Send the next queued prompt, if any — keeps working even if the user
     // has since switched to a different tab.
     dispatchNextQueued(chat);
+    // A turn just consumed quota — refresh the plan-usage meter while the
+    // session is idle (throttled; a no-op if we probed recently).
+    if (result) refreshUsage();
   }
 
   // ---- running-status pill --------------------------------------------------
@@ -3463,6 +3594,9 @@
       // CLI transcript events (both carry timestamps; events arrive in order).
       if (replayStamp) drainBashUntil(chat, replayStamp);
       if (ev.type === "local_command") {
+        // Plan-usage snapshots aren't replayed — the live toolbar meter owns
+        // that, and silent background probes would otherwise pile up here.
+        if (isUsageDump(ev.content)) continue;
         const ts = ev.timestamp ? Date.parse(ev.timestamp) || Date.now() : Date.now();
         renderLocalCommandOutput(chat, String(ev.content || ""), ts);
         continue;
@@ -3480,12 +3614,15 @@
           // plain-string user turn rather than a system line — render it as
           // command output, not a user bubble.
           if (/<local-command-std(out|err)>/.test(content)) {
+            if (isUsageDump(content)) continue; // stale usage snapshot — skip
             renderLocalCommandOutput(chat, content, ts);
             continue;
           }
           const stripped =
             commandBubbleText(content) || content.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
-          if (stripped) userBubble(chat, stripped, null, { real: true, ts });
+          // Don't replay bare `/usage` command bubbles (their output is skipped
+          // above, so the lone command echo would dangle).
+          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts });
         } else if (Array.isArray(content)) {
           const texts = [];
           for (const b of content) {
@@ -3502,7 +3639,7 @@
           const joined = texts.join("\n\n");
           const stripped =
             commandBubbleText(joined) || joined.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
-          if (stripped) userBubble(chat, stripped, null, { real: true, ts });
+          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts });
         }
       } else if (ev.type === "assistant") {
         // Each replayed assistant message refreshes the context reading; the
@@ -3517,6 +3654,8 @@
             toolCard(chat, body, block);
           } else if (block.type === "text") {
             // (thinking blocks are intentionally not rendered.)
+            // Skip stale plan-usage dumps — the live toolbar meter owns those.
+            if (parseUsageText(block.text)) continue;
             addText(chat, body, block.text);
           }
         }
@@ -3900,6 +4039,10 @@
   }
 
   async function deliverPrompt(chat, text) {
+    // A real turn always wins over an in-flight silent usage probe: release its
+    // event-swallowing gate now so this prompt's stream renders normally. The
+    // CLI runs prompts in order, so the probe's own reply has already landed.
+    if (chat.usageProbe) finishUsageProbe(chat);
     const hasContext = Array.isArray(chat.contexts) && chat.contexts.length > 0;
     const attachments = Array.isArray(chat.attachments) ? chat.attachments : [];
     if (!chat.started) startChatSession(chat);
@@ -4270,6 +4413,108 @@
   }
   function hideEffortMenu() {
     els.effortMenu.classList.add("hidden");
+  }
+
+  // ---- usage meter (context window + plan usage) ----------------------------
+  // A ring in the composer toolbar, left of the effort picker, showing the
+  // active chat's context fill. Clicking it opens a popover with the full
+  // breakdown — context window plus the account's 5-hour / weekly plan windows
+  // (from usageState, kept current by the silent /usage probe).
+  const USAGE_RING_R = 7;
+  const USAGE_RING_C = 2 * Math.PI * USAGE_RING_R;
+  function usageRingSVG(pct) {
+    const off = USAGE_RING_C * (1 - Math.max(0, Math.min(100, pct)) / 100);
+    return (
+      '<svg class="usage-ring-svg" width="18" height="18" viewBox="0 0 18 18">' +
+      '<circle class="usage-ring-track" cx="9" cy="9" r="' + USAGE_RING_R + '" fill="none" stroke-width="2.5"/>' +
+      '<circle class="usage-ring-fill" cx="9" cy="9" r="' + USAGE_RING_R + '" fill="none" stroke-width="2.5" ' +
+      'stroke-dasharray="' + USAGE_RING_C.toFixed(2) + '" stroke-dashoffset="' + off.toFixed(2) + '" ' +
+      'transform="rotate(-90 9 9)" stroke-linecap="round"/></svg>'
+    );
+  }
+  // Update just the toolbar ring (cheap; safe to call on every stream tick).
+  function refreshUsageRing() {
+    if (!els.usageBtn) return;
+    const chat = chats.get(activeId);
+    const pct = chat ? Math.round(((chat.ctxTokens || 0) / contextLimit(chat)) * 100) : 0;
+    els.usageBtn.innerHTML = usageRingSVG(pct);
+    els.usageBtn.title = "Usage · context " + Math.max(0, Math.min(100, pct)) + "%";
+    els.usageBtn.classList.toggle("high", pct >= 90);
+  }
+  // Update the ring and, if the popover is open, its live context row too.
+  function refreshUsageUI() {
+    refreshUsageRing();
+    if (els.usageMenu && !els.usageMenu.classList.contains("hidden")) renderUsageMenu();
+  }
+  // Coalesce the per-delta stream churn into one update per frame.
+  let usageUIRaf = 0;
+  function scheduleUsageUI() {
+    if (usageUIRaf) return;
+    usageUIRaf = requestAnimationFrame(() => { usageUIRaf = 0; refreshUsageUI(); });
+  }
+
+  // One popover row, laid out like the desktop app's usage panel: a header line
+  // with the label on the left and a value cluster (optional "Resets …" note +
+  // a bold figure) on the right, then a full-width fill bar underneath.
+  function usageMenuRow(label, pct, value, resets) {
+    const r = el("div", "usage-menu-row");
+    const head = el("div", "usage-menu-row-head");
+    head.appendChild(el("span", "usage-menu-row-label", label));
+    const meta = el("div", "usage-menu-row-meta");
+    if (resets) meta.appendChild(el("span", "usage-menu-row-resets", "Resets " + resets));
+    meta.appendChild(el("span", "usage-menu-row-val", value));
+    head.appendChild(meta);
+    r.appendChild(head);
+    const bar = el("div", "usage-bar");
+    const fill = el("div", "usage-bar-fill");
+    fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
+    bar.appendChild(fill);
+    r.appendChild(bar);
+    return r;
+  }
+
+  function renderUsageMenu() {
+    const menu = els.usageMenu;
+    menu.innerHTML = "";
+    const chat = chats.get(activeId);
+
+    // Context window — always live from the active chat.
+    const used = chat ? chat.ctxTokens || 0 : 0;
+    const limit = chat ? contextLimit(chat) : DEFAULT_CONTEXT_LIMIT;
+    const ctxPct = Math.round((used / limit) * 100);
+    const kOneDec = (n) => (n / 1000).toFixed(1) + "k"; // "113.6k" / "967.0k" — matches the app
+    const ctxSec = el("div", "usage-menu-sec");
+    ctxSec.appendChild(
+      usageMenuRow(
+        "Context window",
+        ctxPct,
+        kOneDec(used) + " / " + kOneDec(limit) + " (" + Math.max(0, Math.min(100, ctxPct)) + "%)"
+      )
+    );
+    menu.appendChild(ctxSec);
+
+    // Plan usage — account-wide, from the silent /usage probe.
+    const planSec = el("div", "usage-menu-sec");
+    planSec.appendChild(el("div", "usage-menu-head", "Plan usage"));
+    if (usageState.rows.length) {
+      for (const row of usageState.rows) {
+        planSec.appendChild(usageMenuRow(normalizeUsageLabel(row.label), row.pct, row.pct + "%", row.resets));
+      }
+    } else {
+      planSec.appendChild(el("div", "usage-menu-empty", usageState.fetching ? "Loading…" : "Not available yet"));
+    }
+    menu.appendChild(planSec);
+  }
+
+  function toggleUsageMenu() {
+    if (!els.usageMenu.classList.contains("hidden")) return hideUsageMenu();
+    // Refresh stale plan numbers when opening (forced past the throttle).
+    if (Date.now() - usageState.at > USAGE_STALE_MS) refreshUsage(true);
+    renderUsageMenu();
+    els.usageMenu.classList.remove("hidden");
+  }
+  function hideUsageMenu() {
+    els.usageMenu.classList.add("hidden");
   }
 
   // ---- settings modal -------------------------------------------------------
@@ -4693,6 +4938,7 @@
     els.modelBtn.querySelector(".model-label").textContent = model.label;
     const effort = EFFORTS.find((e) => e.id === chat.effort) || EFFORTS.find((e) => e.id === DEFAULT_EFFORT);
     if (els.effortBtn) els.effortBtn.querySelector(".effort-label").textContent = effort.label;
+    refreshUsageUI();
     setRunningUI(chat.turnRunning);
     syncBashMode(chat);
     renderTurnStatus(chat);
@@ -5703,6 +5949,8 @@
     els.modelMenu = root.querySelector("#model-menu");
     els.effortBtn = root.querySelector("#effort-btn");
     els.effortMenu = root.querySelector("#effort-menu");
+    els.usageBtn = root.querySelector("#usage-btn");
+    els.usageMenu = root.querySelector("#usage-menu");
     els.mode = root.querySelector("#mode-btn");
     els.modeMenu = root.querySelector("#mode-menu");
     els.newChat = root.querySelector("#new-chat-btn");
@@ -5866,6 +6114,11 @@
       e.stopPropagation();
       toggleEffortMenu();
     });
+    els.usageBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleUsageMenu();
+    });
+    refreshUsageRing();
     // One delegated close-on-outside-click for every dropdown, instead of one
     // permanent document listener per menu. Toggle buttons stopPropagation, so
     // any click that reaches here and is outside a menu closes it.
@@ -5875,6 +6128,7 @@
       [els.modeMenu, els.mode],
       [els.modelMenu, els.modelBtn],
       [els.effortMenu, els.effortBtn],
+      [els.usageMenu, els.usageBtn],
     ];
     document.addEventListener("click", (e) => {
       for (const [menu, btn] of dropdownPairs) {
@@ -6094,6 +6348,10 @@
               <span class="model-label">Opus 4.8</span>
             </button>
             <div id="model-menu" class="model-menu hidden"></div>
+          </div>
+          <div class="usage-picker">
+            <button id="usage-btn" class="usage-btn" title="Usage"></button>
+            <div id="usage-menu" class="usage-menu hidden"></div>
           </div>
           <div class="model-picker">
             <button id="effort-btn" class="model-btn effort-btn" title="Effort">
