@@ -2647,34 +2647,42 @@ code.inline {
   color: var(--text-primary);
 }
 
-/* Shell picker on the Install-Claude card: a segmented row of pills that swaps
-   the command below (macOS/Linux · PowerShell · CMD). The detected OS is
-   pre-selected; the user can override (e.g. WSL on Windows). */
+/* Shell picker on the Install-Claude card: the DESIGN.md "Tab Picker"
+   segmented control (container bg-secondary/12px/4px pad; active tab
+   #2e2e2e/10px + shadow-sm, semibold; inactive text-secondary → white on
+   hover). Swaps the command below (macOS/Linux · PowerShell · CMD); the
+   detected OS is pre-selected, the user can override (e.g. WSL). */
 .ob-os-toggle {
   display: flex;
-  gap: 6px;
-  margin: 0 0 10px;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto 12px;
+  padding: 4px;
+  background: var(--bg-secondary);
+  border-radius: 12px;
 }
 .ob-os-tab {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 6px;
-  border-radius: 7px;
-  border: 1px solid var(--border-primary);
-  background: var(--bg-secondary);
+  min-height: 32px;
+  min-width: 32px;
+  padding: 5.5px 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
   color: var(--text-secondary);
   font-family: var(--font-family);
-  font-size: 11px;
-  font-weight: 500;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
   white-space: nowrap;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  transition: background 0.15s, color 0.15s;
 }
-.ob-os-tab:hover { background: var(--control-secondary-hover); }
+.ob-os-tab:hover { color: var(--text-primary); }
 .ob-os-tab.active {
-  border-color: var(--control-primary);
+  background: var(--control-secondary);
   color: var(--text-primary);
-  background: var(--control-secondary-hover);
+  box-shadow: 0 1px 1.5px rgba(0, 0, 0, 0.1), 0 1px 1px rgba(0, 0, 0, 0.1);
 }
 
 /* ---- shared onboarding bits (used by chat + terminal) ---- */
