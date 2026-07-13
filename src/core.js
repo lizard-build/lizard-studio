@@ -563,6 +563,10 @@
   // ---- tool registry -----------------------------------------------------
   // tool = { id, name, icon(svg string), group, enable(), disable(), panel?() }
   RK.register = (tool) => {
+    // Idempotent: the same file can run twice in one world when programmatic
+    // injection (background.js ensureContentScript) races the manifest's
+    // document_idle injection — a duplicate must not add a second button.
+    if (RK.tools[tool.id]) return;
     RK.tools[tool.id] = tool;
     RK.order.push(tool.id);
     RK.state.active[tool.id] ??= false;

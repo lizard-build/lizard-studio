@@ -5,7 +5,7 @@
   "description": "An AI coding agent that lives next to the page you're building.",
   "minimum_chrome_version": "116",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtWZVbUNAdtr6CHfUL1o0hPmvA3bJf4m0xFMLfvtgAyD6XIj57mqDYXis4JHK+3KGXUfrqdMxfI8pXqRtuAMwhcTKeaZlkB6HJAiSKjaDbe1tRsbh6AK4FtPghPdw+wCxOQwLoNzWNBXqQq8B5XgSYkEqLLio6OEt6m+rtQdcEtckn0IlxJbhsFyqzeHb8/XnysGEWVXM3urkNNe8bm1jmQy9AX7RTPboVRuUFqG4nYaenSlIAy9Qe6PQ1LQGJT7t3I657LqT/w9Huyy12E6QF/FMG/ym5WBSkzNIoRBKls0JbDFuAK/Ml6IhiQAy41J7IFlFrHeU4jPUv5KeTHNaIwIDAQAB",
-  "permissions": ["activeTab", "storage", "clipboardWrite", "sidePanel", "nativeMessaging", "declarativeNetRequest", "debugger", "tabs"],
+  "permissions": ["activeTab", "storage", "clipboardWrite", "sidePanel", "nativeMessaging", "declarativeNetRequest", "debugger", "tabs", "scripting"],
   "host_permissions": ["<all_urls>"],
   "icons": {
     "16": "icons/icon16.png",

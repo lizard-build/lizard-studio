@@ -3,6 +3,7 @@
 // above the bar; the accent picker opens upward as well.
 (function () {
   const RK = window.RK;
+  if (RK.toolbar) return; // double injection (programmatic + manifest) — keep the live instance
   const GROUPS = [
     ["measure", "Measure"],
     ["inspect", "Inspect"],

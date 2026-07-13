@@ -1,11 +1,58 @@
 // Minimal service worker: relay toggle requests to the active tab's content script.
 // Everything else lives in the content scripts — no network, no remote state.
 
+// ---- content-script injection ----------------------------------------------
+// Manifest content_scripts only reach pages loaded AFTER the extension is
+// installed/updated; tabs that were already open get nothing until reloaded —
+// the main reason the toolbar didn't come up right after installing. Inject
+// programmatically into existing tabs on install, and on demand whenever a
+// show/toggle message finds nobody listening in a tab the user can see.
+const CONTENT_FILES = chrome.runtime.getManifest().content_scripts[0].js;
+
+async function ensureContentScript(tabId) {
+  try {
+    // Probe first: is our script already there? While we're in the page, sweep
+    // out an overlay left by a previous extension version — its isolated world
+    // is orphaned but its DOM survives, and a fresh injection would otherwise
+    // stack a second toolbar on top of the dead one.
+    const [probe] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        if (window.RK) return true;
+        const stale = document.getElementById("lizard-studio-host");
+        if (stale) stale.remove();
+        return false;
+      },
+    });
+    if (probe && probe.result) return true;
+    await chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_FILES });
+    return true;
+  } catch (_) {
+    return false; // restricted page (chrome://, Web Store, ...) — nothing to inject into
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.tabs.query({}, (tabs) => {
+    for (const t of tabs) if (t.id != null) ensureContentScript(t.id);
+  });
+});
+
+// Send `type` to one tab; if nothing answers and injection is allowed, put the
+// content scripts in (install/update case, or the page hasn't hit document_idle
+// yet) and resend. Failures on restricted pages stay silent as before.
+function sendToTab(tabId, type, injectIfMissing) {
+  chrome.tabs.sendMessage(tabId, { type }).catch(() => {
+    if (!injectIfMissing) return;
+    ensureContentScript(tabId).then((ok) => {
+      if (ok) chrome.tabs.sendMessage(tabId, { type }).catch(() => {});
+    });
+  });
+}
+
 function toggleToolbar(tab) {
   if (!tab || !tab.id) return;
-  chrome.tabs.sendMessage(tab.id, { type: "RK_TOGGLE_TOOLBAR" }).catch(() => {
-    // Content script may not be injected on this page (e.g. chrome:// URLs). Ignore.
-  });
+  sendToTab(tab.id, "RK_TOGGLE_TOOLBAR", true);
 }
 
 // Clicking the extension icon (or its keyboard shortcut) toggles BOTH the
@@ -77,10 +124,31 @@ chrome.runtime.onConnect.addListener((port) => {
 function showToolbarOnActiveTab() {
   chrome.tabs.query({}, (tabs) => {
     for (const t of tabs) {
-      if (t.id != null) chrome.tabs.sendMessage(t.id, { type: "RK_SHOW_TOOLBAR" }).catch(() => {});
+      // Inject-on-miss only for tabs the user can see: a foreground tab with no
+      // listener means the content script never arrived (extension installed
+      // after the page loaded, or document_idle hasn't fired yet).
+      if (t.id != null) sendToTab(t.id, "RK_SHOW_TOOLBAR", t.active);
     }
   });
 }
+
+// The show broadcast above is one-shot, at panel-connect time — a background
+// tab ignores it (visibilityState check in main.js) and never hears it again.
+// While the panel is open, catch up whatever tab comes to the front, so
+// "panel open ⇒ toolbar up" holds on the tab the user is actually looking at,
+// not just the one that was in front when the panel opened.
+function catchUpActiveTab(tabId) {
+  if (panelPorts.size === 0) return;
+  sendToTab(tabId, "RK_SHOW_TOOLBAR", true);
+}
+chrome.tabs.onActivated.addListener(({ tabId }) => catchUpActiveTab(tabId));
+chrome.windows.onFocusChanged.addListener((winId) => {
+  if (winId === chrome.windows.WINDOW_ID_NONE) return;
+  chrome.tabs.query({ active: true, windowId: winId }, (tabs) => {
+    const t = tabs && tabs[0];
+    if (t && t.id != null) catchUpActiveTab(t.id);
+  });
+});
 
 // Tell every tab's content script to hide the Lizard Studio toolbar. Used when the
 // side panel closes. hide() is idempotent and a no-op where the bar isn't shown.

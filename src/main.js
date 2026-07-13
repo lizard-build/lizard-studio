@@ -4,6 +4,10 @@
 // restored here: the global accent color, and whether the toolbar shell was open.
 (function () {
   const RK = window.RK;
+  // Double injection (programmatic + manifest) must not bootstrap twice — a
+  // second pass would stack another onMessage listener and re-run the restore.
+  if (RK.__bootstrapped) return;
+  RK.__bootstrapped = true;
 
   // Restore the one persisted preference — the global accent color — before the
   // user opens the toolbar, so the swatch and any tools show the remembered hue.
