@@ -4499,7 +4499,7 @@
     planSec.appendChild(el("div", "usage-menu-head", "Plan usage"));
     if (usageState.rows.length) {
       for (const row of usageState.rows) {
-        planSec.appendChild(usageMenuRow(normalizeUsageLabel(row.label), row.pct, row.pct + "%", row.resets, true));
+        planSec.appendChild(usageMenuRow(normalizeUsageLabel(row.label), row.pct, row.pct + "%", row.resets));
       }
     } else {
       planSec.appendChild(el("div", "usage-menu-empty", usageState.fetching ? "Loading…" : "Not available yet"));

@@ -538,10 +538,9 @@ body {
 }
 .usage-menu-sec { display: flex; flex-direction: column; gap: 12px; }
 .usage-menu-head {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-tertiary);
-  letter-spacing: 0.02em;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
 }
 .usage-menu-empty { font-size: 12px; color: var(--text-tertiary); }
 .usage-menu-row { display: flex; flex-direction: column; gap: 7px; }
@@ -567,7 +566,6 @@ body {
 /* Resets note matches the context value exactly (same size/weight/color). */
 .usage-menu-row-resets { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
 .usage-menu-row-val { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
-.usage-menu-row-val.strong { color: var(--text-primary); }
 
 .icon-btn {
   appearance: none;
