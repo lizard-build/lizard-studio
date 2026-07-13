@@ -1435,20 +1435,28 @@
   }
 
   function collectUsageText(probe, d) {
+    const push = (s) => { if (s) probe.buf += (probe.buf ? "\n" : "") + s; };
+    const stdout = (s) => {
+      const out = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(s || "");
+      return out ? out[1] : "";
+    };
     if (d.type === "assistant") {
       for (const b of (d.message && d.message.content) || []) {
-        if (b && b.type === "text" && b.text) probe.buf += (probe.buf ? "\n" : "") + b.text;
+        if (b && b.type === "text" && b.text) push(b.text);
       }
     } else if (d.type === "user") {
       const content = d.message && d.message.content;
-      if (typeof content === "string") {
-        const out = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(content);
-        if (out) probe.buf += (probe.buf ? "\n" : "") + out[1];
-      } else if (Array.isArray(content)) {
+      if (typeof content === "string") push(stdout(content));
+      else if (Array.isArray(content)) {
         for (const b of content) {
-          if (b && b.type === "text" && b.text) probe.buf += (probe.buf ? "\n" : "") + b.text;
+          if (b && b.type === "text" && b.text) push(b.text);
         }
       }
+    } else if (d.type === "system" && typeof d.content === "string") {
+      // The CLI delivers `/usage`'s real output as a system/local_command event
+      // (`<local-command-stdout>…% used…</local-command-stdout>`), not as an
+      // assistant turn — this is where the plan numbers actually come from.
+      push(stdout(d.content));
     }
   }
 
@@ -1474,7 +1482,14 @@
     refreshUsageUI();
   }
 
+  // The CLI answers a local, zero-turn command (/usage and friends) with a
+  // synthetic assistant turn whose text is exactly "No response requested." —
+  // it's a no-op marker, never meaningful to the user. Drop it in both the live
+  // and replay paths (both flow through addText) so background /usage probes
+  // don't leave these bubbles behind when the transcript is replayed.
+  const NO_RESPONSE_RE = /^No response requested\.?$/i;
   function addText(chat, body, text) {
+    if (NO_RESPONSE_RE.test((text || "").trim())) return;
     attachAssistantRow(chat, body);
     closeToolGroup(chat);
     if (chat.pendingUsageCard) {
