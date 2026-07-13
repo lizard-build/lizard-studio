@@ -1557,6 +1557,32 @@ function pickFolder(id) {
     });
     return;
   }
+  if (process.platform === "win32") {
+    // Native Explorer folder chooser via PowerShell's FolderBrowserDialog.
+    // -STA is required for the WinForms dialog; on Win10/11 it renders the
+    // modern Vista-style picker. Empty stdout == the user cancelled.
+    const ps = [
+      "Add-Type -AssemblyName System.Windows.Forms;",
+      "$d = New-Object System.Windows.Forms.FolderBrowserDialog;",
+      "$d.Description = 'Choose a project folder for Claude Code';",
+      "$d.ShowNewFolderButton = $true;",
+      "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.SelectedPath) }",
+    ].join(" ");
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-STA", "-Command", ps],
+      (err, stdout) => {
+        if (err) {
+          // No PowerShell / blocked -> let the panel ask for a path manually.
+          send({ type: "folder", id, path: null, manual: true });
+          return;
+        }
+        const p = stdout.trim();
+        send({ type: "folder", id, path: p ? p.replace(/\\$/, "") : null });
+      }
+    );
+    return;
+  }
   // Linux: try zenity, then kdialog. No GUI tool -> tell the panel to ask for a path.
   execFile("zenity", ["--file-selection", "--directory"], (err, stdout) => {
     if (!err) return send({ type: "folder", id, path: stdout.trim() });
