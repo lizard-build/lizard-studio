@@ -6680,7 +6680,7 @@
         <span id="ob-line-1" class="ob-step-line done"></span>
         <div id="ob-node-claude" class="ob-step done">
           <span id="ob-step-claude" class="ob-step-dot"></span>
-          <span class="ob-step-label">Install Claude Code</span>
+          <span class="ob-step-label">Install<br />Claude Code</span>
         </div>
         <span id="ob-line-2" class="ob-step-line done"></span>
         <div id="ob-node-link" class="ob-step current">
@@ -6715,7 +6715,7 @@
         <p>Almost there – install Claude Code to proceed. Paste this in your terminal:</p>
         <div id="ob-os-toggle" class="ob-os-toggle" role="tablist" aria-label="Operating system">
           <button class="ob-os-tab" data-os="sh" role="tab">macOS / Linux</button>
-          <button class="ob-os-tab" data-os="ps" role="tab">Windows PowerShell</button>
+          <button class="ob-os-tab" data-os="ps" role="tab">Windows PS</button>
           <button class="ob-os-tab" data-os="cmd" role="tab">Windows CMD</button>
         </div>
         <div class="cmd-row">
