@@ -15,8 +15,9 @@ you ran the `claude` CLI in a terminal.
 
 ## Who operates this extension
 
-Lizard Studio is an open-source project. There is no backend service and no
-company account behind it. The extension talks only to:
+Lizard Studio is published by **Dragon Labs LLC** as an open-source project.
+Dragon Labs LLC operates no backend service for the extension and receives no
+user data through it. The extension talks only to:
 
 1. A small **native messaging host** that you install on your own machine,
    which launches the `claude` command-line tool locally; and
@@ -99,4 +100,5 @@ project's public repository, with a new "Last updated" date.
 ## Contact
 
 Questions about this policy can be raised as an issue in the project's GitHub
-repository: <https://github.com/lizard-build/lizard-studio>.
+repository (<https://github.com/lizard-build/lizard-studio>) or directed to
+Dragon Labs LLC.

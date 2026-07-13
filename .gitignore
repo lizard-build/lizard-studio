@@ -10,3 +10,8 @@ src/host/spawn-shim.mjs
 src/host/.spawn-token
 
 .DS_Store
+
+# Chrome Web Store upload packages built by scripts/build-zip.sh
+dist/
+# Local npm pack artifact of the host
+*.tgz
