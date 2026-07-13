@@ -6143,10 +6143,14 @@
   function showOnboarding(stage = "link") {
     if (!mounted) return;
     const link = stage !== "claude";
-    // Stepper: Install extension (done) → Install Claude Code → Link up. Only the
-    // middle/last roles swap by stage; both connector lines stay green (markup).
+    // Stepper: Install extension (done) → Install Claude Code → Link up. Steps
+    // complete strictly in order: a step after the current one always renders
+    // pending (empty ring, grey connector), even when it's technically already
+    // satisfied — on the "claude" stage the host IS linked, but showing step 3
+    // checked while step 2 is still current would read as nonsense.
     setObNode(els.obNodeClaude, els.obDotClaude, link ? "done" : "current");
-    setObNode(els.obNodeLink, els.obDotLink, link ? "current" : "done");
+    setObNode(els.obNodeLink, els.obDotLink, link ? "current" : "idle");
+    if (els.obLine2) els.obLine2.classList.toggle("done", link);
     if (els.obCardLink) els.obCardLink.classList.toggle("hidden", !link);
     if (els.obCardClaude) els.obCardClaude.classList.toggle("hidden", link);
     if (els.obWaitLabel)
@@ -6666,8 +6670,8 @@
       <!-- Display order: Install extension → Install Claude Code → Link up. The
            panel can only verify claude after the host links up, so the middle
            step shows done optimistically until the host reports back; if claude
-           is actually missing, showOnboarding("claude") flips it to current (and
-           Link up to done). Both connector lines stay green. -->
+           is actually missing, showOnboarding("claude") flips it to current and
+           demotes Link up to pending — steps complete strictly in order. -->
       <div class="onboarding-steps" aria-hidden="true">
         <div class="ob-step done">
           <span id="ob-step-install" class="ob-step-dot"></span>
