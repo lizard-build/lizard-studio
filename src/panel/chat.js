@@ -6349,15 +6349,15 @@
             </button>
             <div id="model-menu" class="model-menu hidden"></div>
           </div>
-          <div class="usage-picker">
-            <button id="usage-btn" class="usage-btn" title="Usage"></button>
-            <div id="usage-menu" class="usage-menu hidden"></div>
-          </div>
           <div class="model-picker">
             <button id="effort-btn" class="model-btn effort-btn" title="Effort">
               <span class="effort-label">Medium</span>
             </button>
             <div id="effort-menu" class="model-menu hidden"></div>
+          </div>
+          <div class="usage-picker">
+            <button id="usage-btn" class="usage-btn" title="Usage"></button>
+            <div id="usage-menu" class="usage-menu hidden"></div>
           </div>
           <button id="send-btn" class="send-btn" title="Send"></button>
           <button id="stop-btn" class="stop-btn hidden" title="Interrupt"></button>
