@@ -5832,7 +5832,7 @@
   // suggestions, so an idle empty chat never spends the user's quota.
   const GREETING_SHORTCUTS = [
     "Summarize this tab",
-    "Redesign this tab dark theme",
+    "Redesign this tab in a dark theme",
     "Create a vite app and open on localhost",
   ];
   function greetFirstName() {
