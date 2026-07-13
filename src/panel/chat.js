@@ -6143,10 +6143,10 @@
   function showOnboarding(stage = "link") {
     if (!mounted) return;
     const link = stage !== "claude";
-    // Stepper: Install extension (always done) → Link up → Install Claude Code.
+    // Stepper: Install extension (done) → Install Claude Code → Link up. Only the
+    // middle/last roles swap by stage; both connector lines stay green (markup).
+    setObNode(els.obNodeClaude, els.obDotClaude, link ? "done" : "current");
     setObNode(els.obNodeLink, els.obDotLink, link ? "current" : "done");
-    setObNode(els.obNodeClaude, els.obDotClaude, link ? "idle" : "current");
-    if (els.obLine2) els.obLine2.classList.toggle("done", !link);
     if (els.obCardLink) els.obCardLink.classList.toggle("hidden", !link);
     if (els.obCardClaude) els.obCardClaude.classList.toggle("hidden", link);
     if (els.obWaitLabel)
@@ -6210,7 +6210,6 @@
     els.obDotLink = root.querySelector("#ob-step-linkdot");
     els.obNodeClaude = root.querySelector("#ob-node-claude");
     els.obDotClaude = root.querySelector("#ob-step-claude");
-    els.obLine2 = root.querySelector("#ob-line-2");
     els.obCardLink = root.querySelector("#ob-card-link");
     els.obCardClaude = root.querySelector("#ob-card-claude");
     els.obWaitLabel = root.querySelector("#ob-wait-label");
@@ -6664,23 +6663,25 @@
     </div>
 
     <div id="chat-onboarding" class="chat-onboarding hidden">
-      <!-- Steps reflect what the panel can actually verify: the extension is
-           running, then the host links up, then it reports whether the claude
-           CLI is installed. showOnboarding() drives which one is current. -->
+      <!-- Display order: Install extension → Install Claude Code → Link up. The
+           panel can only verify claude after the host links up, so the middle
+           step shows done optimistically until the host reports back; if claude
+           is actually missing, showOnboarding("claude") flips it to current (and
+           Link up to done). Both connector lines stay green. -->
       <div class="onboarding-steps" aria-hidden="true">
         <div class="ob-step done">
           <span id="ob-step-install" class="ob-step-dot"></span>
           <span class="ob-step-label">Install extension</span>
         </div>
         <span id="ob-line-1" class="ob-step-line done"></span>
+        <div id="ob-node-claude" class="ob-step done">
+          <span id="ob-step-claude" class="ob-step-dot"></span>
+          <span class="ob-step-label">Install Claude Code</span>
+        </div>
+        <span id="ob-line-2" class="ob-step-line done"></span>
         <div id="ob-node-link" class="ob-step current">
           <span id="ob-step-linkdot" class="ob-step-dot"></span>
           <span class="ob-step-label">Link up</span>
-        </div>
-        <span id="ob-line-2" class="ob-step-line"></span>
-        <div id="ob-node-claude" class="ob-step">
-          <span id="ob-step-claude" class="ob-step-dot"></span>
-          <span class="ob-step-label">Install Claude Code</span>
         </div>
       </div>
 
