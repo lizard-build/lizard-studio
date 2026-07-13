@@ -186,7 +186,10 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v20: security hardening — spawn token handed to the shim via a 0600 file
 //      (not ps-visible argv); bridge/spawn tokens scrubbed from host.log;
 //      config reads/writes confined to folders the user actually opened.
-const HOST_VERSION = 20;
+// v21: Windows `spawn EINVAL` fix — the npm claude.cmd shim can't be spawned
+//      directly on modern Node (CVE-2024-27980), so we resolve its cli.js and
+//      run it with node instead. macOS/Linux and the .exe installer unchanged.
+const HOST_VERSION = 21;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -534,6 +537,42 @@ log("claude resolved to", CLAUDE, "exists=", existsSync(CLAUDE));
 
 // The node that runs this host also runs the MCP relay we hand to claude.
 const NODE = (CONFIG.nodePath && existsSync(CONFIG.nodePath)) ? CONFIG.nodePath : process.execPath;
+
+// How every claude spawn is actually invoked: `cmd` + `prefix` ++ our args.
+//
+// On Windows the global npm install exposes claude as claude.cmd, and Node
+// (≥18.20 / ≥20.12) throws `spawn EINVAL` when a .cmd/.bat is spawned without a
+// shell — the CVE-2024-27980 mitigation. That's the "Failed to start claude:
+// spawn EINVAL" users hit on Windows. Setting `shell:true` would route our
+// JSON-bearing args (--mcp-config, --settings, --append-system-prompt) through
+// cmd.exe, which mangles the embedded quotes. So instead we find the CLI's own
+// cli.js (the .cmd shim is just a node launcher) and run it with node directly —
+// an .exe, spawned verbatim with the args array untouched. Non-Windows and the
+// standalone .exe installer are unaffected and spawn CLAUDE as-is.
+function winClaudeJs(cmdPath) {
+  // npm's shim embeds the entry path relative to the shim's own dir, e.g.
+  //   "%dp0%\node_modules\@anthropic-ai\claude-code\cli.js"   (modern npm)
+  //   "%~dp0\node_modules\@anthropic-ai\claude-code\cli.js"   (older npm)
+  try {
+    const m = readFileSync(cmdPath, "utf8").match(/%~?dp0%?\\?([^"\r\n]+\.js)/i);
+    if (m) {
+      const abs = join(dirname(cmdPath), m[1]);
+      if (existsSync(abs)) return abs;
+    }
+  } catch {
+    /* unreadable shim — fall through to the well-known layout */
+  }
+  const guess = join(dirname(cmdPath), "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+  return existsSync(guess) ? guess : null;
+}
+const CLAUDE_SPEC = (() => {
+  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(CLAUDE)) {
+    const js = winClaudeJs(CLAUDE);
+    if (js) return { cmd: NODE, prefix: [js] };
+  }
+  return { cmd: CLAUDE, prefix: [] };
+})();
+if (CLAUDE_SPEC.prefix.length) log("claude launched via node ->", CLAUDE_SPEC.prefix[0]);
 
 // ---- browser bridge (claude MCP relay <-> the extension) -------------------
 // The MCP relay (mcp-browser.mjs) connects here over TCP; we forward each tool
@@ -1058,10 +1097,11 @@ class DetachedClaude extends EventEmitter {
 // Every claude the host runs goes through here, so the Gatekeeper story is
 // handled in one place for sessions, the command harvest and auth alike.
 function spawnClaude(args, opts) {
+  const argv = [...CLAUDE_SPEC.prefix, ...args];
   if (DETACH && spawnPort && existsSync(SHIM_PATH)) {
-    return new DetachedClaude(CLAUDE, args, opts);
+    return new DetachedClaude(CLAUDE_SPEC.cmd, argv, opts);
   }
-  return spawn(CLAUDE, args, { cwd: opts.cwd, env: opts.env, stdio: ["pipe", "pipe", "pipe"] });
+  return spawn(CLAUDE_SPEC.cmd, argv, { cwd: opts.cwd, env: opts.env, stdio: ["pipe", "pipe", "pipe"] });
 }
 
 // ---- claude process management (multi-session) ------------------------------
