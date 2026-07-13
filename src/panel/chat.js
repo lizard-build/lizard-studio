@@ -3531,10 +3531,7 @@
           const paths = new Set(chat.diffFiles.map((f) => f.path));
           for (const p of chat.diffCollapsedFiles) if (!paths.has(p)) chat.diffCollapsedFiles.delete(p);
           if (!chat.diffFiles.length) chat.diffDrawerOpen = false;
-          if (chat.id === activeId) {
-            syncGitBar(chat);
-            updateGreeting(); // the "review my changes" chip keys off the diff
-          }
+          if (chat.id === activeId) syncGitBar(chat);
         }
         break;
       case "configRead":
@@ -5820,10 +5817,8 @@
   }
 
   // ---- empty-chat greeting ---------------------------------------------------
-  // Gemini-style hero for a blank chat: a time-of-day hello (personalized once
-  // the host reports the OS user's name) plus starter chips that adapt to what's
-  // actually in front of the user — the active browser tab, the picked folder's
-  // git state, and any uncommitted changes. Chips send their label as a prompt.
+  // Gemini-style hero for a blank chat: a time-of-day hello, personalized once
+  // the host reports the OS user's name. Purely decorative — no starter chips.
   function greetFirstName() {
     const n = (hostUser || "").trim();
     if (!n) return "";
@@ -5831,10 +5826,7 @@
     return first.charAt(0).toUpperCase() + first.slice(1);
   }
 
-  // Monotonic token so a slow activeTab() lookup from a superseded pass can't
-  // overwrite the chips a newer pass rendered.
-  let greetingToken = 0;
-  async function updateGreeting() {
+  function updateGreeting() {
     if (!els.greeting) return;
     const chat = chats.get(activeId);
     // `empty` alone isn't enough: bash-mode runs and queued bubbles land in
@@ -5849,53 +5841,6 @@
       h >= 18 && h < 23 ? "Good evening" : "Up late";
     const name = greetFirstName();
     els.greetingHello.textContent = name ? `${word}, ${name}` : word;
-    const token = ++greetingToken;
-    const chips = await buildGreetingSuggestions(chat);
-    if (token !== greetingToken || els.greeting.classList.contains("hidden")) return;
-    renderGreetingChips(chat, chips);
-  }
-
-  function renderGreetingChips(chat, chips) {
-    els.greetingChips.replaceChildren();
-    for (const text of chips.slice(0, 3)) {
-      const b = el("button", "greeting-chip", text);
-      b.type = "button";
-      b.title = text;
-      b.addEventListener("click", () => {
-        // Stale chip on a switched-away tab — sendPrompt targets activeId.
-        if (chats.get(activeId) !== chat) return;
-        if (chat.bashMode) exitBashMode(chat); // a chip is a prompt, not a shell command
-        els.input.value = text;
-        autosize();
-        sendPrompt();
-      });
-      els.greetingChips.appendChild(b);
-    }
-  }
-
-  async function buildGreetingSuggestions(chat) {
-    const out = [];
-    // Active browser tab (skip chrome:// and the extension's own pages). The
-    // model already receives every open tab's title+URL as auto-context, so a
-    // title-quoting prompt is enough for it to know which page is meant.
-    try {
-      const tab = await activeTab();
-      const url = (tab && tab.url) || "";
-      if (url && !/^chrome(-extension)?:\/\//i.test(url)) {
-        const title = ((tab.title || "").replace(/\s+/g, " ").trim());
-        out.push(title ? `Summarize "${title.length > 34 ? title.slice(0, 33) + "…" : title}"` : "Summarize my current tab");
-      }
-    } catch (_) {}
-    if (chat.cwd) {
-      const name = folderLabel(chat.cwd);
-      if (Array.isArray(chat.diffFiles) && chat.diffFiles.length) out.push("Review my uncommitted changes");
-      else if (chat.isRepo) out.push(`What changed recently in ${name}?`);
-      out.push(`Explain how ${name} works`);
-    } else {
-      // No folder yet — sendPrompt() opens the picker first, keeping the text.
-      out.push("What can you help me with?");
-    }
-    return out;
   }
 
   // ---- git branch chip ------------------------------------------------------
@@ -6231,7 +6176,6 @@
     els.stack = root.querySelector("#chat-stack");
     els.greeting = root.querySelector("#chat-greeting");
     els.greetingHello = root.querySelector("#greeting-hello");
-    els.greetingChips = root.querySelector("#greeting-chips");
     els.input = root.querySelector("#composer-input");
     els.contextChips = root.querySelector("#context-chips");
     els.attachThumbs = root.querySelector("#attach-thumbs");
@@ -6549,16 +6493,8 @@
     });
     mounted = true;
 
-    // Keep the greeting chips honest while the panel idles on an empty chat:
-    // re-derive them when the user switches/loads browser tabs, and refresh
-    // the time-of-day line every few minutes (it can cross a boundary while
-    // the panel sits open). All no-ops once a conversation starts.
-    if (chrome.tabs && chrome.tabs.onActivated) {
-      chrome.tabs.onActivated.addListener(() => updateGreeting());
-      chrome.tabs.onUpdated.addListener((tabId, info) => {
-        if (info.title || info.url) updateGreeting();
-      });
-    }
+    // Refresh the greeting's time-of-day line every few minutes — it can cross
+    // a boundary while the panel idles open on an empty chat.
     setInterval(() => {
       if (els.greeting && !els.greeting.classList.contains("hidden")) updateGreeting();
     }, 5 * 60 * 1000);
@@ -6629,13 +6565,11 @@
         </div>
         <div id="tasks-drawer-body" class="git-diff-drawer-body tasks-drawer-body"></div>
       </div>
-      <!-- Time-of-day greeting + context-aware starter chips. Shown while the
-           active chat is empty (same lifecycle as the setup chips); the chips
-           adapt to the active browser tab and the picked folder's git state. -->
+      <!-- Time-of-day greeting, shown while the active chat is empty (same
+           lifecycle as the setup chips below the composer). -->
       <div id="chat-greeting" class="chat-greeting hidden">
         <div id="greeting-hello" class="greeting-hello">Hello</div>
         <div class="greeting-sub">Where should we start?</div>
-        <div id="greeting-chips" class="greeting-chips"></div>
       </div>
     </div>
     <div class="composer">
