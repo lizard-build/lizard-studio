@@ -495,8 +495,8 @@ const BROWSER_HINT =
   "browser_eval (run JS and read anything — DOM, app state, localStorage, fetch), browser_console (recent logs + exceptions), browser_network (recent requests), browser_screenshot. " +
   "Act: browser_click, browser_type, browser_fill, browser_key, browser_navigate, browser_reload, browser_upload_file (attach a local file to a page's file input or drop zone by absolute path — no need to click the input or deal with the OS file dialog). " +
   "Prefer browser_snapshot to get @refs, then target clicks/typing/fills by ref rather than guessing selectors. " +
-  "Every user message may be preceded by a short '[Open browser tabs]' block auto-listing currently open tabs (title + URL), with a leading → marking the one the user is actively viewing — that's environment context the extension injected, not something the user typed. " +
-  "It only has title/URL, so when the user refers to \"this page\", \"the open tab\", what they're \"looking at\", or asks you to debug or drive a live site, still call browser_info / browser_dom / browser_snapshot (targeting that tabId if it's not the active one) instead of guessing from the title alone. " +
+  "The FIRST user message of a conversation may be preceded by a one-time '[Open browser tabs]' snapshot listing the tabs open at that moment (title + a SHORTENED URL — query string and #fragment stripped), with a leading → marking the one the user was viewing — that's environment context the extension injected, not something the user typed. It is NOT resent on later turns and it can go stale, so call browser_tabs whenever you need the current list, a tab's full URL, or its numeric tabId. " +
+  "Since the snapshot only has title/truncated-URL, when the user refers to \"this page\", \"the open tab\", what they're \"looking at\", or asks you to debug or drive a live site, still call browser_info / browser_dom / browser_snapshot (targeting that tabId if it's not the active one) instead of guessing from the title alone. " +
   "Console and network capture begin when browser_console / browser_network first attach to a tab, so if they come back empty, call browser_reload (or re-trigger the action yourself, e.g. browser_click) rather than asking the user to reload — then call browser_console / browser_network again.";
 
 // ---- Chrome native-messaging framing ---------------------------------------
@@ -1010,7 +1010,10 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
     args.push("--mcp-config", mcp);
     args.push(
       "--allowedTools",
-      "mcp__browser__browser_info,mcp__browser__browser_dom,mcp__browser__browser_console,mcp__browser__browser_network,mcp__browser__browser_screenshot,mcp__browser__browser_snapshot"
+      // browser_tabs is read-only (title/url/active metadata — the same data the
+      // panel injects as its one-time snapshot), so pre-allow it too: the panel
+      // only ships the open-tabs list once, and the model refreshes it on demand.
+      "mcp__browser__browser_tabs,mcp__browser__browser_info,mcp__browser__browser_dom,mcp__browser__browser_console,mcp__browser__browser_network,mcp__browser__browser_screenshot,mcp__browser__browser_snapshot"
     );
     args.push("--append-system-prompt", BROWSER_HINT);
   }
