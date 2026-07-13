@@ -80,7 +80,8 @@
 //   { type:"error",   id, message }
 
 import { spawn, execFile, execSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import { existsSync, readFileSync, appendFileSync, readdirSync, mkdirSync, writeFileSync, renameSync, statSync, createReadStream, chmodSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -228,6 +229,33 @@ function fetchText(url, redirects = 1) {
   });
 }
 
+// Binary sibling of fetchText — used for the self-update tarball, whose bytes we
+// hash before trusting. Follows a few redirects (the npm registry hands tarballs
+// off to a CDN) and buffers the whole body.
+function fetchBuffer(url, redirects = 3) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: { "User-Agent": "lizard-studio-host" }, timeout: 15000 }, (res) => {
+      if (res.statusCode >= 301 && res.statusCode <= 308 && res.headers.location && redirects > 0) {
+        res.resume();
+        return resolve(fetchBuffer(new URL(res.headers.location, url).href, redirects - 1));
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error("HTTP " + res.statusCode + " for " + url));
+      }
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+    });
+    req.on("timeout", () => req.destroy(new Error("timeout fetching " + url)));
+    req.on("error", reject);
+  });
+}
+
+async function fetchJson(url) {
+  return JSON.parse((await fetchBuffer(url)).toString("utf8"));
+}
+
 async function refreshBundledSkill() {
   try {
     if (existsSync(SKILL_MARKER) && Date.now() - statSync(SKILL_MARKER).mtimeMs < SKILL_REFRESH_TTL_MS) {
@@ -254,23 +282,71 @@ refreshBundledSkill();
 // ---- host self-update -------------------------------------------------------
 // The extension updates via git/store, but this runtime copy only via
 // install.sh — so when the panel sees a stale HOST_VERSION it sends
-// `selfUpdate` and we refresh ourselves the same way the bundled skill does:
-// fetch from GitHub raw, atomic-swap on disk, then exit so Chrome relaunches
-// the new copy when the panel reconnects. host-config.json / launch.sh /
-// the browser manifests are machine-specific and never touched.
-const HOST_RAW_BASE = "https://raw.githubusercontent.com/lizard-build/lizard-studio/main/src/host";
+// `selfUpdate` and we refresh ourselves from the npm registry, atomic-swap on
+// disk, then exit so Chrome relaunches the new copy when the panel reconnects.
+//
+// We deliberately do NOT fetch from a mutable branch (raw .../main/...): that
+// would make any push to `main` execute instantly on every user's machine with
+// no gate. Instead we go through the same channel `npm install` would: the host
+// is published as @lizard-build/lizard-studio-host with OIDC provenance, so
+// each version is immutable and the registry advertises its content hash
+// (dist.integrity). We verify the downloaded tarball against that hash before
+// trusting a single byte of it. host-config.json / launch.sh / the browser
+// manifests are machine-specific and never touched.
+const HOST_PKG = "@lizard-build/lizard-studio-host";
+const HOST_REGISTRY = "https://registry.npmjs.org";
 const HOST_FILES = ["claude-host.mjs", "mcp-browser.mjs"];
+
+// Minimal gzip+tar reader — pulls specific files out of an npm tarball without
+// pulling in a dependency. npm entries are regular files rooted at "package/"
+// with short paths, so the ustar name/size/typeflag fields are all we need.
+function extractFromTarball(gzBuf, wanted) {
+  const tar = gunzipSync(gzBuf);
+  const want = new Set(wanted);
+  const out = {};
+  let off = 0;
+  while (off + 512 <= tar.length) {
+    const header = tar.subarray(off, off + 512);
+    if (header.every((b) => b === 0)) break; // end-of-archive zero block
+    const name = header.subarray(0, 100).toString("utf8").replace(/\0.*$/, "");
+    const prefix = header.subarray(345, 500).toString("utf8").replace(/\0.*$/, "");
+    const full = prefix ? `${prefix}/${name}` : name;
+    const size = parseInt(header.subarray(124, 136).toString("utf8").replace(/[\0 ]+$/, ""), 8) || 0;
+    const type = header[156]; // '0' (0x30) or NUL — a regular file
+    const dataStart = off + 512;
+    if ((type === 0x30 || type === 0) && want.has(full)) {
+      out[full] = tar.subarray(dataStart, dataStart + size).toString("utf8");
+    }
+    off = dataStart + Math.ceil(size / 512) * 512;
+  }
+  return out;
+}
 
 async function selfUpdate(id) {
   try {
-    // Fetch everything before swapping anything, so the pair can't end up
-    // mismatched when the second request fails.
-    const fetched = [];
-    for (const name of HOST_FILES) {
-      fetched.push([name, await fetchText(`${HOST_RAW_BASE}/${name}`)]);
+    // Resolve the newest published version and its immutable content hash.
+    const meta = await fetchJson(`${HOST_REGISTRY}/${HOST_PKG}/latest`);
+    const dist = meta && meta.dist;
+    if (!dist || !dist.tarball || !dist.integrity) {
+      throw new Error("registry metadata missing dist.tarball/integrity");
+    }
+    const tgz = await fetchBuffer(dist.tarball);
+    // dist.integrity is "<algo>-<base64>". Verify the bytes match the registry's
+    // hash before trusting anything inside — a mismatch means tampered/corrupt.
+    const [algo, expected] = String(dist.integrity).split("-");
+    const actual = createHash(algo).update(tgz).digest("base64");
+    if (actual !== expected) {
+      throw new Error(`tarball integrity mismatch (${algo}) — refusing to swap`);
+    }
+    const wanted = HOST_FILES.map((n) => `package/src/host/${n}`);
+    const files = extractFromTarball(tgz, wanted);
+    // Every file must be present, or we'd swap in a half a runtime.
+    for (const w of wanted) {
+      if (typeof files[w] !== "string") throw new Error("missing " + w + " in tarball");
     }
     let changed = false;
-    for (const [name, text] of fetched) {
+    for (const name of HOST_FILES) {
+      const text = files[`package/src/host/${name}`];
       const dest = join(HERE, name);
       if (existsSync(dest) && readFileSync(dest, "utf8") === text) continue;
       const tmp = dest + ".tmp";
@@ -278,8 +354,8 @@ async function selfUpdate(id) {
       renameSync(tmp, dest);
       changed = true;
     }
-    send({ type: "selfUpdate", id, updated: changed, restarting: changed });
-    log("selfUpdate:", changed ? "updated — restarting" : "already up to date");
+    send({ type: "selfUpdate", id, updated: changed, restarting: changed, version: meta.version });
+    log("selfUpdate:", changed ? `updated to ${meta.version} — restarting` : "already up to date");
     if (changed) {
       // Give the reply a beat to flush through stdout, then exit; the panel's
       // reconnect relaunches the freshly written host.
