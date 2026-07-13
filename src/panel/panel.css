@@ -53,6 +53,8 @@
      --warn-bright for the Auto mode chip, --warn-soft for warning banners. */
   --warn-bright: #ffd014;
   --warn-soft: #fbbf24;
+
+  --gradient-primary: linear-gradient(135deg, #10b981, #d4a574);
 }
 
 * {
@@ -734,10 +736,11 @@ body {
   pointer-events: none;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  /* Bottom-anchored: the hello sits just above the composer's folder chip. */
+  justify-content: flex-end;
   align-items: flex-start;
   gap: 4px;
-  padding: 18px 20px 56px;
+  padding: 18px 20px 10px;
   overflow: hidden;
   animation: greeting-in 0.35s ease both;
 }
@@ -751,8 +754,7 @@ body {
   font-weight: 600;
   letter-spacing: -0.02em;
   line-height: 1.25;
-  /* brand emerald melting into blue — the panel's take on Gemini's gradient */
-  background: linear-gradient(90deg, #34d399, #3b82f6 90%);
+  background: var(--gradient-primary);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
