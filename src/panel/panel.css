@@ -2840,6 +2840,10 @@ code.inline {
   flex-direction: column;
   width: 100%;
   max-width: 440px;
+  /* Fixed height so the modal doesn't resize when you switch tabs (Config's
+     CLAUDE.md editor is tall, Connection is short). Capped to the viewport on
+     short panels; the body scrolls / fills the remainder per tab. */
+  height: 560px;
   max-height: 100%;
   background: var(--bg-secondary);
   border: 1px solid var(--border-primary);
@@ -2905,6 +2909,7 @@ code.inline {
   padding: 18px;
   overflow-y: auto;
   flex: 1 1 auto;
+  min-height: 0;
   scrollbar-width: thin;
   scrollbar-color: var(--border-primary) transparent;
 }
