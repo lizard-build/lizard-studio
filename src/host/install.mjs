@@ -33,9 +33,14 @@ import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 
 const HOST_NAME = "com.lizard.code";
-// Fixed by the extension's manifest "key" — do not change unless the key changes.
-const DEFAULT_EXT_ID = "nhcgkijjijdinhldjohkmbbgjokobecd";
-const EXT_ID = process.env.RK_EXT_ID || DEFAULT_EXT_ID;
+// IDs the host trusts. The store build has no manifest "key", so Web Store
+// installs get the store-assigned ID; unpacked dev builds keep the key-derived
+// dev ID. Both must be allowed or one of the two install paths breaks.
+const DEFAULT_EXT_IDS = [
+  "kgbaeoalmkabpoglpjcdmppdmcipfdeh", // Chrome Web Store install
+  "nhcgkijjijdinhldjohkmbbgjokobecd", // unpacked dev build (manifest "key")
+];
+const EXT_IDS = process.env.RK_EXT_ID ? [process.env.RK_EXT_ID] : DEFAULT_EXT_IDS;
 
 const IS_WIN = process.platform === "win32";
 
@@ -222,7 +227,7 @@ function install() {
       description: "Lizard Claude Code chat host",
       path: launcherPath,
       type: "stdio",
-      allowed_origins: [`chrome-extension://${EXT_ID}/`],
+      allowed_origins: EXT_IDS.map((id) => `chrome-extension://${id}/`),
     }, null, 2) + "\n",
   );
 
@@ -251,7 +256,7 @@ function install() {
   console.log();
   console.log(`  node    : ${NODE_BIN}`);
   console.log(`  claude  : ${CLAUDE_BIN || "(not found — install @anthropic-ai/claude-code)"}`);
-  console.log(`  ext id  : ${EXT_ID}`);
+  console.log(`  ext ids : ${EXT_IDS.join(", ")}`);
   console.log(`  runtime : ${RUNTIME_DIR}  (log: ${join(RUNTIME_DIR, "host.log")})`);
   console.log();
   console.log("Reload the extension and open the side panel.");

@@ -134,12 +134,12 @@ section of the Dashboard.
   rejects it ("key field is not allowed in manifest"). `scripts/build-zip.sh`
   strips it automatically from the zipped copy; the repo manifest keeps it for
   local unpacked development.
-- **The published extension ID will change.** Without the `key`, the store
-  assigns its own ID (not the dev ID `nhcgkijjijdinhldjohkmbbgjokobecd`). After
-  the first upload, copy the store-assigned ID from the Dashboard and update the
-  native host so native messaging works for store users:
-  - `src/host/install.mjs` → `DEFAULT_EXT_ID`
-  Then republish the host to npm so installs trust the new ID.
+- **Extension IDs.** Without the `key`, the store assigned its own ID:
+  `kgbaeoalmkabpoglpjcdmppdmcipfdeh`. Since host v1.0.15,
+  `src/host/install.mjs` (`DEFAULT_EXT_IDS`) allows both this store ID and the
+  dev ID `nhcgkijjijdinhldjohkmbbgjokobecd`, so store and unpacked installs
+  work with the same published host. If either ID ever changes, update
+  `DEFAULT_EXT_IDS` and republish the host to npm.
 - Expect manual review because of `debugger` + `nativeMessaging` + `<all_urls>`.
 - Build the upload zip with `./scripts/build-zip.sh` (excludes `.git`, the host
   `.tgz`, docs, and `src/host`).
