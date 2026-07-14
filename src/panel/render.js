@@ -142,7 +142,8 @@
     html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     html = html.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
     html = html.replace(/\b_([^_\n]+)_\b/g, "<em>$1</em>");
-    // Links: only http(s) and relative — never javascript:
+    // Links: only absolute http(s) URLs are linkified — relative and any other
+    // scheme (javascript:, data:, …) are left as inert escaped text.
     html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, t, u) => {
       return `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`;
     });

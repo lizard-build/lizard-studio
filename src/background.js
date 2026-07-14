@@ -205,7 +205,7 @@ async function toggleSidePanel(tab) {
 // so several tabs can run the tool independently.
 const RF_RULE_BASE = 1000;
 function setResponsiveRule(on, tabId) {
-  if (tabId == null) return;
+  if (tabId == null) return Promise.resolve();
   const ruleId = RF_RULE_BASE + tabId;
   const addRules = on ? [{
     id: ruleId,
@@ -220,7 +220,7 @@ function setResponsiveRule(on, tabId) {
     },
     condition: { resourceTypes: ["sub_frame"], tabIds: [tabId] },
   }] : [];
-  chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId], addRules })
+  return chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId], addRules })
     .catch((err) => console.error("[RK] DNR updateSessionRules", err));
 }
 
@@ -234,7 +234,7 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (info.status === "loading") setResponsiveRule(false, tabId);
 });
 
-chrome.runtime.onMessage.addListener((msg, sender) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
   switch (msg.type) {
     case "RK_CLOSE_SIDEPANEL":
@@ -242,8 +242,12 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
       panelPorts.forEach((p) => p.postMessage({ cmd: "close" }));
       break;
     case "RK_RESPONSIVE_ON":
-      setResponsiveRule(true, sender.tab && sender.tab.id);
-      break;
+      // Ack only after the DNR rule is actually live so the content script can
+      // load the iframe knowing the CSP/X-Frame-Options strip is in effect.
+      setResponsiveRule(true, sender.tab && sender.tab.id).finally(() => {
+        try { sendResponse({ ok: true }); } catch (e) {}
+      });
+      return true; // async response — keep the message channel open
     case "RK_RESPONSIVE_OFF":
       setResponsiveRule(false, sender.tab && sender.tab.id);
       break;

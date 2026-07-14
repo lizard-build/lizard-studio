@@ -238,9 +238,17 @@
     id: ID, name: "Responsive mode", group: "layout",
     icon: `<svg viewBox="0 0 256 256" fill="currentColor"><path d="M176,16H80A24,24,0,0,0,56,40V216a24,24,0,0,0,24,24h96a24,24,0,0,0,24-24V40A24,24,0,0,0,176,16Zm8,200a8,8,0,0,1-8,8H80a8,8,0,0,1-8-8V40a8,8,0,0,1,8-8h96a8,8,0,0,1,8,8ZM140,60a12,12,0,1,1-12-12A12,12,0,0,1,140,60Z"/></svg>`,
     enable() {
-      // Ask the worker to strip framing headers while we're on, then build the UI.
-      try { chrome.runtime.sendMessage({ type: "RK_RESPONSIVE_ON" }).catch(() => {}); } catch (e) {}
-      build();
+      // Register the header-stripping DNR rule in the worker BEFORE the iframe
+      // loads. build() sets iframe.src immediately; if the rule isn't live yet, a
+      // site with `frame-ancestors 'none'` / X-Frame-Options can refuse the first
+      // load and only come up after a manual reload. So wait for the worker's ack,
+      // then build — but bail if the tool was switched off during the round-trip
+      // (a late build() would leak DOM past teardown). RK.on stays synchronous so
+      // it lands in the activation bag and is auto-removed on deactivate.
+      const start = () => { if (RK.isActive(ID) && !root) build(); };
+      try {
+        chrome.runtime.sendMessage({ type: "RK_RESPONSIVE_ON" }).then(start, start);
+      } catch (e) { start(); }
       RK.on("resize", relayout);
     },
     disable() {

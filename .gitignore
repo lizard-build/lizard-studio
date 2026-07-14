@@ -1,4 +1,4 @@
-# Legacy in-repo host artifacts (install.sh now generates these in ~/.lizard-code/host).
+# Legacy in-repo host artifacts (install.sh now generates these in ~/.lizard-studio/host).
 # Kept ignored so older checkouts don't accidentally commit them.
 src/host/host-config.json
 src/host/launch.sh
@@ -8,6 +8,8 @@ src/host/shell-env.json
 src/host/spawn-shim.mjs
 # Per-run spawn-shim auth token (0600); written by claude-host.mjs.
 src/host/.spawn-token
+# Per-session mcp-config (0600, carries the bridge token); written by claude-host.mjs.
+src/host/.mcp-config-*.json
 
 .DS_Store
 

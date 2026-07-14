@@ -43,9 +43,18 @@ node -e '
 mkdir -p "$DEST/icons"
 cp icons/icon16.png icons/icon48.png icons/icon128.png "$DEST/icons/"
 
-# All extension source EXCEPT the native host (src/host ships via npm).
+# All extension source EXCEPT:
+#   - the native host (src/host ships via npm), and
+#   - the disabled terminal view: xterm vendor JS/CSS + src/panel/terminal.js.
+#     The panel.html never loads them, so ~290 KB of dead third-party code would
+#     otherwise bloat the store zip and draw reviewer questions. The *fonts*
+#     under src/terminal/vendor/fonts/ ARE used by panel.css, so keep those.
 mkdir -p "$DEST/src"
-( cd src && find . -type d -name host -prune -o -type f -print ) | while read -r f; do
+( cd src && find . -type d -name host -prune -o \
+    -type f \
+    ! -path './terminal/vendor/xterm*' \
+    ! -path './panel/terminal.js' \
+    -print ) | while read -r f; do
   mkdir -p "$DEST/src/$(dirname "$f")"
   cp "src/$f" "$DEST/src/$f"
 done

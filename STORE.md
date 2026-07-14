@@ -92,9 +92,14 @@ section of the Dashboard.
 
 ### `declarativeNetRequest`
 
-> Used for local request handling required by the in-panel tooling (e.g.
-> ensuring resources load correctly for the panel/preview). It applies static,
-> local rules only; no browsing data is collected or sent anywhere.
+> Used only by the Responsive-preview tool. When the user turns that tool on,
+> the extension installs a temporary session rule that removes framing headers
+> (X-Frame-Options and Content-Security-Policy frame-ancestors) from sub-frame
+> responses in that one tab, so the page being developed can be re-rendered
+> inside the device-preview iframe. The rule is scoped to the requesting tab and
+> to sub-frame requests only, and is removed the moment the tool is switched off
+> or the tab navigates/closes — it never weakens CSP for normal browsing, and no
+> browsing data is collected or sent anywhere.
 
 ### `sidePanel`
 
@@ -133,7 +138,6 @@ section of the Dashboard.
   the first upload, copy the store-assigned ID from the Dashboard and update the
   native host so native messaging works for store users:
   - `src/host/install.mjs` → `DEFAULT_EXT_ID`
-  - anything documenting the ID in `README.md`
   Then republish the host to npm so installs trust the new ID.
 - Expect manual review because of `debugger` + `nativeMessaging` + `<all_urls>`.
 - Build the upload zip with `./scripts/build-zip.sh` (excludes `.git`, the host

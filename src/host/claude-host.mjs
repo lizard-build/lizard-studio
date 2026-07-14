@@ -85,7 +85,7 @@
 import { spawn, execFile, execSync } from "node:child_process";
 import { randomBytes, createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { existsSync, readFileSync, appendFileSync, readdirSync, mkdirSync, writeFileSync, renameSync, statSync, createReadStream, chmodSync } from "node:fs";
+import { existsSync, readFileSync, appendFileSync, readdirSync, mkdirSync, writeFileSync, renameSync, statSync, createReadStream, chmodSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir, userInfo } from "node:os";
@@ -1120,7 +1120,17 @@ function spawnClaude(args, opts) {
 // a panel-supplied `id`. Each session tracks its own cwd / model / mode and its
 // resumable sessionId. Every host->panel message is tagged with the id so the
 // panel can route the stream back to the right tab.
-const sessions = new Map(); // id -> { id, child, cwd, model, effort, mode, sessionId, stderrBuf, permPending }
+const sessions = new Map(); // id -> { id, child, cwd, model, effort, mode, sessionId, stderrBuf, permPending, mcpConfigPath }
+// Sweep per-session mcp-config files left behind by a host that died before
+// killSession could unlink them (they carry the bridge token; owner-only, but
+// don't let them pile up).
+try {
+  for (const f of readdirSync(HERE)) {
+    if (f.startsWith(".mcp-config-") && f.endsWith(".json")) {
+      try { unlinkSync(join(HERE, f)); } catch { /* ignore */ }
+    }
+  }
+} catch { /* HERE unreadable — nothing to sweep */ }
 // Folders the user has genuinely opened this run (set on startClaude). config
 // reads/writes are confined to these — never a directory a message merely names.
 const openedCwds = new Set();
@@ -1199,7 +1209,16 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
         browser: { command: NODE, args: [MCP_RELAY], env: { RK_BRIDGE_PORT: String(bridgePort), RK_BRIDGE_TOKEN: BRIDGE_TOKEN, RK_BRIDGE_SESSION: id } },
       },
     });
-    args.push("--mcp-config", mcp);
+    // Write the mcp-config to an owner-only (0600) file and pass its PATH rather
+    // than the JSON inline: the bridge token rides in this config, and anything
+    // on claude's argv is world-readable via `ps -ww` / /proc/<pid>/cmdline to
+    // other local users — who could then drive the 127.0.0.1 bridge (incl.
+    // browser_eval). Same reasoning as SPAWN_TOKEN_FILE. Cleaned up in killSession.
+    const mcpConfigPath = join(HERE, ".mcp-config-" + id.replace(/[^A-Za-z0-9_.-]/g, "_") + ".json");
+    writeFileSync(mcpConfigPath, mcp, { mode: 0o600 });
+    chmodSync(mcpConfigPath, 0o600); // enforce owner-only regardless of umask
+    s.mcpConfigPath = mcpConfigPath;
+    args.push("--mcp-config", mcpConfigPath);
     args.push(
       "--allowedTools",
       // browser_tabs is read-only (title/url/active metadata — the same data the
@@ -1345,6 +1364,11 @@ function killSession(id) {
     }, 2500);
     hard.unref?.();
     child.once("exit", () => clearTimeout(hard));
+  }
+  // Drop the session's 0600 mcp-config (carries the bridge token) now that its
+  // claude no longer needs it.
+  if (s.mcpConfigPath) {
+    try { unlinkSync(s.mcpConfigPath); } catch { /* already gone */ }
   }
   sessions.delete(id);
 }
