@@ -121,9 +121,10 @@ section of the Dashboard.
 ## Assets checklist (upload separately)
 
 - Icon 128×128 — `icons/icon128.png` (present).
-- At least one screenshot 1280×800 or 640×400 (PNG/JPEG). Recommended: the side
-  panel chat next to a page, and the on-page toolkit in action.
-- Optional small promo tile 440×280.
+- Screenshots 1280×800 (present, in `store-assets/`):
+  - `store-assets/hero-1280x800.png` — the side-panel chat next to a page.
+  - `store-assets/toolkit-1280x800.png` — the on-page inspector + toolkit in action.
+- Optional small promo tile 440×280 (not yet made).
 - Category: **Developer Tools**.
 - Language, detailed description, and this single-purpose statement.
 
