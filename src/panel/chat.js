@@ -1450,9 +1450,6 @@
     // parse whatever we captured and release the gate so it can't wedge.
     clearTimeout(usageProbeTimer);
     usageProbeTimer = setTimeout(() => finishUsageProbe(chat), 8000);
-    // A probe is now genuinely in flight — if the popover is open with no data
-    // yet, swap its honest "—" placeholder for the loading skeleton.
-    if (!usageState.rows.length) refreshUsageUI();
   }
 
   function collectUsageText(probe, d) {
@@ -4623,26 +4620,6 @@
     return r;
   }
 
-  // Static "no data yet" row, used when we simply don't have plan numbers and
-  // no probe is in flight. Deliberately NOT a shimmering skeleton: a skeleton
-  // implies a load is imminent, but the probe can only run once a session goes
-  // idle — until then nothing is actually loading, so an animated placeholder
-  // would be a lie. Same geometry as the real/skeleton rows (empty 150px resets
-  // slot + fixed 34px "—") so the popover width never shifts, with a flat empty
-  // bar and no fill.
-  function usageUnknownRow(label) {
-    const r = el("div", "usage-menu-row");
-    const head = el("div", "usage-menu-row-head");
-    head.appendChild(el("span", "usage-menu-row-label", label));
-    const meta = el("div", "usage-menu-row-meta");
-    meta.appendChild(el("span", "usage-menu-row-resets", "")); // holds the 150px column
-    meta.appendChild(el("span", "usage-menu-row-val usage-pct", "—"));
-    head.appendChild(meta);
-    r.appendChild(head);
-    r.appendChild(el("div", "usage-bar")); // empty track, no fill
-    return r;
-  }
-
   function renderUsageMenu() {
     const menu = els.usageMenu;
     menu.innerHTML = "";
@@ -4671,21 +4648,13 @@
       for (const row of usageState.rows) {
         planSec.appendChild(usageMenuRow(normalizeUsageLabel(row.label), row.pct, row.pct + "%", row.resets, false, true));
       }
-    } else if (usageState.fetching) {
-      // A probe is actually in flight — shimmering skeletons are honest here:
-      // real numbers are moments away. Same geometry so they land without shift.
+    } else {
+      // No data yet — skeletons that occupy the exact row geometry so nothing
+      // shifts when values land. The label (real text) fixes the row height;
+      // only the reset note, %, and bar fill are masked.
       for (const label of ["5-hour limit", "Weekly · all models"]) {
         planSec.appendChild(usageSkeletonRow(label));
       }
-    } else {
-      // No data and nothing loading. Don't fake a "loading" shimmer and don't
-      // show stale numbers as if live — render an honest empty state instead.
-      // The plan probe runs the next time a chat session is idle (see
-      // refreshUsage / endTurn), which repopulates these.
-      for (const label of ["5-hour limit", "Weekly · all models"]) {
-        planSec.appendChild(usageUnknownRow(label));
-      }
-      planSec.appendChild(el("div", "usage-card-caption", "Updates when a chat is idle"));
     }
     menu.appendChild(planSec);
   }
