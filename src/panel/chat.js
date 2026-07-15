@@ -935,11 +935,15 @@
     const chat = chats.get(activeId);
     if (!chat) return;
     if (!Array.isArray(chat.contexts)) chat.contexts = [];
-    // Skip exact duplicates (same DOM node clicked twice). Keyed by DOM path,
-    // not the tag/id/class selector alone — two different elements (e.g.
-    // sibling cards with identical classes and no id) share a selector but
-    // have distinct paths, so they must both be kept.
-    const isDup = element.path
+    // Skip exact duplicates (same DOM node clicked twice). Keyed by the node's
+    // uid — a token the Selector mints per distinct DOM node, so it's exact:
+    // two different elements (e.g. sibling cards with identical classes and no
+    // id) get distinct uids and are both kept, even when a structural path
+    // heuristic would alias them onto the same key. Fall back to path, then the
+    // tag/id/class selector, for captures made before uid existed.
+    const isDup = element.uid
+      ? chat.contexts.some((c) => c.uid === element.uid)
+      : element.path
       ? chat.contexts.some((c) => c.path === element.path)
       : chat.contexts.some((c) => c.selector === element.selector && c.tag === element.tag);
     if (!isDup) chat.contexts.push(element);

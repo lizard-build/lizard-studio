@@ -48,11 +48,29 @@
     return s.length > 84 ? s.slice(0, 83) + "…" : s;
   }
 
+  // Stable per-node identity token. The captured element is serialized and
+  // shipped across the extension boundary (content script → background →
+  // panel), which drops the live DOM reference — so the panel can't dedupe by
+  // node identity directly. We mint one unique token per distinct node here,
+  // where the node is still live, and reuse it whenever the same node is
+  // clicked again. That gives the panel a collision-free dedup key: same node →
+  // same uid → deduped; two distinct nodes → distinct uids → both kept. This is
+  // exact, unlike pathOf()'s structural heuristic, which aliases two
+  // truly-distinct-but-symmetric nodes onto the same path.
+  const nodeIds = new WeakMap();
+  let nodeSeq = 0;
+  const idBase = "n" + Math.random().toString(36).slice(2, 8);
+  function uidOf(el) {
+    let id = nodeIds.get(el);
+    if (!id) { id = idBase + "-" + ++nodeSeq; nodeIds.set(el, id); }
+    return id;
+  }
+
   // A DOM-position path (tag + nth-of-type per ancestor, up to an id or 8
   // levels). Unlike selectorOf() — tag/id/class only — this tells apart two
-  // visually-identical siblings (e.g. repeated cards with no id), while still
-  // matching the same node across repeat clicks, so the chat panel can dedupe
-  // "same element clicked twice" without conflating distinct elements.
+  // visually-identical siblings (e.g. repeated cards with no id). It's kept as
+  // human-readable disambiguation for the agent prompt; node-identity dedup is
+  // uidOf()'s job, since pathOf() can still collide on symmetric DOMs.
   function pathOf(el) {
     const parts = [];
     let node = el;
@@ -316,6 +334,7 @@
     const text = (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 300);
     return {
       tag: el.tagName.toLowerCase(),
+      uid: uidOf(el),
       selector: selectorOf(el),
       path: pathOf(el),
       openTag: openingTag(el),
