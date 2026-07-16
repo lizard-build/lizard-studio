@@ -2487,6 +2487,46 @@ code.inline {
 }
 .bubble-thumbs:last-child { margin-bottom: 0; }
 
+/* Read-only context chips inside a sent (or queued) user bubble — a record of
+   what page/file/element attachments went out with the message. Mirrors the
+   composer's .ctx-chip look, minus the remove affordance. */
+.bubble-ctx {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.bubble-ctx:last-child { margin-bottom: 0; }
+.bubble-ctx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-secondary);
+  font-family: var(--font-family);
+  font-size: 10.5px;
+  line-height: 1.3;
+}
+.bubble-ctx-ic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+  color: inherit;
+}
+.bubble-ctx-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bubble-ctx-label.code { font-family: var(--font-mono); }
+
 /* Full-size image preview, opened by clicking any thumbnail above. */
 .image-viewer-overlay {
   position: fixed;

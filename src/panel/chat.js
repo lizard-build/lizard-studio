@@ -776,8 +776,38 @@
 
   // Thumbnail strip + markdown body, shared by live user bubbles and queued
   // ones (renderQueuedBubble adds the queued tag/cancel on top).
-  function buildBubble(text, attachments) {
+  // `contexts` — attached page/file/element contexts consumed by this message;
+  // rendered as a compact read-only chip row so what got sent stays visible
+  // after the composer chips clear.
+  function buildBubble(text, attachments, contexts) {
     const bubble = el("div", "bubble");
+    if (contexts && contexts.length) {
+      const strip = el("div", "bubble-ctx");
+      for (const c of contexts) {
+        const chip = el("span", "bubble-ctx-chip");
+        const ic = el("span", "bubble-ctx-ic");
+        let label;
+        let code = false;
+        if (c.kind === "page") {
+          ic.innerHTML = ICON("globe", 11);
+          label = c.title ? c.title.slice(0, 44) : c.url || "Page";
+          chip.title = c.url || c.title || "";
+        } else if (c.kind === "file") {
+          ic.innerHTML = ICON("file", 11);
+          label = c.name;
+          chip.title = c.name;
+        } else {
+          ic.innerHTML = ICON("selection", 11);
+          label = `<${c.tag}>`;
+          chip.title = c.selector || c.tag || "";
+          code = true;
+        }
+        chip.appendChild(ic);
+        chip.appendChild(el("span", "bubble-ctx-label" + (code ? " code" : ""), label));
+        strip.appendChild(chip);
+      }
+      bubble.appendChild(strip);
+    }
     if (attachments && attachments.length) {
       const thumbs = el("div", "bubble-thumbs");
       for (const a of attachments) {
@@ -802,7 +832,7 @@
   // synthetic "/login" one) pass no opts and stay plain.
   function userBubble(chat, text, attachments, opts) {
     const row = el("div", "msg msg-user");
-    const bubble = buildBubble(text, attachments);
+    const bubble = buildBubble(text, attachments, opts && opts.contexts);
     row.appendChild(bubble);
     if (opts && opts.real) {
       const turnIndex = ++chat.turnIndexCounter;
@@ -930,23 +960,33 @@
   // ---- page-element context (from the Selector tool) ------------------------
   // Called from panel.js when the in-page Selector clicks an element. Attaches
   // it to the active chat as a composer chip; sent with the next prompt.
+  // Same-context test for dedup. Keyed by the node's uid — a token the
+  // Selector mints per distinct DOM node, so it's exact: two different
+  // elements (e.g. sibling cards with identical classes and no id) get
+  // distinct uids and are both kept, even when a structural path heuristic
+  // would alias them onto the same key. Fall back to path, then the
+  // tag/id/class selector, for captures made before uid existed.
+  function sameContext(a, b) {
+    // Non-element attachments (whole page, file) dedupe on their own identity.
+    if (a.kind === "page" || b.kind === "page") return a.kind === b.kind && a.url === b.url;
+    if (a.kind === "file" || b.kind === "file") return a.kind === b.kind && a.name === b.name;
+    if (a.uid || b.uid) return a.uid === b.uid;
+    if (a.path || b.path) return a.path === b.path;
+    return a.selector === b.selector && a.tag === b.tag;
+  }
+  function dedupeContexts(list) {
+    const out = [];
+    for (const c of list) if (c && !out.some((o) => sameContext(o, c))) out.push(c);
+    return out;
+  }
+
   function addContext(element) {
     if (!element) return;
     const chat = chats.get(activeId);
     if (!chat) return;
     if (!Array.isArray(chat.contexts)) chat.contexts = [];
-    // Skip exact duplicates (same DOM node clicked twice). Keyed by the node's
-    // uid — a token the Selector mints per distinct DOM node, so it's exact:
-    // two different elements (e.g. sibling cards with identical classes and no
-    // id) get distinct uids and are both kept, even when a structural path
-    // heuristic would alias them onto the same key. Fall back to path, then the
-    // tag/id/class selector, for captures made before uid existed.
-    const isDup = element.uid
-      ? chat.contexts.some((c) => c.uid === element.uid)
-      : element.path
-      ? chat.contexts.some((c) => c.path === element.path)
-      : chat.contexts.some((c) => c.selector === element.selector && c.tag === element.tag);
-    if (!isDup) chat.contexts.push(element);
+    // Skip exact duplicates (same DOM node clicked twice).
+    if (!chat.contexts.some((c) => sameContext(c, element))) chat.contexts.push(element);
     renderContextChips();
     if (els.input) els.input.focus();
   }
@@ -1046,9 +1086,18 @@
         if (c.text) lines.push(`text: "${c.text}"`);
         return lines.join("\n");
       });
-      const url = elems[0] && elems[0].url;
-      const head = elems.length === 1 ? "Selected page element" : `${elems.length} selected page elements`;
-      blocks.push("```\n[" + head + (url ? " · " + url : "") + "]\n" + elBlocks.join("\n\n") + "\n```");
+      // One fenced block per source page: picks can come from different tabs,
+      // and labeling them all with the first element's URL misattributes them.
+      const groups = [];
+      elems.forEach((c, i) => {
+        const g = groups.find((g) => g.url === (c.url || ""));
+        if (g) g.blocks.push(elBlocks[i]);
+        else groups.push({ url: c.url || "", blocks: [elBlocks[i]] });
+      });
+      for (const g of groups) {
+        const head = g.blocks.length === 1 ? "Selected page element" : `${g.blocks.length} selected page elements`;
+        blocks.push("```\n[" + head + (g.url ? " · " + g.url : "") + "]\n" + g.blocks.join("\n\n") + "\n```");
+      }
     }
 
     return blocks.join("\n\n") + "\n\n";
@@ -4117,7 +4166,7 @@
   // bubble was previously frontmost instead of stacking it after everything.
   function renderQueuedBubble(chat, entry, opts) {
     const row = el("div", "msg msg-user queued");
-    row.appendChild(buildBubble(entry.text, entry.attachments));
+    row.appendChild(buildBubble(entry.text, entry.attachments, entry.contexts));
     const tag = el("div", "queued-tag");
     const cancel = el("button", "queued-cancel");
     cancel.type = "button";
@@ -4140,8 +4189,13 @@
     if (!Array.isArray(chat.queue) || !chat.queue.length) return;
     const entry = chat.queue.shift();
     if (entry.el && entry.el.parentNode) entry.el.remove();
-    chat.contexts = entry.contexts;
-    chat.attachments = entry.attachments;
+    // Merge, don't replace: anything picked/attached WHILE this entry sat in
+    // the queue (Selector picks land in chat.contexts, pastes in
+    // chat.attachments) belongs to it — the user attached it to the message
+    // they could see waiting. Restoring the queue-time snapshot verbatim used
+    // to wipe those late picks and the prompt went out bare.
+    chat.contexts = dedupeContexts(entry.contexts.concat(Array.isArray(chat.contexts) ? chat.contexts : []));
+    chat.attachments = entry.attachments.concat(Array.isArray(chat.attachments) ? chat.attachments : []);
     if (chat.id === activeId) {
       renderContextChips();
       renderAttachmentThumbs();
@@ -4230,7 +4284,10 @@
     // never as an editable/rewind target: the host's rewind counter and the
     // replay path both refuse to count /usage, so marking it `real` here would
     // consume a turnIndex they don't, desyncing every later edit-rewind.
-    userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments, USAGE_CMD_RE.test(text) ? null : { real: true });
+    userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments, USAGE_CMD_RE.test(text) ? null : {
+      real: true,
+      contexts: !isCommand && hasContext ? chat.contexts.slice() : null, // command turns don't consume chips
+    });
     if (!isCommand) {
       chat.contexts = []; // command turns don't consume context chips
       chat.bashPending = []; // the model has now seen these local runs
