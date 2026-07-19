@@ -155,6 +155,10 @@ body {
   justify-content: center;
   width: 16px;
   height: 16px;
+  /* No shrinking: in a max-width tab flexbox would squeeze this below 16px
+     while the (flex-locked) dot stays at 16px, so the dot ↔ close hover swap
+     changed the slot width and made the label jump sideways. */
+  flex: 0 0 auto;
   border-radius: 4px;
   color: var(--text-tertiary);
   opacity: 0;
