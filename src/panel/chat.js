@@ -5240,6 +5240,27 @@
     sec.appendChild(settingsKV("Host version", hostVersion ? String(hostVersion) : "—"));
     sec.appendChild(settingsKV("Required version", String(EXPECTED_HOST_VERSION)));
     els.settingsBody.appendChild(sec);
+
+    // Community links — the landing footer's set (site, GitHub, Discord, X),
+    // restyled as quiet pill buttons that light up on hover.
+    const community = el("div", "settings-section");
+    community.appendChild(el("div", "settings-section-title", "Community"));
+    const links = el("div", "settings-links");
+    const addLink = (icon, label, url) => {
+      const a = el("a", "settings-link");
+      a.href = url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.innerHTML = icon;
+      a.appendChild(el("span", "settings-link-label", label));
+      links.appendChild(a);
+    };
+    addLink(ICON("globe", 15), "lizard.build", "https://lizard.build");
+    addLink(window.RKBrandHTML("github", 15), "GitHub", "https://github.com/lizard-build");
+    addLink(window.RKBrandHTML("discord", 15), "Discord", "https://discord.gg/VM52J59VxU");
+    addLink(window.RKBrandHTML("x", 13), "X", "https://x.com/LizardBuild");
+    community.appendChild(links);
+    els.settingsBody.appendChild(community);
   }
 
   function syncComposer() {

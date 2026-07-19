@@ -3004,6 +3004,36 @@ code.inline {
 .settings-kv-dot.ok { background: var(--control-primary); }
 .settings-kv-dot.bad { background: var(--other-red); }
 
+/* Community links (Connection tab): the landing footer's site/socials set as
+   quiet pill buttons — tertiary at rest, lit on hover, same as the landing's
+   icon hover treatment. */
+.settings-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 12px;
+}
+.settings-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 13px;
+  border: 1px solid var(--border-primary);
+  border-radius: 999px;
+  background: transparent;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.settings-link:hover {
+  color: var(--text-primary);
+  border-color: var(--control-secondary-hover);
+  background: var(--bg-secondary);
+}
+.settings-link svg { flex: 0 0 auto; }
+.settings-link-label { line-height: 1; }
+
 /* Config editors (CLAUDE.md / Hooks / MCP). */
 /* File picker: segmented control choosing which file/view to show. Segments
    size to their labels and the strip scrolls if they outgrow the modal. */
