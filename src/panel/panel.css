@@ -159,15 +159,19 @@ body {
   color: var(--text-tertiary);
   opacity: 0;
   transition: opacity 0.12s, background 0.12s, color 0.12s;
+  /* Left of the label (Safari-style), sharing one slot with the activity dot
+     below so the tab keeps one fixed aux slot no matter which is showing. */
+  order: -1;
 }
 .chat-tab:hover .tab-close,
 .chat-tab.active .tab-close { opacity: 1; }
 .chat-tab .tab-close:hover { background: rgba(255, 255, 255, 0.1); color: var(--text-primary); }
 
-/* Activity dot — occupies the close button's exact 16px slot (the close is
-   display:none'd while the dot shows) so the tab's width never changes:
-   pulsing yellow while the session runs, solid green once it finished with a
-   result the user hasn't opened. Hovering swaps the close button back in. */
+/* Activity dot — sits left of the label in the close button's exact 16px slot
+   (the close is display:none'd while the dot shows) so the tab's width never
+   changes: pulsing yellow while the session runs, solid green once it finished
+   with a result the user hasn't opened. Hovering swaps the close button back
+   into the same spot, Safari-favicon-style. */
 .chat-tab .tab-dot {
   display: none;
   align-items: center;
@@ -175,6 +179,7 @@ body {
   width: 16px;
   height: 16px;
   flex: 0 0 auto;
+  order: -1;
 }
 .chat-tab .tab-dot::before { content: ""; width: 7px; height: 7px; border-radius: 50%; }
 .chat-tab.dot-run .tab-dot::before { background: var(--warn-soft); animation: pulse 1.6s ease-in-out infinite; }
