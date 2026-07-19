@@ -177,6 +177,9 @@
   let lastModel = DEFAULT_MODEL;
   let lastEffort = DEFAULT_EFFORT;
   let lastMode = "auto";
+  // Play a chime when a session fully finishes (Settings → Connection). Off by
+  // default — sound is opt-in.
+  let soundOnDone = false;
   // Last folder the user actually picked (never home — see rememberCwd). New
   // chats default to this so reopening the panel resumes where you left off.
   let lastCwd = null;
@@ -226,6 +229,7 @@
         if (p.lastEffort) lastEffort = p.lastEffort;
         if (p.lastMode) lastMode = p.lastMode;
         if (p.lastCwd) lastCwd = p.lastCwd;
+        if (p.soundOnDone) soundOnDone = true;
         if (Array.isArray(p.history)) history = p.history;
         if (Array.isArray(p.tabs) && p.tabs.length) {
           for (const t of p.tabs) {
@@ -247,7 +251,7 @@
         const c = chats.get(id);
         return { id: c.id, title: c.title, cwd: c.cwd, model: c.model, effort: c.effort, mode: c.mode, sessionId: c.sessionId, bashHistory: (c.bashHistory || []).slice(-40) };
       });
-      chrome.storage.local.set({ rkChatV2: { tabs, activeId, history: history.slice(0, 40), lastModel, lastEffort, lastMode, lastCwd } });
+      chrome.storage.local.set({ rkChatV2: { tabs, activeId, history: history.slice(0, 40), lastModel, lastEffort, lastMode, lastCwd, soundOnDone } });
     } catch (_) {}
   }
 
@@ -349,6 +353,9 @@
       plugins: [],
       started: false,
       turnRunning: false,
+      // Tab-bar green dot: the last turn fully finished while the user wasn't
+      // looking at this tab. Cleared the moment the tab is brought forward.
+      unseen: false,
       // Set on `interrupted`: drop events from the killed process (they'd flip
       // the turn back to "running") until the respawn announces itself with
       // `system init`.
@@ -487,6 +494,8 @@
   function setActive(id) {
     if (!chats.has(id)) return;
     activeId = id;
+    // Bringing the tab forward counts as seeing its result.
+    chats.get(id).unseen = false;
     for (const [cid, c] of chats) {
       c.messagesEl.classList.toggle("hidden", cid !== id);
     }
@@ -580,16 +589,37 @@
   }
 
   // ---- tab bar --------------------------------------------------------------
+  // Per-tab activity dot, sharing the close button's slot so the tab never
+  // grows: yellow while the session is running (or has prompts queued), green
+  // once it finished with a result the user hasn't looked at yet.
+  function tabDotRunning(chat) {
+    return !!(chat.turnRunning || (chat.queue && chat.queue.length));
+  }
+  // Retargets the dot classes on the existing tab nodes. Deliberately NOT a
+  // full renderTabs(): turns start and end in background tabs all the time,
+  // and a rebuild mid-hover would kill the tooltip (or an in-flight drag).
+  function updateTabDots() {
+    if (!mounted || !els.tabs) return;
+    for (const node of els.tabs.children) {
+      const chat = chats.get(node.dataset.tabId);
+      if (!chat) continue;
+      const running = tabDotRunning(chat);
+      node.classList.toggle("dot-run", running);
+      node.classList.toggle("dot-unseen", !running && !!chat.unseen);
+    }
+  }
   function renderTabs() {
     hideTabTip();
     els.tabs.innerHTML = "";
     for (const id of order) {
       const chat = chats.get(id);
-      const tab = el("button", "chat-tab" + (id === activeId ? " active" : ""));
+      const running = tabDotRunning(chat);
+      const tab = el("button", "chat-tab" + (id === activeId ? " active" : "") + (running ? " dot-run" : chat.unseen ? " dot-unseen" : ""));
       tab.dataset.tabId = id;
       tab.addEventListener("mouseenter", () => showTabTip(tab, chat));
       tab.addEventListener("mouseleave", hideTabTip);
       tab.appendChild(el("span", "tab-label", chat.title));
+      tab.appendChild(el("span", "tab-dot"));
       const close = el("span", "tab-close");
       close.innerHTML = ICON("x", 12);
       close.title = "Close chat";
@@ -944,6 +974,8 @@
     }
     userBubble(chat, newText, attachments, { real: true });
     chat.turnRunning = true;
+    chat.unseen = false;
+    updateTabDots();
     chat.turnStatusText = "";
     chat.compacting = false;
     chat.turnStartedAt = Date.now();
@@ -3045,6 +3077,8 @@
   function resumeTurnIfIdle(chat) {
     if (chat.turnRunning) return;
     chat.turnRunning = true;
+    chat.unseen = false;
+    updateTabDots();
     chat.turnStatusText = "";
     chat.compacting = false;
     chat.turnStartedAt = Date.now();
@@ -3285,10 +3319,65 @@
     // Send the next queued prompt, if any — keeps working even if the user
     // has since switched to a different tab.
     dispatchNextQueued(chat);
+    // Nothing queued picked the session back up (dispatchNextQueued claims the
+    // turn synchronously) — it's genuinely done. Flag the tab green if the
+    // user isn't looking at it, and chime if they opted into the sound.
+    if (!tabDotRunning(chat)) {
+      if (chat.id !== activeId || document.hidden) chat.unseen = true;
+      if (result) playDoneChime();
+    }
+    updateTabDots();
     // A turn just consumed quota — refresh the plan-usage meter while the
     // session is idle (throttled; a no-op if we probed recently).
     if (result) refreshUsage();
   }
+
+  // ---- session-done chime ---------------------------------------------------
+  // A short two-note motif (A5 → E6, a fifth apart) in soft sines with a faint
+  // octave shimmer — synthesized via WebAudio so no asset ships with the
+  // extension. Gated on the opt-in Settings toggle.
+  let chimeCtx = null;
+  function playDoneChime() {
+    if (!soundOnDone) return;
+    try {
+      chimeCtx = chimeCtx || new AudioContext();
+      const ctx = chimeCtx;
+      if (ctx.state === "suspended") ctx.resume();
+      const t0 = ctx.currentTime + 0.02;
+      const master = ctx.createGain();
+      master.gain.value = 0.5;
+      master.connect(ctx.destination);
+      const note = (freq, at, dur, peak) => {
+        const osc = ctx.createOscillator();
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.0001, t0 + at);
+        gain.gain.exponentialRampToValueAtTime(peak, t0 + at + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + at + dur);
+        osc.connect(gain);
+        gain.connect(master);
+        osc.start(t0 + at);
+        osc.stop(t0 + at + dur + 0.1);
+      };
+      note(880, 0, 0.55, 0.12); // A5
+      note(1318.5, 0.09, 0.7, 0.1); // E6
+      note(1760, 0.09, 0.45, 0.025); // A6 shimmer under the E6
+    } catch (_) {
+      /* no audio device / autoplay policy — silently skip */
+    }
+  }
+
+  // A turn that finishes while the panel itself is hidden marks even the
+  // active tab unseen — clear it when the user comes back to a visible panel.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    const chat = chats.get(activeId);
+    if (chat && chat.unseen) {
+      chat.unseen = false;
+      updateTabDots();
+    }
+  });
 
   // ---- running-status pill --------------------------------------------------
   // While a turn runs, show a spinning Lizard mark, a cycling verb, and live
@@ -4191,6 +4280,7 @@
       renderAttachmentThumbs();
       autosize();
       chat.turnRunning = false;
+      updateTabDots();
       // resetChatSession restarts the session, which kills any in-flight turn.
       resetChatSession(chat);
       return;
@@ -4247,6 +4337,7 @@
     els.input.value = "";
     autosize();
     entry.el = renderQueuedBubble(chat, entry);
+    updateTabDots(); // a queued prompt keeps the tab's yellow dot alive
     if (chat.id === activeId) updateGreeting(); // queued bubble lands while `empty` is still true
   }
 
@@ -4265,6 +4356,7 @@
       const idx = chat.queue.indexOf(entry);
       if (idx !== -1) chat.queue.splice(idx, 1);
       row.remove();
+      updateTabDots(); // may have been the last thing keeping the dot yellow
     });
     tag.appendChild(cancel);
     row.appendChild(tag);
@@ -4311,6 +4403,8 @@
     // clobbering this one's bookkeeping (turnStartedAt, streamedMsgIds) and
     // reordering the conversation. The failed-post path below hands it back.
     chat.turnRunning = true;
+    chat.unseen = false;
+    updateTabDots();
     // A real turn always wins over an in-flight silent usage probe: release its
     // event-swallowing gate now so this prompt's stream renders normally. The
     // CLI runs prompts in order, so the probe's own reply has already landed.
@@ -5240,6 +5334,35 @@
     sec.appendChild(settingsKV("Host version", hostVersion ? String(hostVersion) : "—"));
     sec.appendChild(settingsKV("Required version", String(EXPECTED_HOST_VERSION)));
     els.settingsBody.appendChild(sec);
+
+    // Notifications — panel-local preferences, persisted in chrome.storage
+    // (not in any Claude config file), so they follow the browser profile.
+    const notif = el("div", "settings-section");
+    notif.appendChild(el("div", "settings-section-title", "Notifications"));
+    const notifList = el("div", "settings-toggle-list");
+    const soundRow = el("div", "settings-toggle-row");
+    const soundInfo = el("div", "settings-toggle-info");
+    soundInfo.appendChild(el("div", "settings-toggle-name", "Completion sound"));
+    soundInfo.appendChild(el("div", "settings-toggle-sub", "Play a soft chime when a session finishes working."));
+    soundRow.appendChild(soundInfo);
+    const soundSw = el("button", "settings-switch" + (soundOnDone ? " on" : ""));
+    soundSw.type = "button";
+    soundSw.setAttribute("role", "switch");
+    soundSw.setAttribute("aria-checked", String(soundOnDone));
+    soundSw.appendChild(el("span", "settings-switch-knob"));
+    soundSw.addEventListener("click", () => {
+      soundOnDone = !soundOnDone;
+      soundSw.classList.toggle("on", soundOnDone);
+      soundSw.setAttribute("aria-checked", String(soundOnDone));
+      savePrefs();
+      // Audible preview so flipping it on doubles as "here's what it sounds
+      // like" — also the user gesture WebAudio needs to unlock playback.
+      if (soundOnDone) playDoneChime();
+    });
+    soundRow.appendChild(soundSw);
+    notifList.appendChild(soundRow);
+    notif.appendChild(notifList);
+    els.settingsBody.appendChild(notif);
 
     // Community links — the landing footer's set (site, GitHub, Discord, X),
     // restyled as quiet pill buttons that light up on hover.
