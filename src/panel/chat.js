@@ -4259,7 +4259,7 @@
     const tag = el("div", "queued-tag");
     const cancel = el("button", "queued-cancel");
     cancel.type = "button";
-    cancel.innerHTML = ICON("x", 11);
+    cancel.innerHTML = ICON("x", 13);
     cancel.title = "Remove from queue";
     cancel.addEventListener("click", () => {
       const idx = chat.queue.indexOf(entry);

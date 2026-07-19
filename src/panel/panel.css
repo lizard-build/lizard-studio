@@ -963,23 +963,38 @@ body {
 .msg-user .bubble .md > *:last-child { margin-bottom: 0; }
 /* Prompt submitted while a turn is still streaming — shown dimmed until it's
    actually dispatched (see dispatchNextQueued in chat.js). */
+.msg-user.queued {
+  position: relative;
+}
 .msg-user.queued .bubble {
   opacity: 0.55;
   border-style: dashed;
+  padding-right: 34px; /* reserve room for the cancel button so revealing it doesn't shift text */
 }
+/* The cancel button overlays the bubble's right edge (a sibling, not a child,
+   so it stays at full opacity instead of inheriting the bubble's dimming) and
+   only shows up while hovering the message — same reveal-on-hover as
+   .ctx-chip-x above. */
 .queued-tag {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  margin-top: 4px;
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+.msg-user.queued:hover .queued-tag {
+  opacity: 1;
+  pointer-events: auto;
 }
 .queued-cancel {
   appearance: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 22px;
+  height: 22px;
   padding: 0;
   flex: 0 0 auto;
   border: none;
