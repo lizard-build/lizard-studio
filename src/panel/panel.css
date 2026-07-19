@@ -2997,7 +2997,9 @@ code.inline {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 4px;
+  /* The single source of the title → content gap: content blocks below carry
+     no top spacing of their own, so every section opens with the same 10px. */
+  margin-bottom: 10px;
 }
 /* Read-only key → value rows (Connection / About). */
 .settings-kv {
@@ -3008,7 +3010,7 @@ code.inline {
   padding: 7px 0;
   border-top: 1px solid var(--border-secondary);
 }
-.settings-kv:first-of-type { border-top: none; }
+.settings-kv:first-of-type { border-top: none; padding-top: 0; }
 .settings-kv-key { font-size: 12px; color: var(--text-secondary); flex: 0 0 auto; }
 .settings-kv-val {
   font-size: 12px;
@@ -3031,7 +3033,6 @@ code.inline {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding-top: 12px;
 }
 .settings-link {
   display: inline-flex;
