@@ -3427,6 +3427,15 @@
     reconnectTimer = setTimeout(connect, RECONNECT_MS);
   }
 
+  // The CLI's OAuth access token expires (or gets revoked by a concurrent
+  // refresh from another tab/process) without using its refresh token, so a
+  // stale session dies with a 401 on stderr instead of prompting to sign in.
+  // Recognize that shape and drive the same `/login` flow automatically
+  // rather than leaving the user to notice and retype it.
+  function isAuthRevokedError(text) {
+    return typeof text === "string" && /\b401\b/.test(text) && /oauth|authenticat|revoked|credentials/i.test(text);
+  }
+
   function onHostMessage(msg) {
     if (!msg) return;
     connected = true;
@@ -3564,7 +3573,11 @@
           clearPermCards(chat);
           liftSuppress(chat); // no respawn coming — don't leave the event gate shut
           if (chat.turnRunning) endTurn(chat, null);
-          systemNote(chat, `Claude session ended (code ${msg.code}).`, "warn");
+          if (chat.suppressExitNote) {
+            chat.suppressExitNote = false;
+          } else {
+            systemNote(chat, `Claude session ended (code ${msg.code}).`, "warn");
+          }
         }
         break;
       case "folder":
@@ -3674,7 +3687,19 @@
       case "error":
         if (chat) {
           liftSuppress(chat); // a respawn error must not leave the event gate shut
-          systemNote(chat, msg.message || "Host error", "warn");
+          if (isAuthRevokedError(msg.message) && !chat.loginCard) {
+            // The exit event right behind this one would otherwise print a
+            // generic "session ended" note under the login card — skip it.
+            chat.suppressExitNote = true;
+            // The process is already dead by the time sign-in finishes, so
+            // `chat.started` (which the exit event below clears) can't tell
+            // loginDone() to restart it — track that separately.
+            chat.pendingAuthRestart = true;
+            systemNote(chat, "Your Claude sign-in expired — signing in again…", "warn");
+            startLogin(chat);
+          } else {
+            systemNote(chat, msg.message || "Host error", "warn");
+          }
         }
         break;
     }
@@ -4437,7 +4462,9 @@
     // Restart the backend session so the CLI picks up the fresh credentials.
     // Resuming the same session id keeps the transcript and context intact —
     // no need to wipe the conversation.
-    if (ok && chat.started) {
+    const wantsRestart = chat.started || chat.pendingAuthRestart;
+    chat.pendingAuthRestart = false;
+    if (ok && wantsRestart) {
       chat.started = false;
       startChatSession(chat);
     }
