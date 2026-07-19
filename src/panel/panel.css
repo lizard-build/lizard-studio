@@ -3026,7 +3026,7 @@ code.inline {
 .settings-kv-dot.ok { background: var(--control-primary); }
 .settings-kv-dot.bad { background: var(--other-red); }
 
-/* Community links (Connection tab): the landing footer's site/socials set as
+/* Community links (General tab): the landing footer's site/socials set as
    quiet pill buttons — tertiary at rest, lit on hover, same as the landing's
    icon hover treatment. */
 .settings-links {

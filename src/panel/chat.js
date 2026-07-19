@@ -147,7 +147,7 @@
   // when available, else the account username. Personalizes the empty-chat greeting.
   let hostUser = null;
   // Host protocol version last reported in `ready` (0 until the host connects).
-  // Surfaced read-only in the Settings → Connection tab.
+  // Surfaced read-only in the Settings → General tab.
   let hostVersion = 0;
   // Grace timer for host self-update: set when a stale host is asked to update
   // itself; if it fires the host never answered (too old) — show the manual
@@ -177,7 +177,7 @@
   let lastModel = DEFAULT_MODEL;
   let lastEffort = DEFAULT_EFFORT;
   let lastMode = "auto";
-  // Play a chime when a session fully finishes (Settings → Connection). Off by
+  // Play a chime when a session fully finishes (Settings → General). Off by
   // default — sound is opt-in.
   let soundOnDone = false;
   // Last folder the user actually picked (never home — see rememberCwd). New
@@ -4933,13 +4933,13 @@
 
   // ---- settings modal -------------------------------------------------------
   // A modal overlaying the whole panel, opened by the gear in the subbar, with
-  // a tab strip up top. Connection is read-only status; the single Config tab
+  // a tab strip up top. General holds panel prefs and read-only status; the single Config tab
   // edits on-disk config through the host (the browser sandbox can't touch the
   // filesystem) — CLAUDE.md / Hooks / MCP / Plugins editors plus a read-only
   // Skills list — picked by an in-tab segmented control.
   const SETTINGS_TABS = [
+    { id: "connection", label: "General" },
     { id: "config", label: "Config" },
-    { id: "connection", label: "Connection" },
   ];
   // The files the Config tab can edit, in segmented-control order. `format`
   // picks the editor (raw text vs JSON); `label` is the segment caption;
@@ -5308,7 +5308,7 @@
     saveConfig(); // writes + re-renders with a "Saved" flash
   }
 
-  // A read-only key → value line for the Connection tab.
+  // A read-only key → value line for the General tab.
   function settingsKV(key, value) {
     const row = el("div", "settings-kv");
     row.appendChild(el("span", "settings-kv-key", key));
@@ -5317,24 +5317,6 @@
   }
 
   function renderSettingsConnection() {
-    const sec = el("div", "settings-section");
-    sec.appendChild(el("div", "settings-section-title", "Host connection"));
-
-    // Status as a key → value row (same format as the version rows), with a
-    // small colored dot in the value carrying the connected/disconnected cue.
-    const ok = connected && hostReady;
-    const statusRow = el("div", "settings-kv");
-    statusRow.appendChild(el("span", "settings-kv-key", "Native host"));
-    const val = el("span", "settings-kv-val settings-kv-status");
-    val.appendChild(el("span", "settings-kv-dot " + (ok ? "ok" : "bad")));
-    val.appendChild(document.createTextNode(ok ? "Connected" : connected ? "Connecting…" : "Not connected"));
-    statusRow.appendChild(val);
-    sec.appendChild(statusRow);
-
-    sec.appendChild(settingsKV("Host version", hostVersion ? String(hostVersion) : "—"));
-    sec.appendChild(settingsKV("Required version", String(EXPECTED_HOST_VERSION)));
-    els.settingsBody.appendChild(sec);
-
     // Notifications — panel-local preferences, persisted in chrome.storage
     // (not in any Claude config file), so they follow the browser profile.
     const notif = el("div", "settings-section");
@@ -5363,6 +5345,24 @@
     notifList.appendChild(soundRow);
     notif.appendChild(notifList);
     els.settingsBody.appendChild(notif);
+
+    const sec = el("div", "settings-section");
+    sec.appendChild(el("div", "settings-section-title", "Host connection"));
+
+    // Status as a key → value row (same format as the version rows), with a
+    // small colored dot in the value carrying the connected/disconnected cue.
+    const ok = connected && hostReady;
+    const statusRow = el("div", "settings-kv");
+    statusRow.appendChild(el("span", "settings-kv-key", "Native host"));
+    const val = el("span", "settings-kv-val settings-kv-status");
+    val.appendChild(el("span", "settings-kv-dot " + (ok ? "ok" : "bad")));
+    val.appendChild(document.createTextNode(ok ? "Connected" : connected ? "Connecting…" : "Not connected"));
+    statusRow.appendChild(val);
+    sec.appendChild(statusRow);
+
+    sec.appendChild(settingsKV("Host version", hostVersion ? String(hostVersion) : "—"));
+    sec.appendChild(settingsKV("Required version", String(EXPECTED_HOST_VERSION)));
+    els.settingsBody.appendChild(sec);
 
     // Community links — the landing footer's set (site, GitHub, Discord, X),
     // restyled as quiet pill buttons that light up on hover.
