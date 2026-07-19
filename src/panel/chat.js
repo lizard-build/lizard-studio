@@ -3072,6 +3072,7 @@
   // ---- event handling (routed per chat) -------------------------------------
   function onClaudeEvent(chat, d) {
     if (!d || !d.type) return;
+    chat.lastEventTs = Date.now(); // feeds the sessionLooksStale idle check
     // Between an interrupt and the respawn's first reply, anything arriving
     // here is the killed process draining — swallow it. The fresh process
     // always opens with `system init` (emitted on its first prompt), which
@@ -3195,6 +3196,17 @@
       }
       case "result":
         endTurn(chat, d);
+        // Auth death arrives as a failed result carrying the API's 401 text —
+        // the process is alive but its token is gone (see sessionLooksStale
+        // for how it gets that way). Reuse the /login flow instead of leaving
+        // the raw error as the last word, and re-send the prompt it killed.
+        if (d.is_error && isAuthRevokedError(String(d.result || ""))) {
+          requeueLastPrompt(chat);
+          if (!chat.loginCard) {
+            systemNote(chat, "Your Claude sign-in expired — signing in again…", "warn");
+            startLogin(chat);
+          }
+        }
         break;
       case "rate_limit_event":
         if (d.rate_limit_info && d.rate_limit_info.status !== "allowed") {
@@ -3436,6 +3448,43 @@
     return typeof text === "string" && /\b401\b/.test(text) && /oauth|authenticat|revoked|credentials/i.test(text);
   }
 
+  // Puts the prompt that just died with the auth error back in the queue so it
+  // re-sends itself once sign-in completes and the session respawns — the user
+  // shouldn't have to retype what they can see on screen. Its original context
+  // blocks were already delivered (and consumed) by the failed turn, so only
+  // the text and images come back.
+  function requeueLastPrompt(chat) {
+    const p = chat.lastSentPrompt;
+    chat.lastSentPrompt = null; // one retry per failure, never a loop
+    if (!p || !p.text) return;
+    if (!Array.isArray(chat.queue)) chat.queue = [];
+    const entry = { text: p.text, contexts: [], attachments: p.attachments || [] };
+    chat.queue.push(entry);
+    entry.el = renderQueuedBubble(chat, entry);
+  }
+
+  // A claude process that has sat idle for hours holds its OAuth access token
+  // in memory. All Claude surfaces on this machine (terminal, desktop app,
+  // every panel tab) share one keychain credential, and a refresh by any of
+  // them rotates the refresh token — so a long-idle process wakes up holding
+  // dead credentials, and its own refresh attempt with the rotated-away token
+  // is what escalates "expired" into a server-side revocation of the whole
+  // grant. 2h is far under the token's ~8h life but catches the overnight and
+  // most-of-day gaps where this actually happens.
+  const STALE_SESSION_MS = 2 * 60 * 60 * 1000;
+  function sessionLooksStale(chat) {
+    if (!chat.started || !chat.lastEventTs) return false;
+    if (Date.now() - chat.lastEventTs < STALE_SESSION_MS) return false;
+    // Restarting kills the claude process tree — never take live background
+    // work (subagents, dev servers, background commands) down with it. Those
+    // sessions fall back to the reactive auto-login below if the token dies.
+    const anyRunning = (m) => {
+      for (const t of m.values()) if (t.status === "running") return true;
+      return false;
+    };
+    return !(anyRunning(chat.agents) || anyRunning(chat.bgTasks) || anyRunning(chat.previews));
+  }
+
   function onHostMessage(msg) {
     if (!msg) return;
     connected = true;
@@ -3514,6 +3563,11 @@
         break;
       case "started":
         if (chat) {
+          // A fresh spawn read the current keychain credentials by definition —
+          // reset the idle clock or sessionLooksStale would see the pre-restart
+          // timestamp and demand another restart, forever.
+          chat.lastEventTs = Date.now();
+          chat.suppressExitNote = false; // any pending suppression is moot now
           // A (re)spawned process can't answer asks from the previous one.
           clearPermCards(chat);
           if (msg.cwd) { chat.cwd = msg.cwd; rememberCwd(msg.cwd); }
@@ -3521,6 +3575,15 @@
           if (chat.id === activeId) syncComposer();
           requestBranches(chat);
           requestGitDiff(chat);
+          // A credentials-refresh restart (stale-session guard, or the restart
+          // after re-login) queued the prompt that triggered it. Flush it here
+          // on the host's spawn ack, NOT on claude's `system init` — the
+          // headless CLI only emits init together with its first prompt's
+          // reply, so waiting for init would deadlock against this queue.
+          if (chat.restartFlush) {
+            chat.restartFlush = false;
+            if (!chat.turnRunning) dispatchNextQueued(chat);
+          }
         }
         break;
       case "event":
@@ -3695,6 +3758,7 @@
             // `chat.started` (which the exit event below clears) can't tell
             // loginDone() to restart it — track that separately.
             chat.pendingAuthRestart = true;
+            requeueLastPrompt(chat);
             systemNote(chat, "Your Claude sign-in expired — signing in again…", "warn");
             startLogin(chat);
           } else {
@@ -4229,6 +4293,16 @@
   }
 
   async function deliverPrompt(chat, text) {
+    // Long-idle process → its in-memory OAuth token may be rotated away (see
+    // sessionLooksStale). Respawn it first so it re-reads the current keychain
+    // credentials — resume keeps the conversation — and queue the prompt to go
+    // out at the fresh process's init instead of dying with a 401.
+    if (sessionLooksStale(chat)) {
+      chat.restartFlush = true;
+      queuePrompt(chat, text);
+      restartSessionNow(chat);
+      return;
+    }
     // Claim the turn synchronously, BEFORE the first await below
     // (buildTabsContextBlock does a chrome.tabs.query round-trip). sendPrompt's
     // `turnRunning` guard and dispatchNextQueued both funnel here; if the flag
@@ -4304,6 +4378,8 @@
     }
     // The post reached the host — the one-time tab snapshot is now delivered.
     if (tabsBlock) chat.tabsContextSent = true;
+    // Kept so an auth-revoked failure can re-send this prompt after re-login.
+    chat.lastSentPrompt = { text, attachments: attachments.slice() };
     // A /usage-family command is a zero-turn side query — its reply is a
     // synthetic usage card, not a conversation turn. Render its bubble plain,
     // never as an editable/rewind target: the host's rewind counter and the
@@ -4466,6 +4542,9 @@
     chat.pendingAuthRestart = false;
     if (ok && wantsRestart) {
       chat.started = false;
+      // Flush anything queued (e.g. the prompt the auth failure killed) once
+      // the freshly-credentialed process reports init.
+      chat.restartFlush = true;
       startChatSession(chat);
     }
   }
