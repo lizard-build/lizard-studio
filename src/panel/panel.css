@@ -993,7 +993,7 @@ body {
 }
 .msg-user.queued .bubble {
   opacity: 0.55;
-  border-style: dashed;
+  border-style: solid;
   padding-right: 34px; /* reserve room for the cancel button so revealing it doesn't shift text */
 }
 /* The cancel button overlays the bubble's right edge (a sibling, not a child,
