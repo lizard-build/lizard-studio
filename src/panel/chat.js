@@ -126,6 +126,7 @@
     TodoWrite: { icon: "todo", label: "Plan" },
     ToolSearch: { icon: "search", label: "Search tools" },
     AskUserQuestion: { icon: "chat", label: "Question" },
+    ExitPlanMode: { icon: "todo", label: "Plan" },
   };
 
   const DEFAULT_TITLE = "New chat";
@@ -2634,6 +2635,7 @@
     WebSearch: "Web search",
     Task: "Launch agent",
     KillShell: "Kill shell",
+    ExitPlanMode: "Plan ready",
   };
 
   function permTitle(toolName) {
@@ -2656,6 +2658,51 @@
     return null;
   }
 
+  // ExitPlanMode carries the whole plan as markdown in `input.plan`. The perm
+  // card is narrow and the plan is long, so dumping it as JSON is unreadable.
+  // Show a one-line hint plus a button that opens the fully rendered plan in a
+  // real browser tab (extension side panels can't spawn their own windows).
+  function planDetail(plan) {
+    const wrap = el("div", "perm-detail perm-plan");
+    const first = (plan.split("\n").find((l) => l.trim()) || "Implementation plan")
+      .replace(/^#{1,6}\s*/, "")
+      .replace(/[*_`]/g, "")
+      .trim();
+    const hint = el("div", "perm-plan-hint");
+    const ic = el("span", "perm-plan-ic");
+    ic.innerHTML = ICON("todo", 13);
+    hint.appendChild(ic);
+    hint.appendChild(el("span", "perm-plan-title", first));
+    wrap.appendChild(hint);
+
+    const btn = el("button", "perm-plan-open");
+    btn.type = "button";
+    const bic = el("span", "perm-plan-open-ic");
+    bic.innerHTML = ICON("globe", 13);
+    btn.appendChild(bic);
+    btn.appendChild(el("span", null, "Open plan in browser"));
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openPlanInBrowser(plan, first);
+    });
+    wrap.appendChild(btn);
+    return wrap;
+  }
+
+  // Stash the plan in session storage under a throwaway id and open the viewer
+  // page (src/panel/plan.html) in a browser tab keyed on that id.
+  function openPlanInBrowser(plan, title) {
+    const id = "plan-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    const url = chrome.runtime.getURL("src/panel/plan.html") + "#" + encodeURIComponent(id);
+    try {
+      chrome.storage.session.set({ [id]: { plan, title: title || "Implementation plan" } }, () => {
+        openExternal(url);
+      });
+    } catch (_) {
+      openExternal(url);
+    }
+  }
+
   function permDetail(toolName, input) {
     input = input || {};
     if (toolName === "Bash") {
@@ -2663,6 +2710,9 @@
       wrap.appendChild(R.codeBlock(input.command || "", "bash"));
       if (input.description) wrap.appendChild(el("div", "perm-desc", input.description));
       return wrap;
+    }
+    if (toolName === "ExitPlanMode" && typeof input.plan === "string" && input.plan.trim()) {
+      return planDetail(input.plan);
     }
     // Edit diffs and Write contents reuse the tool-card renderers.
     const d = toolDetail(toolName, input);

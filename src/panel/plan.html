@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Plan — Lizard Studio</title>
+    <style>
+      /* Inter — vendored, variable weights (shared with the panel) */
+      @font-face {
+        font-family: "Inter";
+        src: url("../terminal/vendor/fonts/InterVariable.woff2") format("woff2");
+        font-weight: 100 900;
+        font-style: normal;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("../terminal/vendor/fonts/JetBrainsMono-Variable-latin.woff2") format("woff2");
+        font-weight: 100 800;
+        font-style: normal;
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "JetBrains Mono";
+        src: url("../terminal/vendor/fonts/JetBrainsMono-Variable-cyrillic.woff2") format("woff2");
+        font-weight: 100 800;
+        font-style: normal;
+        font-display: swap;
+        unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+      }
+
+      :root {
+        --font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --font-mono: "JetBrains Mono", "SF Mono", Menlo, Monaco, "Cascadia Code", monospace;
+        --bg-primary: #070707;
+        --bg-secondary: #141414;
+        --border-primary: #2e2e2e;
+        --border-secondary: rgba(255, 255, 255, 0.08);
+        --text-primary: #e9edf4;
+        --text-secondary: #858b94;
+        --text-tertiary: #5f646d;
+        --control-primary: #10b981;
+        --other-blue: #3b82f6;
+      }
+
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; }
+      body {
+        background: var(--bg-primary);
+        color: var(--text-primary);
+        font-family: var(--font-family);
+        -webkit-font-smoothing: antialiased;
+        line-height: 1.55;
+      }
+      .page { max-width: 780px; margin: 0 auto; padding: 40px 28px 96px; }
+
+      header.plan-head {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding-bottom: 16px;
+        margin-bottom: 24px;
+        border-bottom: 1px solid var(--border-primary);
+      }
+      .plan-head .mark { display: inline-flex; color: var(--control-primary); flex: none; }
+      #plan-title {
+        margin: 0;
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      .plan-empty { color: var(--text-secondary); font-size: 14px; }
+
+      /* markdown — mirrors panel.css so the plan reads identically to chat */
+      .md { font-size: 15px; line-height: 1.65; color: var(--text-primary); overflow-wrap: anywhere; }
+      .md > *:first-child { margin-top: 0; }
+      .md p { margin: 0 0 12px; }
+      .md-h { font-weight: 600; margin: 24px 0 10px; letter-spacing: -0.01em; }
+      h1.md-h { font-size: 21px; }
+      h2.md-h { font-size: 18px; }
+      h3.md-h { font-size: 16px; }
+      h4.md-h { font-size: 14px; color: var(--text-secondary); text-transform: none; }
+      .md-list { margin: 8px 0 12px; padding-left: 22px; }
+      .md-list li { margin: 4px 0; }
+      .md a { color: var(--other-blue); text-decoration: none; }
+      .md a:hover { text-decoration: underline; }
+
+      .md-table {
+        width: 100%;
+        margin: 12px 0;
+        border-collapse: collapse;
+        font-size: 13.5px;
+        display: block;
+        overflow-x: auto;
+      }
+      .md-table th, .md-table td {
+        border: 1px solid var(--border-primary);
+        padding: 6px 11px;
+        text-align: left;
+        vertical-align: top;
+      }
+      .md-table th { font-weight: 600; color: var(--text-primary); background: rgba(255, 255, 255, 0.04); }
+      .md-table td { color: var(--text-secondary); }
+      .md-table tr:nth-child(even) td { background: rgba(255, 255, 255, 0.02); }
+
+      code.inline {
+        font-family: var(--font-mono);
+        font-size: 12.5px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--border-secondary);
+        border-radius: 4px;
+        padding: 1px 5px;
+      }
+
+      .code-wrap { position: relative; }
+      .code-block {
+        margin: 12px 0;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-secondary);
+        border-radius: 8px;
+        padding: 12px 14px;
+        overflow-x: auto;
+        font-family: var(--font-mono);
+        font-size: 12.5px;
+        line-height: 1.55;
+        scrollbar-width: thin;
+      }
+      .code-block code { font-family: inherit; white-space: pre; }
+      .code-block::-webkit-scrollbar { height: 8px; }
+      .code-block::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 4px; }
+      .code-copy {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        width: 24px;
+        height: 24px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        appearance: none;
+        cursor: pointer;
+        color: var(--text-secondary);
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--border-secondary);
+        border-radius: 6px;
+        opacity: 0;
+        transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+      }
+      .code-wrap:hover .code-copy { opacity: 1; }
+      .code-copy:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.1); }
+      .code-copy.copied { opacity: 1; color: var(--control-primary); }
+
+      .tok-kw { color: #c792ea; }
+      .tok-string { color: #c3e88d; }
+      .tok-comment { color: var(--text-tertiary); font-style: italic; }
+      .tok-number { color: #f78c6c; }
+      .tok-fn { color: #82aaff; }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header class="plan-head">
+        <span class="mark" id="plan-mark" aria-hidden="true"></span>
+        <h1 id="plan-title">Plan</h1>
+      </header>
+      <main id="plan-body"></main>
+    </div>
+    <script src="icons.js"></script>
+    <script src="render.js"></script>
+    <script src="plan.js"></script>
+  </body>
+</html>
