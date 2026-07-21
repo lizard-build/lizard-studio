@@ -591,10 +591,17 @@
 
   // ---- tab bar --------------------------------------------------------------
   // Per-tab activity dot, sharing the close button's slot so the tab never
-  // grows: yellow while the session is running (or has prompts queued), green
-  // once it finished with a result the user hasn't looked at yet.
+  // grows: blue while the session is blocked on your input (a pending
+  // permission / question ask), yellow while it's running (or has prompts
+  // queued), green once it finished with a result the user hasn't looked at yet.
   function tabDotRunning(chat) {
     return !!(chat.turnRunning || (chat.queue && chat.queue.length));
+  }
+  // Blocked on a human: a permission or question dialog is pending. Takes
+  // priority over the yellow running dot — the turn is technically still open,
+  // but nothing moves until you answer.
+  function tabDotWaiting(chat) {
+    return !!(chat.permCards && chat.permCards.size);
   }
   // Retargets the dot classes on the existing tab nodes. Deliberately NOT a
   // full renderTabs(): turns start and end in background tabs all the time,
@@ -604,18 +611,30 @@
     for (const node of els.tabs.children) {
       const chat = chats.get(node.dataset.tabId);
       if (!chat) continue;
-      const running = tabDotRunning(chat);
+      const waiting = tabDotWaiting(chat);
+      const running = !waiting && tabDotRunning(chat);
+      node.classList.toggle("dot-wait", waiting);
       node.classList.toggle("dot-run", running);
-      node.classList.toggle("dot-unseen", !running && !!chat.unseen);
+      node.classList.toggle("dot-unseen", !waiting && !running && !!chat.unseen);
     }
+  }
+  // A fresh permission/question ask just landed — paint the tab's blue waiting
+  // dot, and chime for attention like a finished session does. `wasWaiting` is
+  // the state BEFORE this ask registered: chime only on the transition into
+  // waiting, so a burst of stacked asks doesn't rattle off a chime each.
+  function noteWaitingAsk(chat, wasWaiting) {
+    updateTabDots();
+    if (!wasWaiting) playDoneChime();
   }
   function renderTabs() {
     hideTabTip();
     els.tabs.innerHTML = "";
     for (const id of order) {
       const chat = chats.get(id);
-      const running = tabDotRunning(chat);
-      const tab = el("button", "chat-tab" + (id === activeId ? " active" : "") + (running ? " dot-run" : chat.unseen ? " dot-unseen" : ""));
+      const waiting = tabDotWaiting(chat);
+      const running = !waiting && tabDotRunning(chat);
+      const dotCls = waiting ? " dot-wait" : running ? " dot-run" : chat.unseen ? " dot-unseen" : "";
+      const tab = el("button", "chat-tab" + (id === activeId ? " active" : "") + dotCls);
       tab.dataset.tabId = id;
       tab.addEventListener("mouseenter", () => showTabTip(tab, chat));
       tab.addEventListener("mouseleave", hideTabTip);
@@ -2834,10 +2853,12 @@
       }
     });
 
+    const wasWaiting = tabDotWaiting(chat);
     chat.permCards.set(requestId, entry);
     paintPerm(entry);
     append(chat, card);
     renderTurnStatus(chat);
+    noteWaitingAsk(chat, wasWaiting);
     if (chat.id === activeId) {
       scrollToBottom(chat);
       // Take focus like Claude Code's prompt does — but never steal a draft.
@@ -2851,6 +2872,7 @@
     chat.permCards.delete(requestId);
     entry.card.remove();
     renderTurnStatus(chat);
+    updateTabDots(); // blue waiting dot clears once nothing's left to answer
     const out = { type: "permissionResult", id: chat.id, requestId, behavior: opt.allow ? "allow" : "deny" };
     if (opt.allow && opt.updatedPermissions) out.updatedPermissions = opt.updatedPermissions;
     if (!opt.allow) {
@@ -2899,6 +2921,7 @@
       chat.permCards.delete(requestId);
       card.remove();
       renderTurnStatus(chat);
+      updateTabDots(); // blue waiting dot clears once nothing's left to answer
       post(out);
       const next = chat.permCards.values().next().value;
       if (next && chat.id === activeId) next.card.focus();
@@ -3060,10 +3083,12 @@
       }
     });
 
+    const wasWaiting = tabDotWaiting(chat);
     chat.permCards.set(requestId, entry);
     renderQuestion();
     append(chat, card);
     renderTurnStatus(chat);
+    noteWaitingAsk(chat, wasWaiting);
     if (chat.id === activeId) {
       scrollToBottom(chat);
       if (!els.input || !els.input.value.trim()) card.focus();
@@ -3076,6 +3101,7 @@
     chat.permCards.delete(requestId);
     entry.card.remove();
     renderTurnStatus(chat);
+    updateTabDots(); // blue waiting dot clears once nothing's left to answer
   }
 
   // Drop every pending ask (turn ended, session restarted, or process exited —
@@ -3084,6 +3110,7 @@
     if (!chat || !chat.permCards) return;
     for (const entry of chat.permCards.values()) entry.card.remove();
     chat.permCards.clear();
+    updateTabDots(); // blue waiting dot clears with the asks it reflected
   }
 
   // ---- context-size tracking -------------------------------------------------
@@ -3382,10 +3409,12 @@
     if (result) refreshUsage();
   }
 
-  // ---- session-done chime ---------------------------------------------------
+  // ---- attention chime ------------------------------------------------------
   // A short two-note motif (A5 → E6, a fifth apart) in soft sines with a faint
   // octave shimmer — synthesized via WebAudio so no asset ships with the
-  // extension. Gated on the opt-in Settings toggle.
+  // extension. Played at the two moments a session wants the human back: when a
+  // turn fully finishes, and when it blocks waiting for your input. Gated on the
+  // opt-in Settings toggle.
   let chimeCtx = null;
   function playDoneChime() {
     if (!soundOnDone) return;
@@ -4257,6 +4286,7 @@
     chat.loginCard = null; // detached from the DOM above; drop the stale reference
     chat.statusEl = null; // wiped with the stream; recreated on next render
     chat.permCards.clear(); // card nodes went with the innerHTML wipe
+    updateTabDots(); // any blue waiting dot goes with the asks just dropped
     chat.toolCards.clear();
     chat.toolGroup = null; // its nodes went with the innerHTML wipe too
     chat.emittedToolIds.clear();
@@ -5375,7 +5405,7 @@
     const soundRow = el("div", "settings-toggle-row");
     const soundInfo = el("div", "settings-toggle-info");
     soundInfo.appendChild(el("div", "settings-toggle-name", "Completion sound"));
-    soundInfo.appendChild(el("div", "settings-toggle-sub", "Play a soft chime when a session finishes working."));
+    soundInfo.appendChild(el("div", "settings-toggle-sub", "Play a soft chime when a session finishes working or needs your input."));
     soundRow.appendChild(soundInfo);
     const soundSw = el("button", "settings-switch" + (soundOnDone ? " on" : ""));
     soundSw.type = "button";

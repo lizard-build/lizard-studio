@@ -170,9 +170,9 @@ body {
 
 /* Activity dot — sits right of the label in the close button's exact 16px slot
    (the close is display:none'd while the dot shows) so the tab's width never
-   changes: pulsing yellow while the session runs, solid green once it finished
-   with a result the user hasn't opened. Hovering swaps the close button back
-   into the same spot. */
+   changes: pulsing blue while the session waits for your input, pulsing yellow
+   while it runs, solid green once it finished with a result the user hasn't
+   opened. Hovering swaps the close button back into the same spot. */
 .chat-tab .tab-dot {
   display: none;
   align-items: center;
@@ -182,10 +182,13 @@ body {
   flex: 0 0 auto;
 }
 .chat-tab .tab-dot::before { content: ""; width: 7px; height: 7px; border-radius: 50%; }
+.chat-tab.dot-wait .tab-dot::before { background: var(--other-blue); animation: pulse 1.6s ease-in-out infinite; }
 .chat-tab.dot-run .tab-dot::before { background: var(--warn-soft); animation: pulse 1.6s ease-in-out infinite; }
 .chat-tab.dot-unseen .tab-dot::before { background: var(--control-primary); }
+.chat-tab.dot-wait:not(:hover) .tab-dot,
 .chat-tab.dot-run:not(:hover) .tab-dot,
 .chat-tab.dot-unseen:not(:hover) .tab-dot { display: inline-flex; }
+.chat-tab.dot-wait:not(:hover) .tab-close,
 .chat-tab.dot-run:not(:hover) .tab-close,
 .chat-tab.dot-unseen:not(:hover) .tab-close { display: none; }
 
