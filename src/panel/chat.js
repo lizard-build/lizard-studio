@@ -62,13 +62,22 @@
 
   // Listed least- to most-capable — Haiku is fastest/smallest, then Sonnet,
   // Opus, and Fable 5 as the top tier (above Opus).
-  const MODELS = [
+  //
+  // This is only the offline fallback. The live list comes from models.json in
+  // this repo, fetched at startup (see loadModelCatalog) so a new model reaches
+  // users by editing that file, without an extension release. Keep this array
+  // in step with models.json anyway — it's what a first run with no network
+  // shows, and what every run shows until the fetch lands.
+  const MODELS_FALLBACK = [
     { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
     { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-opus-4-8", label: "Opus 4.8" },
+    { id: "claude-opus-5", label: "Opus 5" },
     { id: "claude-fable-5", label: "Fable 5" },
   ];
-  const DEFAULT_MODEL = "claude-opus-4-8";
+  let MODELS = MODELS_FALLBACK.slice();
+  const DEFAULT_MODEL_FALLBACK = "claude-opus-4-8";
+  let DEFAULT_MODEL = DEFAULT_MODEL_FALLBACK;
 
   // Reasoning effort — mirrors the CLI's `--effort <level>` flag. "ultracode"
   // isn't a real effort level: it's xhigh reasoning plus dynamic workflow
@@ -88,17 +97,132 @@
   // Usable context window per model (tokens) — the denominator behind the
   // toolbar's context meter. These mirror what Claude Code's own `/context`
   // meter shows as the max (window minus the reserve it keeps for the reply +
-  // system overhead), so the panel's ring reads 1:1 with the terminal. Tune a
-  // row here if a model's window changes; unknown models fall back to 200k.
-  const CONTEXT_LIMITS = {
+  // system overhead), so the panel's ring reads 1:1 with the terminal. Like
+  // MODELS above, this is the offline fallback — models.json carries the live
+  // numbers. Unknown models fall back to 200k, which is also where the CLI
+  // lands for a model missing from its own table.
+  const CONTEXT_LIMITS_FALLBACK = {
     "claude-opus-4-8": 1000000,
+    // Opus 5 isn't in the CLI's model table yet, so Claude Code falls back to
+    // 200k for it — matched here so the ring keeps reading 1:1 with /context.
+    "claude-opus-5": 200000,
     "claude-sonnet-5": 1000000,
     "claude-fable-5": 1000000,
     "claude-haiku-4-5-20251001": 200000,
   };
-  const DEFAULT_CONTEXT_LIMIT = 200000;
+  let CONTEXT_LIMITS = Object.assign({}, CONTEXT_LIMITS_FALLBACK);
+  const DEFAULT_CONTEXT_LIMIT_FALLBACK = 200000;
+  let DEFAULT_CONTEXT_LIMIT = DEFAULT_CONTEXT_LIMIT_FALLBACK;
   function contextLimit(chat) {
     return (chat && CONTEXT_LIMITS[chat.model]) || DEFAULT_CONTEXT_LIMIT;
+  }
+
+  // ---- model catalog (remote) ------------------------------------------------
+  // The picker's contents live in models.json in this repo rather than in this
+  // file, so a new model ships by committing that JSON — no extension release,
+  // no store review. Startup reads the last good copy from chrome.storage
+  // (instant, works offline), then refetches in the background and repaints if
+  // anything moved. A malformed or unreachable manifest changes nothing: the
+  // fallbacks above stay in place.
+  const MODEL_CATALOG_URL =
+    "https://raw.githubusercontent.com/lizard-build/lizard-studio/main/models.json";
+  const MODEL_CATALOG_KEY = "rkModelCatalog";
+  const MODEL_CATALOG_TIMEOUT_MS = 6000;
+
+  // Accepts a parsed manifest, returns the normalized catalog or null if it
+  // doesn't hold up. Rows need a non-empty id and label; a bad contextLimit
+  // just drops to the default rather than poisoning the ring with NaN.
+  function normalizeCatalog(raw) {
+    if (!raw || !Array.isArray(raw.models)) return null;
+    const models = [];
+    const limits = {};
+    for (const m of raw.models) {
+      if (!m || typeof m.id !== "string" || typeof m.label !== "string") continue;
+      const id = m.id.trim();
+      const label = m.label.trim();
+      if (!id || !label || limits[id] !== undefined) continue;
+      models.push({ id, label });
+      if (Number.isFinite(m.contextLimit) && m.contextLimit > 0) limits[id] = m.contextLimit;
+      else limits[id] = null;
+    }
+    if (!models.length) return null;
+    for (const id of Object.keys(limits)) if (limits[id] === null) delete limits[id];
+    const dflt = typeof raw.defaultModel === "string" && models.some((m) => m.id === raw.defaultModel)
+      ? raw.defaultModel
+      : models.some((m) => m.id === DEFAULT_MODEL_FALLBACK)
+        ? DEFAULT_MODEL_FALLBACK
+        : models[models.length - 1].id;
+    const dfltLimit = Number.isFinite(raw.defaultContextLimit) && raw.defaultContextLimit > 0
+      ? raw.defaultContextLimit
+      : DEFAULT_CONTEXT_LIMIT_FALLBACK;
+    return { models, limits, defaultModel: dflt, defaultContextLimit: dfltLimit };
+  }
+
+  // Swap the live tables over. Never touches an open chat's model — a session
+  // already running on an id that has since left the catalog keeps running on
+  // it; only the picker's contents and the ring's denominator change.
+  function applyCatalog(cat) {
+    MODELS = cat.models;
+    CONTEXT_LIMITS = cat.limits;
+    DEFAULT_MODEL = cat.defaultModel;
+    DEFAULT_CONTEXT_LIMIT = cat.defaultContextLimit;
+    if (!mounted) return;
+    syncComposer();
+    refreshUsageUI();
+    if (els.modelMenu && !els.modelMenu.classList.contains("hidden")) renderModelMenu();
+  }
+
+  // Cached copy first so the picker is right on the very first paint, then a
+  // network refresh. `done` fires once the cache has been consulted — the
+  // refresh keeps running after it and repaints on its own.
+  function loadModelCatalog(done) {
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      done && done();
+    };
+    try {
+      chrome.storage.local.get([MODEL_CATALOG_KEY], (r) => {
+        const cached = normalizeCatalog(r && r[MODEL_CATALOG_KEY]);
+        if (cached) applyCatalog(cached);
+        finish();
+        refreshModelCatalog();
+      });
+    } catch (_) {
+      finish();
+      refreshModelCatalog();
+    }
+  }
+
+  function refreshModelCatalog() {
+    let ctl = null;
+    let timer = null;
+    try {
+      ctl = new AbortController();
+      timer = setTimeout(() => ctl.abort(), MODEL_CATALOG_TIMEOUT_MS);
+    } catch (_) {}
+    // cache: "no-store" so a stale CDN copy in the HTTP cache can't outlive an
+    // edit — raw.githubusercontent already fronts the file with its own ~5min
+    // edge cache, and stacking a second layer on top would double the lag.
+    fetch(MODEL_CATALOG_URL, { cache: "no-store", signal: ctl ? ctl.signal : undefined })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error("HTTP " + res.status))))
+      .then((raw) => {
+        const cat = normalizeCatalog(raw);
+        if (!cat) throw new Error("malformed catalog");
+        applyCatalog(cat);
+        try {
+          chrome.storage.local.set({ [MODEL_CATALOG_KEY]: raw });
+        } catch (_) {}
+      })
+      .catch(() => {
+        // Offline, rate-limited, or a bad edit landed in main — keep whatever
+        // is already in place (cache or built-in fallback) and try again next
+        // time the panel starts.
+      })
+      .finally(() => {
+        if (timer) clearTimeout(timer);
+      });
   }
 
   // Account-wide plan usage (5-hour + weekly windows), shared across every tab
@@ -175,7 +299,10 @@
   let activeId = null;
   let history = [];
   let historyFilter = "";
-  let lastModel = DEFAULT_MODEL;
+  // Null, not DEFAULT_MODEL — this runs before the catalog loads, so pinning it
+  // here would freeze a fresh install on the built-in default and make
+  // models.json's defaultModel a dead field. makeChat resolves it at use time.
+  let lastModel = null;
   let lastEffort = DEFAULT_EFFORT;
   let lastMode = "auto";
   // Play a chime when a session fully finishes (Settings → General). Off by
@@ -6990,17 +7117,21 @@
       if (els.greeting && !els.greeting.classList.contains("hidden")) updateGreeting();
     }, 5 * 60 * 1000);
 
-    // Restore tabs (or open a first one), then render.
-    loadPrefs(() => {
-      if (!order.length) {
-        const first = makeChat({ cwd: lastCwd });
-        chats.set(first.id, first);
-        order.push(first.id);
-        activeId = first.id;
-      }
-      for (const id of order) els.stack.appendChild(chats.get(id).messagesEl);
-      renderTabs();
-      setActive(activeId);
+    // Pull the model catalog before restoring tabs, so a tab saved on a model
+    // that only exists in the remote list still resolves to its real label.
+    loadModelCatalog(() => {
+      // Restore tabs (or open a first one), then render.
+      loadPrefs(() => {
+        if (!order.length) {
+          const first = makeChat({ cwd: lastCwd });
+          chats.set(first.id, first);
+          order.push(first.id);
+          activeId = first.id;
+        }
+        for (const id of order) els.stack.appendChild(chats.get(id).messagesEl);
+        renderTabs();
+        setActive(activeId);
+      });
     });
   }
 
