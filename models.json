@@ -7,7 +7,7 @@
     { "id": "claude-haiku-4-5-20251001", "label": "Haiku 4.5", "contextLimit": 200000 },
     { "id": "claude-sonnet-5", "label": "Sonnet 5", "contextLimit": 1000000 },
     { "id": "claude-opus-4-8", "label": "Opus 4.8", "contextLimit": 1000000 },
-    { "id": "claude-opus-5", "label": "Opus 5", "contextLimit": 200000 },
+    { "id": "claude-opus-5", "label": "Opus 5", "contextLimit": 1000000 },
     { "id": "claude-fable-5", "label": "Fable 5", "contextLimit": 1000000 }
   ]
 }

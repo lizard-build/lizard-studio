@@ -103,9 +103,10 @@
   // lands for a model missing from its own table.
   const CONTEXT_LIMITS_FALLBACK = {
     "claude-opus-4-8": 1000000,
-    // Opus 5 isn't in the CLI's model table yet, so Claude Code falls back to
-    // 200k for it — matched here so the ring keeps reading 1:1 with /context.
-    "claude-opus-5": 200000,
+    // Opus 5 reads 1M from CLI 2.1.220 on. Older CLIs don't have the model in
+    // their table and fall back to 200k, so the ring runs ahead of /context
+    // there until the user updates.
+    "claude-opus-5": 1000000,
     "claude-sonnet-5": 1000000,
     "claude-fable-5": 1000000,
     "claude-haiku-4-5-20251001": 200000,
