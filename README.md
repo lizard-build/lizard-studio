@@ -1,5 +1,7 @@
 # Lizard Studio
 
+**[Install from the Chrome Web Store →](https://chromewebstore.google.com/detail/kgbaeoalmkabpoglpjcdmppdmcipfdeh)**
+
 **Claude Code in your browser's side panel — an AI coding agent that can see, measure, and fix the page you're building.**
 
 A Chrome extension (Manifest V3) with two halves that feed each other:
@@ -14,6 +16,8 @@ Everything runs locally. The extension talks to a tiny native host that spawns `
 ## Setup
 
 ### 1. The extension
+
+Install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/kgbaeoalmkabpoglpjcdmppdmcipfdeh), or load this folder yourself:
 
 1. Open `chrome://extensions`, enable **Developer mode**.
 2. **Load unpacked** → select this folder.
