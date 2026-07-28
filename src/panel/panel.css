@@ -1331,6 +1331,32 @@ code.inline {
 .login-submit:hover:not(:disabled),
 .cmd-row button:hover { background: var(--control-primary); }
 
+/* Remote Control card: same shell as the login card, with its buttons on one
+   row (open / copy / turn off) instead of stacked. */
+.rc-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.rc-actions .login-open { margin-top: 0; }
+.rc-copy {
+  height: 32px;
+  padding: 0 12px;
+  font-family: var(--font-family);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: none;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.rc-copy:hover { color: var(--text-primary); border-color: var(--control-secondary-hover); }
+.rc-copy:active { transform: scale(0.97); }
+
 .login-open {
   margin-top: 12px;
   display: inline-flex;

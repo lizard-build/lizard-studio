@@ -231,7 +231,9 @@
   // `/usage` probe (see refreshUsage) and read by the toolbar usage popover.
   // `at` is when it was last refreshed; `fetching` guards against overlapping
   // probes. A probe reuses a live, idle session — its events are swallowed by
-  // the chat.usageProbe gate in onClaudeEvent so nothing renders into the chat.
+  // the chat.usageProbe gate in onClaudeEvent so nothing renders into the chat,
+  // with a content-matched backstop (usageEchoText) for a reply that arrives
+  // after the gate is released.
   const usageState = { rows: [], at: 0, fetching: false };
   const USAGE_STALE_MS = 30000;   // re-probe on popover open if older than this
   const USAGE_THROTTLE_MS = 45000; // min gap between background (post-turn) probes
@@ -336,9 +338,18 @@
     "code-review": "[low|medium|high|max] [--fix]",
     debug: "<what's broken>",
     "update-config": "<setting change>",
+    "remote-control": "[session name | off]",
   };
   function slashHint(cmd) {
     return SLASH_ARG_HINTS[cmd] || SLASH_ARG_HINTS[String(cmd).split(":").pop()] || "";
+  }
+
+  // Commands the panel runs itself. The headless CLI doesn't list them (both are
+  // REPL-only there), so splice them into the autocomplete menu ourselves.
+  const LOCAL_COMMANDS = ["login", "remote-control"];
+  function withLocalCommands(list) {
+    const missing = LOCAL_COMMANDS.filter((c) => !list.includes(c));
+    return missing.length ? [...missing, ...list] : list;
   }
 
   function newId() {
@@ -600,6 +611,10 @@
       // "/extra-usage") command; consumed by the next assistant text block to
       // render a progress-bar card instead of the raw CLI text.
       pendingUsageCard: false,
+      // Set when a silent /usage probe's gate was released before its own reply
+      // arrived — the reply is still in flight and must be swallowed by content
+      // when it lands (see usageEchoText / the "assistant" and "result" cases).
+      usageEcho: false,
       // Counts real human turns rendered so far (live sends + replayed
       // history), 1-based. Stamped onto each rewindable user row so its
       // rewind button can tell the host which turn to truncate back to —
@@ -1717,20 +1732,54 @@
   function handleUsageProbe(chat, d) {
     if (!d || !d.type) return;
     collectUsageText(chat.usageProbe, d);
-    if (d.type === "result") finishUsageProbe(chat);
+    if (d.type === "result") finishUsageProbe(chat, true);
   }
 
-  function finishUsageProbe(chat) {
+  // `sawResult` means the probe's own reply landed before the gate came down,
+  // so nothing more is coming. Without it the reply is still in flight — arm
+  // the content-matched swallow so it can't render as a chat message.
+  function finishUsageProbe(chat, sawResult) {
     if (!chat || !chat.usageProbe) return;
     clearTimeout(usageProbeTimer);
-    const parsed = parseUsageText(chat.usageProbe.buf);
+    const buf = chat.usageProbe.buf;
     chat.usageProbe = null;
     usageState.fetching = false;
-    if (parsed && parsed.rows.length) {
-      usageState.rows = parsed.rows;
-      usageState.at = Date.now();
-    }
+    if (!sawResult) chat.usageEcho = true;
+    if (!absorbUsageDump(buf)) refreshUsageUI();
+  }
+
+  // Feed a plan-usage dump into the meter without rendering it anywhere.
+  function absorbUsageDump(text) {
+    const parsed = parseUsageText(text);
+    if (!parsed || !parsed.rows.length) return false;
+    usageState.rows = parsed.rows;
+    usageState.at = Date.now();
+    usageState.fetching = false;
     refreshUsageUI();
+    return true;
+  }
+
+  // A `/usage` reply identifies itself by content, not by timing: the CLI
+  // answers with a zero-turn message whose model is the literal "<synthetic>"
+  // and whose whole text is the plan dump, then a `result` carrying that same
+  // text. Both can outrun the probe gate — the user hitting Enter releases it,
+  // and so does the safety timeout — and a released gate used to let the dump
+  // land in the chat as an ordinary markdown message. Recognizing it by shape
+  // catches it however late it arrives.
+  const SYNTHETIC_MODEL = "<synthetic>";
+  function usageEchoText(msg) {
+    if (!msg || msg.model !== SYNTHETIC_MODEL) return "";
+    const blocks = Array.isArray(msg.content) ? msg.content : [];
+    const text = blocks
+      .filter((b) => b && b.type === "text" && b.text)
+      .map((b) => b.text)
+      .join("\n");
+    return text && parseUsageText(text) ? text : "";
+  }
+  // The matching zero-turn `result`. Ending the turn on it would stop the
+  // spinner on whatever real prompt is running behind the probe.
+  function isUsageEchoResult(d) {
+    return !d.num_turns && typeof d.result === "string" && !!parseUsageText(d.result);
   }
 
   // The CLI answers a local, zero-turn command (/usage and friends) with a
@@ -3333,11 +3382,7 @@
           chat.replayed = true;
           if (d.cwd) { chat.cwd = d.cwd; rememberCwd(d.cwd); }
           if (d.session_id) chat.sessionId = d.session_id;
-          // `/login` is handled by the panel (the headless CLI doesn't list it),
-          // so make sure it's offered in the autocomplete menu.
-          if (Array.isArray(d.slash_commands)) {
-            chat.slashCommands = d.slash_commands.includes("login") ? d.slash_commands : ["login", ...d.slash_commands];
-          }
+          if (Array.isArray(d.slash_commands)) chat.slashCommands = withLocalCommands(d.slash_commands);
           if (Array.isArray(d.skills)) chat.skills = d.skills;
           if (Array.isArray(d.plugins)) chat.plugins = d.plugins.map((p) => ({ name: p.name, source: p.source }));
           if (d.model) reflectModel(chat, d.model);
@@ -3372,6 +3417,17 @@
         // Subagent turn — track its usage / tool calls for the drawer, but don't
         // render its messages into the shared chat.
         if (d.parent_tool_use_id) { noteAgentActivity(chat, d.parent_tool_use_id, d.message); break; }
+        // A silent probe's reply that outran its gate. Never a real turn (the
+        // user's own /usage sets pendingUsageCard) — feed the meter, render
+        // nothing, and keep swallowing until its `result` goes by.
+        if (!chat.pendingUsageCard) {
+          const echo = usageEchoText(d.message);
+          if (echo) {
+            absorbUsageDump(echo);
+            chat.usageEcho = true;
+            break;
+          }
+        }
         resumeTurnIfIdle(chat);
         noteCtxUsage(chat, d.message && d.message.usage);
         const msgId = d.message && d.message.id;
@@ -3428,12 +3484,21 @@
             // signal the command has. (/usage's card is drawn from its synthetic
             // assistant reply instead — skip while that's pending so a stdout
             // copy of the same text can't double-render it.)
-            if (!chat.pendingUsageCard) renderLocalCommandOutput(chat, content, Date.now());
+            // isUsageDump: a plan snapshot nobody asked for (a silent probe's
+            // stdout copy) belongs in the meter, not in the conversation.
+            if (!chat.pendingUsageCard && !isUsageDump(content)) renderLocalCommandOutput(chat, content, Date.now());
           }
         }
         break;
       }
       case "result":
+        // The tail of a swallowed probe reply — not the running turn's result.
+        if (chat.usageEcho && !chat.pendingUsageCard && isUsageEchoResult(d)) {
+          chat.usageEcho = false;
+          absorbUsageDump(String(d.result || ""));
+          break;
+        }
+        chat.usageEcho = false;
         endTurn(chat, d);
         // Auth death arrives as a failed result carrying the API's 401 text —
         // the process is alive but its token is gone (see sessionLooksStale
@@ -3915,9 +3980,7 @@
         break;
       case "commands":
         if (chat && Array.isArray(msg.list)) {
-          // `/login` is handled by the panel (the headless CLI doesn't list it),
-          // so make sure it's offered in the autocomplete menu.
-          chat.slashCommands = msg.list.includes("login") ? msg.list : ["login", ...msg.list];
+          chat.slashCommands = withLocalCommands(msg.list);
           if (Array.isArray(msg.skills)) chat.skills = msg.skills;
           if (Array.isArray(msg.plugins)) chat.plugins = msg.plugins;
           // If the user is mid-"/" in this tab, populate the menu now.
@@ -4042,6 +4105,9 @@
         break;
       case "authDone":
         if (chat) loginDone(chat, msg.ok, msg.message);
+        break;
+      case "remoteControl":
+        if (chat) remoteControlDone(chat, msg);
         break;
       case "error":
         if (chat) {
@@ -4493,6 +4559,22 @@
       resetChatSession(chat);
       return;
     }
+    // `/remote-control` is REPL-only in the CLI — the headless session answers
+    // "isn't available in this environment". Drive it over the control channel
+    // instead (see startRemoteControl). `/remote-control off` turns it back off;
+    // anything else after the command is the session name shown in the app.
+    const rc = /^\/(?:remote-control|rc)(?:\s+([\s\S]*))?$/.exec(text);
+    if (rc) {
+      els.input.value = "";
+      autosize();
+      userBubble(chat, text, null);
+      chat.empty = false;
+      updateSetup();
+      const arg = (rc[1] || "").trim();
+      if (/^off$/i.test(arg)) startRemoteControl(chat, null, false);
+      else startRemoteControl(chat, arg, true);
+      return;
+    }
     // `/login` can't run in the headless CLI, so drive its OAuth flow from here.
     if (/^\/login\s*$/.test(text)) {
       els.input.value = "";
@@ -4615,8 +4697,13 @@
     updateTabDots();
     // A real turn always wins over an in-flight silent usage probe: release its
     // event-swallowing gate now so this prompt's stream renders normally. The
-    // CLI runs prompts in order, so the probe's own reply has already landed.
+    // probe's reply is usually still in flight at this point — a probe fires the
+    // instant a turn ends, which is exactly when the next message gets typed —
+    // so finishUsageProbe arms the content-matched swallow that catches it.
     if (chat.usageProbe) finishUsageProbe(chat);
+    // Nothing in flight — drop a stale arm from a probe whose reply never came,
+    // so it can't swallow the result of the turn starting here.
+    else chat.usageEcho = false;
     const hasContext = Array.isArray(chat.contexts) && chat.contexts.length > 0;
     const attachments = Array.isArray(chat.attachments) ? chat.attachments : [];
     if (!chat.started) startChatSession(chat);
@@ -4849,6 +4936,97 @@
       chat.restartFlush = true;
       startChatSession(chat);
     }
+  }
+
+  // ---- Remote Control -------------------------------------------------------
+  // Hands this tab's session to the Claude app so you can carry on from a phone.
+  // The CLI's own `/remote-control` is REPL-only and comes back as "isn't
+  // available in this environment" here, so the host asks for it over the
+  // stream-json control channel instead and replies with the claude.ai links.
+  function startRemoteControl(chat, name, enabled) {
+    const on = enabled !== false;
+    if (chat.rcCard) { chat.rcCard.remove(); chat.rcCard = null; }
+    const card = el("div", "login-card rc-card");
+    const titleRow = el("div", "login-title-row");
+    const icon = el("span", "login-icon");
+    icon.innerHTML = '<span class="login-spinner"></span>';
+    titleRow.appendChild(icon);
+    titleRow.appendChild(el("span", "login-title", "Remote Control"));
+    card.appendChild(titleRow);
+    card._icon = icon;
+    const status = el("div", "login-status", on ? "Connecting this session to your Claude account…" : "Turning Remote Control off…");
+    card.appendChild(status);
+    card._status = status;
+    chat.rcCard = card;
+    append(chat, card);
+    if (!post({ type: "remoteControl", id: chat.id, enabled: on, name: name || undefined })) {
+      status.textContent = "Can't reach the host — is the native helper running?";
+      card.classList.add("error");
+      chat.rcCard = null;
+    }
+  }
+
+  function stopRemoteControl(chat) {
+    post({ type: "remoteControl", id: chat.id, enabled: false });
+  }
+
+  function remoteControlDone(chat, msg) {
+    const card = chat.rcCard;
+    chat.rcCard = null;
+    const url = msg.connectUrl || msg.sessionUrl || null;
+    if (!card) {
+      // No card to update: either the tab was reset mid-request, or the host
+      // re-armed Remote Control by itself after a respawn (model switch, Stop).
+      // Success there is expected and silent; a failure is worth saying.
+      if (!msg.ok) systemNote(chat, "Remote Control stopped: " + (msg.error || "unknown error"), "warn");
+      return;
+    }
+    card.classList.add(msg.ok ? "done" : "error");
+    if (!msg.ok) {
+      card._icon.remove();
+      card._status.textContent = "Remote Control failed: " + (msg.error || "unknown error");
+      return;
+    }
+    if (!msg.enabled) {
+      card._icon.innerHTML = ICON("check", 13);
+      card._status.textContent = "Remote Control is off. This session is local again.";
+      return;
+    }
+    card._icon.innerHTML = ICON("check", 13);
+    card._status.textContent = url
+      ? "This session is live in the Claude app. Open the link on your phone to carry on there."
+      : "This session is live in the Claude app.";
+    const row = el("div", "rc-actions");
+    if (url) {
+      const open = el("button", "login-open", "Open in Claude");
+      open.type = "button";
+      open.addEventListener("click", () => {
+        try { chrome.tabs.create({ url }); }
+        catch (_) { window.open(url, "_blank"); }
+      });
+      row.appendChild(open);
+      const copy = el("button", "rc-copy", "Copy link");
+      copy.type = "button";
+      copy.addEventListener("click", () => {
+        navigator.clipboard.writeText(url).then(
+          () => { copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy link"; }, 1500); },
+          () => { copy.textContent = "Copy failed"; }
+        );
+      });
+      row.appendChild(copy);
+    }
+    const off = el("button", "rc-copy", "Turn off");
+    off.type = "button";
+    off.addEventListener("click", () => {
+      row.remove();
+      card._status.textContent = "Turning Remote Control off…";
+      // Point the chat back at this card so the host's reply lands on it
+      // instead of being treated as an unprompted state change.
+      chat.rcCard = card;
+      stopRemoteControl(chat);
+    });
+    row.appendChild(off);
+    card.appendChild(row);
   }
 
   // ---- composer / header controls -------------------------------------------

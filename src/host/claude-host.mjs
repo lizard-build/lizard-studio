@@ -49,6 +49,8 @@
 //   { type:"configWrite", id, key, scope, cwd, content }           write it back (→ configWrite reply). For
 //                                                                 hooks/mcp `content` is the JSON sub-object,
 //                                                                 spliced into the file's other keys
+//   { type:"remoteControl", id, enabled, name? }                  turn Remote Control on/off for this
+//                                                                 session (→ remoteControl reply)
 //   { type:"browserResult", bid, ok, data?, error? }              reply to a `browser` request
 //   { type:"permissionResult", id, requestId, behavior,           answer a `permission` ask:
 //     message?, updatedPermissions?, interrupt?,                  behavior "allow" | "deny"
@@ -80,6 +82,9 @@
 //   { type:"permission", id, requestId, toolName, input,       claude wants to use a tool — ask the user
 //     suggestions }                                            (answered with `permissionResult`)
 //   { type:"permissionCancel", id, requestId }                 claude no longer needs that answer
+//   { type:"remoteControl", id, ok, enabled,                   Remote Control state changed (reply to a
+//     sessionUrl?, connectUrl?, error? }                       `remoteControl`, or unprompted after a
+//                                                              respawn re-armed it)
 //   { type:"error",   id, message }
 
 import { spawn, execFile, execSync } from "node:child_process";
@@ -1138,6 +1143,11 @@ const cwdById = new Map(); // id -> last opened cwd (persists across session kil
 
 function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
   id = id || "default";
+  // Remote Control lives in the claude process, so a respawn (model/mode switch,
+  // Stop) drops it. Remember it was on and re-arm the new child once it's up —
+  // the phone stays attached across a switch instead of going quiet.
+  const prevRc = (sessions.get(id) || {}).rc;
+  const rearm = prevRc && prevRc.enabled ? { name: prevRc.name } : null;
   killSession(id);
 
   // No silent fallback to $HOME: a session must run in a real, chosen project
@@ -1166,6 +1176,12 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
     // may be truncated for Chrome's 1 MB cap — echoing a truncated input back
     // on "allow" would corrupt the tool call (e.g. a big Write).
     permPending: new Map(),
+    // Control requests *we* send to claude (Remote Control), keyed by the
+    // request_id we generated: request_id -> callback for its control_response.
+    ctrlPending: new Map(),
+    // Last known Remote Control state: { enabled, name, sessionUrl, connectUrl }.
+    rc: null,
+    rcRearm: rearm,
   };
 
   const args = [
@@ -1279,6 +1295,18 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
         }
         return;
       }
+      if (obj.type === "control_response" && obj.response) {
+        // The answer to a control request we sent (Remote Control). Anything we
+        // didn't send is claude answering the panel's own permission replies —
+        // not a transcript event either way, so never forward it.
+        const pending = s.ctrlPending.get(obj.response.request_id);
+        if (pending) {
+          s.ctrlPending.delete(obj.response.request_id);
+          clearTimeout(pending.timer);
+          pending.resolve(obj.response);
+        }
+        return;
+      }
       if (obj.type === "control_cancel_request") {
         // The turn was interrupted (or claude moved on) — the ask is moot.
         s.permPending.delete(obj.request_id);
@@ -1287,6 +1315,13 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
       }
       if (obj.type === "system" && obj.subtype === "init" && obj.session_id) {
         s.sessionId = obj.session_id;
+        // The control channel only answers once the session is up, so a re-arm
+        // carried over from the process this one replaced waits until here.
+        if (s.rcRearm) {
+          const { name } = s.rcRearm;
+          s.rcRearm = null;
+          remoteControl(id, { enabled: true, name });
+        }
       }
       send({ type: "event", id, data: obj });
   });
@@ -1345,6 +1380,11 @@ function killSession(id) {
   // panel, or its dialog would hang for a process that can't hear the answer.
   for (const requestId of s.permPending.keys()) send({ type: "permissionCancel", id, requestId });
   s.permPending.clear();
+  // Our own in-flight control requests die with the process. Drop them quietly:
+  // most kills here are a respawn (model switch, Stop), and startClaude re-arms
+  // Remote Control on the new child — an error card would just be wrong.
+  for (const pending of s.ctrlPending.values()) clearTimeout(pending.timer);
+  s.ctrlPending.clear();
   if (s.child) {
     const child = s.child;
     child._intentional = true;
@@ -1766,6 +1806,66 @@ function writeToChild(id, obj) {
   }
   s.child.stdin.write(JSON.stringify(obj) + "\n");
   return true;
+}
+
+// ---- Remote Control ---------------------------------------------------------
+// `/remote-control` is one of the CLI's REPL-only commands: typed into a
+// headless `-p` session it comes back as "isn't available in this environment".
+// The feature itself is fine here — the stream-json control channel carries a
+// `remote_control` request, which the CLI answers on its SDK bridge, so we ask
+// for it that way instead. On success claude returns the claude.ai URLs that
+// let a phone drive this very session.
+let ctrlSeq = 0;
+function remoteControl(id, msg) {
+  const s = sessions.get(id);
+  if (!s || !s.child || !s.child.stdin.writable) {
+    send({ type: "remoteControl", id, ok: false, enabled: false, error: "No active Claude session. Start one first." });
+    return;
+  }
+  const enabled = msg.enabled !== false;
+  const name = typeof msg.name === "string" && msg.name.trim() ? msg.name.trim() : undefined;
+  const requestId = "rc-" + ++ctrlSeq;
+  // Claude answers on its own schedule (the bridge dials claude.ai first), and a
+  // dead child answers never — don't leave the panel's card spinning forever.
+  const timer = setTimeout(() => {
+    if (!s.ctrlPending.delete(requestId)) return;
+    send({ type: "remoteControl", id, ok: false, enabled: false, error: "Claude didn't answer the Remote Control request." });
+  }, 45000);
+  timer.unref?.();
+  const resolve = (res) => {
+    if (res.subtype !== "success") {
+      log("remote control failed:", res.error);
+      send({ type: "remoteControl", id, ok: false, enabled: false, error: res.error || "Remote Control failed." });
+      return;
+    }
+    const payload = res.response || {};
+    s.rc = enabled
+      ? { enabled: true, name, sessionUrl: payload.session_url || null, connectUrl: payload.connect_url || null }
+      : null;
+    log("remote control", enabled ? "on" : "off", "id=", id);
+    send({
+      type: "remoteControl",
+      id,
+      ok: true,
+      enabled,
+      sessionUrl: payload.session_url || null,
+      connectUrl: payload.connect_url || null,
+    });
+  };
+  s.ctrlPending.set(requestId, { resolve, timer });
+  try {
+    s.child.stdin.write(
+      JSON.stringify({
+        type: "control_request",
+        request_id: requestId,
+        request: { subtype: "remote_control", enabled, ...(name ? { name } : {}) },
+      }) + "\n"
+    );
+  } catch (err) {
+    clearTimeout(timer);
+    s.ctrlPending.delete(requestId);
+    send({ type: "remoteControl", id, ok: false, enabled: false, error: err.message });
+  }
 }
 
 function sendPrompt(id, text, images) {
@@ -2467,6 +2567,9 @@ function handle(msg) {
       break;
     case "gitDiff":
       gitDiff(id, msg.cwd);
+      break;
+    case "remoteControl":
+      remoteControl(id, msg);
       break;
     case "browserResult":
       resolveBrowser(msg);
