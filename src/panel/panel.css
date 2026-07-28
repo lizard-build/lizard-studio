@@ -999,6 +999,12 @@ body {
   border-style: solid;
   padding-right: 34px; /* reserve room for the cancel button so revealing it doesn't shift text */
 }
+/* Waiting prompts are click-to-edit too (see beginQueuedEdit in chat.js) — the
+   dimming is there to say "not sent yet", but while it's being rewritten the
+   user is reading what they type, so drop it. */
+.msg-user.queued .bubble.editing {
+  opacity: 1;
+}
 /* The cancel button overlays the bubble's right edge (a sibling, not a child,
    so it stays at full opacity instead of inheriting the bubble's dimming) and
    only shows up while hovering the message — same reveal-on-hover as
@@ -1012,7 +1018,10 @@ body {
   pointer-events: none;
   transition: opacity 0.15s;
 }
-.msg-user.queued:hover .queued-tag {
+.msg-user.queued:hover .queued-tag,
+/* Keep the remove button up while the prompt is open for editing — clearing it
+   out is one of the two ways to end the edit. */
+.msg-user.queued .bubble.editing ~ .queued-tag {
   opacity: 1;
   pointer-events: auto;
 }

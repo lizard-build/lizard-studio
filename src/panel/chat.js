@@ -4636,28 +4636,118 @@
   // bubble was previously frontmost instead of stacking it after everything.
   function renderQueuedBubble(chat, entry, opts) {
     const row = el("div", "msg msg-user queued");
-    row.appendChild(buildBubble(entry.text, entry.attachments, entry.contexts));
+    const bubble = buildBubble(entry.text, entry.attachments, entry.contexts);
+    row.appendChild(bubble);
     const tag = el("div", "queued-tag");
     const cancel = el("button", "queued-cancel");
     cancel.type = "button";
     cancel.innerHTML = ICON("x", 13);
     cancel.title = "Remove from queue";
-    cancel.addEventListener("click", () => {
-      const idx = chat.queue.indexOf(entry);
-      if (idx !== -1) chat.queue.splice(idx, 1);
-      row.remove();
-      updateTabDots(); // may have been the last thing keeping the dot yellow
-    });
+    // mousedown would blur an open editor first, and that blur reverts the edit
+    // and releases the queue — the entry could go out in the gap before the
+    // click landed. Swallow it so the click below removes the entry outright.
+    cancel.addEventListener("mousedown", (e) => e.preventDefault());
+    cancel.addEventListener("click", () => removeQueued(chat, entry, row));
     tag.appendChild(cancel);
     row.appendChild(tag);
+    wireQueuedEdit(chat, entry, bubble, row);
     append(chat, row, { raw: !(opts && opts.atFront) });
     return row;
+  }
+
+  function removeQueued(chat, entry, row) {
+    if (Array.isArray(chat.queue)) {
+      const idx = chat.queue.indexOf(entry);
+      if (idx !== -1) chat.queue.splice(idx, 1);
+    }
+    entry.editing = false; // it's gone — stop holding the queue back
+    row.remove();
+    updateTabDots(); // may have been the last thing keeping the dot yellow
+    // If the session went idle while this entry was being edited, whatever is
+    // behind it has been waiting — let it go now.
+    flushQueuedIfIdle(chat);
+  }
+
+  // Click a still-waiting prompt to rewrite it before it's sent. Committing
+  // (Enter) just updates the queued text — nothing is rewound, because nothing
+  // has gone out yet. Escape/blur reverts.
+  function wireQueuedEdit(chat, entry, bubble, row) {
+    bubble.classList.add("editable");
+    bubble.addEventListener("click", (e) => {
+      if (bubble.classList.contains("editing")) return;
+      if (e.target.closest("a")) return; // don't hijack link clicks
+      if (e.target.closest(".queued-cancel")) return;
+      const sel = window.getSelection();
+      if (sel && String(sel).length) return; // don't hijack a text selection
+      beginQueuedEdit(chat, entry, bubble, row);
+    });
+  }
+
+  function beginQueuedEdit(chat, entry, bubble, row) {
+    const mdNode = bubble.querySelector(".md");
+    bubble.classList.add("editing");
+    // Holds the queue at this entry: its send time may come around mid-edit,
+    // and half-rewritten text shouldn't go out. dispatchNextQueued checks this.
+    entry.editing = true;
+    const ta = el("textarea", "msg-edit");
+    ta.value = entry.text || "";
+    if (mdNode) mdNode.replaceWith(ta);
+    else bubble.appendChild(ta);
+    const resize = () => {
+      ta.style.height = "auto";
+      ta.style.height = ta.scrollHeight + "px";
+    };
+    resize();
+    ta.addEventListener("input", resize);
+    let closed = false;
+    const close = (text) => {
+      if (closed) return;
+      closed = true;
+      entry.text = text;
+      entry.editing = false;
+      bubble.classList.remove("editing");
+      ta.replaceWith(R.markdown(text));
+      // The entry may have been due to go out while it was held — release it.
+      flushQueuedIfIdle(chat);
+    };
+    ta.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        const newText = ta.value;
+        // Emptied out with nothing else attached — treat it as a delete, same
+        // as the cancel button, rather than queuing a blank prompt.
+        const bare = !(entry.attachments && entry.attachments.length) && !(entry.contexts && entry.contexts.length);
+        if (!newText.trim() && bare) {
+          closed = true;
+          removeQueued(chat, entry, row);
+          return;
+        }
+        close(newText);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        close(entry.text);
+      }
+    });
+    ta.addEventListener("blur", () => close(entry.text));
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
+
+  // Called when an edit ends: if the session went idle in the meantime, the
+  // held entry (and anything behind it) should go out now.
+  function flushQueuedIfIdle(chat) {
+    if (!chat || chat.turnRunning || chat.restartFlush) return;
+    if (!connected || !hostReady) return;
+    dispatchNextQueued(chat);
   }
 
   // Drains the next queued prompt (if any) once a turn finishes. Runs even if
   // `chat` isn't the active tab — background chats keep working while queued.
   function dispatchNextQueued(chat) {
     if (!Array.isArray(chat.queue) || !chat.queue.length) return;
+    // Head of the queue is open for editing — hold everything until the user
+    // is done with it (or deletes it); both paths call back in here.
+    if (chat.queue[0].editing) return;
     const entry = chat.queue.shift();
     if (entry.el && entry.el.parentNode) entry.el.remove();
     // Merge, don't replace: anything picked/attached WHILE this entry sat in
