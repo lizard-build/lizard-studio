@@ -111,6 +111,25 @@ body {
   animation: menu-in 0.26s cubic-bezier(0.33, 1, 0.68, 1);
   transform-origin: bottom right;
 }
+/* Going away is the same move played backwards and half as far — quicker than
+   opening, since nobody wants to wait on a dismissal. */
+@keyframes menu-out {
+  from { opacity: 1; transform: none; filter: blur(0); }
+  to {
+    opacity: 0;
+    transform: translateY(calc(var(--menu-in-y, 12px) * 0.5)) scale(0.96);
+    filter: blur(3px);
+  }
+}
+.branch-menu.is-closing,
+.mode-menu.is-closing,
+.model-menu.is-closing,
+.effort-menu.is-closing,
+.usage-menu.is-closing,
+.history-menu.is-closing {
+  animation: menu-out 0.13s cubic-bezier(0.4, 0, 1, 1) forwards;
+  pointer-events: none;
+}
 .branch-menu,
 .mode-menu { transform-origin: bottom left; }
 /* The only one that drops down instead of rising — start and overshoot flip. */
@@ -127,6 +146,12 @@ body {
   .effort-menu,
   .usage-menu,
   .history-menu,
+  .branch-menu.is-closing,
+  .mode-menu.is-closing,
+  .model-menu.is-closing,
+  .effort-menu.is-closing,
+  .usage-menu.is-closing,
+  .history-menu.is-closing,
   .settings-overlay,
   .settings-modal { animation: none; }
 }

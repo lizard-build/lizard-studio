@@ -412,6 +412,51 @@
   }
 
   // ---- DOM helpers ----------------------------------------------------------
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+  // Menus animate open off the display change alone, but going away needs a
+  // beat of JS: `is-closing` runs the reverse move, then `hidden` pulls the
+  // menu out of the layout. Reopening mid-close cancels the pending hide, so a
+  // fast second click doesn't leave a menu that closes itself a moment later.
+  const MENU_CLOSE_MS = 130;
+  const menuCloseTimers = new WeakMap();
+  // Every dropdown registered here is exclusive: opening one closes the rest,
+  // so the toolbar can't end up wearing three stacked panels. A menu can hand
+  // in extra cleanup (the effort panel stops its canvas loop, for one).
+  const menuRegistry = [];
+  const menuTeardowns = new WeakMap();
+  function registerMenu(menu, onClose) {
+    if (!menu || menuRegistry.includes(menu)) return;
+    menuRegistry.push(menu);
+    if (onClose) menuTeardowns.set(menu, onClose);
+  }
+  function menuIsOpen(menu) {
+    return Boolean(menu) && !menu.classList.contains("hidden") && !menu.classList.contains("is-closing");
+  }
+  function openMenu(menu) {
+    if (!menu) return;
+    for (const other of menuRegistry) if (other !== menu) closeMenu(other);
+    clearTimeout(menuCloseTimers.get(menu));
+    menuCloseTimers.delete(menu);
+    menu.classList.remove("is-closing");
+    menu.classList.remove("hidden");
+  }
+  function closeMenu(menu) {
+    if (!menuIsOpen(menu)) return;
+    const teardown = menuTeardowns.get(menu);
+    if (teardown) teardown();
+    if (reducedMotion.matches) {
+      menu.classList.add("hidden");
+      return;
+    }
+    menu.classList.add("is-closing");
+    menuCloseTimers.set(menu, setTimeout(() => {
+      menuCloseTimers.delete(menu);
+      menu.classList.remove("is-closing");
+      menu.classList.add("hidden");
+    }, MENU_CLOSE_MS));
+  }
+
   function el(tag, cls, text) {
     const n = document.createElement(tag);
     if (cls) n.className = cls;
@@ -436,13 +481,6 @@
     if (home && p.replace(/\/$/, "") === home.replace(/\/$/, "")) return "~";
     return basename(p);
   }
-  // "842", "12.4k", "128k" — token counts for the tab tooltip's context row.
-  function fmtTokens(n) {
-    if (n < 1000) return String(n);
-    const k = n / 1000;
-    return (k >= 100 ? Math.round(k) : k.toFixed(1).replace(/\.0$/, "")) + "k";
-  }
-
   function atBottom(chat) {
     const m = chat.messagesEl;
     return m.scrollHeight - m.scrollTop - m.clientHeight < 80;
@@ -714,11 +752,7 @@
       tipLine("chat-tab-tip-title", null, chat.title);
       tipLine("chat-tab-tip-row", "folder", shortPath(chat.cwd) || "No folder selected");
       if (chat.isRepo && chat.branch) tipLine("chat-tab-tip-row", "git-branch", chat.branch);
-      // Built fresh on every hover, so it always shows the latest reading.
-      // Always present (0 before the first reply, and briefly after /compact
-      // until the next reply reports the new size) so the user always knows
-      // where to find it.
-      tipLine("chat-tab-tip-row", "gauge", "Context: " + fmtTokens(chat.ctxTokens || 0) + " tokens");
+      // No context line here — the toolbar ring carries that reading now.
       tip.classList.add("show");
       const r = tabEl.getBoundingClientRect();
       tip.style.top = r.bottom + 6 + "px";
@@ -875,14 +909,13 @@
 
   // ---- history dropdown -----------------------------------------------------
   function toggleHistory() {
-    const open = !els.historyMenu.classList.contains("hidden");
-    if (open) {
-      els.historyMenu.classList.add("hidden");
+    if (menuIsOpen(els.historyMenu)) {
+      closeMenu(els.historyMenu);
       return;
     }
     historyFilter = "";
     renderHistory();
-    els.historyMenu.classList.remove("hidden");
+    openMenu(els.historyMenu);
     const input = els.historyMenu.querySelector(".history-search-input");
     if (input) input.focus();
   }
@@ -942,7 +975,7 @@
       });
       row.appendChild(del);
       row.addEventListener("click", () => {
-        els.historyMenu.classList.add("hidden");
+        closeMenu(els.historyMenu);
         reopenFromHistory(item);
       });
       list.appendChild(row);
@@ -5178,9 +5211,9 @@
 
   // Click opens a dropdown (upward) to pick a mode directly.
   function toggleModeMenu() {
-    if (!els.modeMenu.classList.contains("hidden")) return hideModeMenu();
+    if (menuIsOpen(els.modeMenu)) return hideModeMenu();
     renderModeMenu();
-    els.modeMenu.classList.remove("hidden");
+    openMenu(els.modeMenu);
   }
   function renderModeMenu() {
     const chat = chats.get(activeId);
@@ -5205,7 +5238,7 @@
     }
   }
   function hideModeMenu() {
-    els.modeMenu.classList.add("hidden");
+    closeMenu(els.modeMenu);
   }
 
   // ---- model picker (custom dropdown, opens upward) -------------------------
@@ -5235,7 +5268,7 @@
       if (isCur) ic.innerHTML = ICON("check", 13);
       row.appendChild(ic);
       row.addEventListener("click", () => {
-        menu.classList.add("hidden");
+        closeMenu(menu);
         const c = chats.get(activeId);
         if (c) onPick(c, it.id);
       });
@@ -5244,16 +5277,16 @@
   }
 
   function toggleModelMenu() {
-    if (!els.modelMenu.classList.contains("hidden")) return hideModelMenu();
+    if (menuIsOpen(els.modelMenu)) return hideModelMenu();
     renderModelMenu();
-    els.modelMenu.classList.remove("hidden");
+    openMenu(els.modelMenu);
   }
   function renderModelMenu() {
     const chat = chats.get(activeId);
     renderPickerMenu(els.modelMenu, "Model", MODELS, chat && chat.model, applyModel);
   }
   function hideModelMenu() {
-    els.modelMenu.classList.add("hidden");
+    closeMenu(els.modelMenu);
   }
 
   function reflectModel(chat, modelId) {
@@ -5289,7 +5322,6 @@
     reveal: 0,
     ultra: false,
   };
-  const effortMotionOff = window.matchMedia("(prefers-reduced-motion: reduce)");
 
   function effortClamp(v, min, max) { return Math.min(max, Math.max(min, v)); }
   function effortMix(a, b, t) { return a + (b - a) * t; }
@@ -5299,9 +5331,9 @@
   }
 
   function toggleEffortMenu() {
-    if (!els.effortMenu.classList.contains("hidden")) return hideEffortMenu();
+    if (menuIsOpen(els.effortMenu)) return hideEffortMenu();
     renderEffortMenu();
-    els.effortMenu.classList.remove("hidden");
+    openMenu(els.effortMenu);
     resizeEffortCanvas();
     if (effortSlider.ultra) ensureEffortCanvasLoop();
   }
@@ -5314,7 +5346,10 @@
     setEffortValue(idx, false);
   }
   function hideEffortMenu() {
-    els.effortMenu.classList.add("hidden");
+    closeMenu(els.effortMenu);
+  }
+  // Runs whenever the panel starts closing, however it was closed.
+  function effortMenuClosing() {
     els.effortHelp.classList.remove("is-open");
     cancelAnimationFrame(effortSlider.canvasFrame);
     effortSlider.canvasFrame = 0;
@@ -5359,7 +5394,7 @@
     // Commit on release, not when the spring settles — the animation is
     // decoration, and a throttled frame loop must never swallow the choice.
     commitEffort(target);
-    if (effortMotionOff.matches || Math.abs(target - effortSlider.value) < 0.001) {
+    if (reducedMotion.matches || Math.abs(target - effortSlider.value) < 0.001) {
       setEffortValue(target, false);
       return;
     }
@@ -5403,7 +5438,7 @@
     const previous = els.effortLevel.textContent;
     els.effortLevel.classList.remove("is-preparing");
     els.effortLevelOut.classList.remove("is-exiting");
-    if (!animate || effortMotionOff.matches) {
+    if (!animate || reducedMotion.matches) {
       els.effortLevelOut.textContent = "";
       els.effortLevel.textContent = next;
       return;
@@ -5430,7 +5465,7 @@
     effortSlider.ultra = on;
     els.effortMenu.classList.toggle("is-ultra", on);
     if (on) {
-      effortSlider.reveal = effortMotionOff.matches ? 1 : 0;
+      effortSlider.reveal = reducedMotion.matches ? 1 : 0;
       effortSlider.ultraStart = performance.now();
       ensureEffortCanvasLoop();
     } else {
@@ -5458,12 +5493,12 @@
 
   function ensureEffortCanvasLoop() {
     if (effortSlider.canvasFrame || !effortSlider.ultra) return;
-    if (effortMotionOff.matches || els.effortMenu.classList.contains("hidden")) {
+    if (reducedMotion.matches || !menuIsOpen(els.effortMenu)) {
       drawEffortPixels(performance.now());
       return;
     }
     const frame = (time) => {
-      if (!effortSlider.ultra || els.effortMenu.classList.contains("hidden")) {
+      if (!effortSlider.ultra || !menuIsOpen(els.effortMenu)) {
         effortSlider.canvasFrame = 0;
         return;
       }
@@ -5502,7 +5537,7 @@
     ctx.clearRect(0, 0, width, height);
     if (!effortSlider.ultra) return;
 
-    const reveal = effortMotionOff.matches ? 1 : effortSlider.reveal;
+    const reveal = reducedMotion.matches ? 1 : effortSlider.reveal;
     const frontier = 1 - reveal;
     const cell = width < 280 ? 5 : 6;
     const gap = 1.1;
@@ -5666,7 +5701,7 @@
       els.effortHelp.classList.toggle("is-open");
     });
     window.addEventListener("resize", () => {
-      if (!els.effortMenu.classList.contains("hidden")) resizeEffortCanvas();
+      if (menuIsOpen(els.effortMenu)) resizeEffortCanvas();
     });
   }
 
@@ -5791,14 +5826,14 @@
   }
 
   function toggleUsageMenu() {
-    if (!els.usageMenu.classList.contains("hidden")) return hideUsageMenu();
+    if (menuIsOpen(els.usageMenu)) return hideUsageMenu();
     // Refresh stale plan numbers when opening (forced past the throttle).
     if (Date.now() - usageState.at > USAGE_STALE_MS) refreshUsage(true);
     renderUsageMenu();
-    els.usageMenu.classList.remove("hidden");
+    openMenu(els.usageMenu);
   }
   function hideUsageMenu() {
-    els.usageMenu.classList.add("hidden");
+    closeMenu(els.usageMenu);
   }
 
   // ---- settings modal -------------------------------------------------------
@@ -7121,12 +7156,12 @@
 
   function toggleBranchMenu() {
     if (!els.branchMenu) return;
-    if (!els.branchMenu.classList.contains("hidden")) {
-      els.branchMenu.classList.add("hidden");
+    if (menuIsOpen(els.branchMenu)) {
+      closeMenu(els.branchMenu);
       return;
     }
     renderBranchMenu();
-    els.branchMenu.classList.remove("hidden");
+    openMenu(els.branchMenu);
   }
 
   function renderBranchMenu() {
@@ -7148,7 +7183,7 @@
       if (isCur) chk.innerHTML = ICON("check", 13);
       row.appendChild(chk);
       row.addEventListener("click", () => {
-        els.branchMenu.classList.add("hidden");
+        closeMenu(els.branchMenu);
         if (!isCur) chooseBranch(chat, b);
       });
       els.branchMenu.appendChild(row);
@@ -7677,22 +7712,22 @@
     refreshUsageRing();
     // One delegated close-on-outside-click for every dropdown, instead of one
     // permanent document listener per menu. Toggle buttons stopPropagation, so
-    // any click that reaches here and is outside a menu closes it.
+    // any click that reaches here and is outside a menu closes it. Registering
+    // them here is also what makes them exclusive — opening one closes the rest.
     const dropdownPairs = [
       [els.historyMenu, els.historyBtn],
       [els.branchMenu, els.branch],
       [els.modeMenu, els.mode],
       [els.modelMenu, els.modelBtn],
-      [els.effortMenu, els.effortBtn],
+      [els.effortMenu, els.effortBtn, effortMenuClosing],
       [els.usageMenu, els.usageBtn],
     ];
+    for (const [menu, , onClose] of dropdownPairs) registerMenu(menu, onClose);
     document.addEventListener("click", (e) => {
       for (const [menu, btn] of dropdownPairs) {
-        if (!menu || menu.classList.contains("hidden")) continue;
+        if (!menuIsOpen(menu)) continue;
         if (menu.contains(e.target) || (btn && btn.contains(e.target))) continue;
-        // The effort panel has an animation loop and a tooltip to put away.
-        if (menu === els.effortMenu) hideEffortMenu();
-        else menu.classList.add("hidden");
+        closeMenu(menu);
       }
     });
     els.input.addEventListener("input", () => {
