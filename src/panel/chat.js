@@ -235,6 +235,11 @@
   // with a content-matched backstop (usageEchoText) for a reply that arrives
   // after the gate is released.
   const usageState = { rows: [], at: 0, fetching: false };
+  // Labels the last probe reported, persisted so the popover's skeleton rows
+  // match the real set on a cold start. How many windows a plan has (and their
+  // names) varies by account, so guessing a fixed list makes the menu jump in
+  // height once the numbers land.
+  let usageLabels = ["5-hour limit", "Weekly · all models"];
   const USAGE_STALE_MS = 30000;   // re-probe on popover open if older than this
   const USAGE_THROTTLE_MS = 45000; // min gap between background (post-turn) probes
   let usageProbeTimer = 0;
@@ -371,6 +376,7 @@
         if (p.lastCwd) lastCwd = p.lastCwd;
         if (p.soundOnDone) soundOnDone = true;
         if (Array.isArray(p.history)) history = p.history;
+        if (Array.isArray(p.usageLabels) && p.usageLabels.length) usageLabels = p.usageLabels;
         if (Array.isArray(p.tabs) && p.tabs.length) {
           for (const t of p.tabs) {
             const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, model: t.model, effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory });
@@ -391,7 +397,7 @@
         const c = chats.get(id);
         return { id: c.id, title: c.title, cwd: c.cwd, model: c.model, effort: c.effort, mode: c.mode, sessionId: c.sessionId, bashHistory: (c.bashHistory || []).slice(-40) };
       });
-      chrome.storage.local.set({ rkChatV2: { tabs, activeId, history: history.slice(0, 40), lastModel, lastEffort, lastMode, lastCwd, soundOnDone } });
+      chrome.storage.local.set({ rkChatV2: { tabs, activeId, history: history.slice(0, 40), lastModel, lastEffort, lastMode, lastCwd, soundOnDone, usageLabels } });
     } catch (_) {}
   }
 
@@ -1804,6 +1810,11 @@
     usageState.rows = parsed.rows;
     usageState.at = Date.now();
     usageState.fetching = false;
+    const labels = parsed.rows.map((r) => normalizeUsageLabel(r.label));
+    if (labels.join(" ") !== usageLabels.join(" ")) {
+      usageLabels = labels;
+      savePrefs();
+    }
     refreshUsageUI();
     return true;
   }
@@ -5823,8 +5834,9 @@
     } else {
       // No data yet — skeletons that occupy the exact row geometry so nothing
       // shifts when values land. The label (real text) fixes the row height;
-      // only the reset note, %, and bar fill are masked.
-      for (const label of ["5-hour limit", "Weekly · all models"]) {
+      // only the reset note, %, and bar fill are masked. The set comes from the
+      // last probe, so the row count matches this account's plan.
+      for (const label of usageLabels) {
         planSec.appendChild(usageSkeletonRow(label));
       }
     }
