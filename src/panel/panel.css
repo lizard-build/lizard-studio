@@ -81,13 +81,26 @@ body {
   display: none !important;
 }
 
-/* Every dropdown and popover comes in the same way: a 4px lift out of the
-   button that opened it, with a touch of scale. Short enough to feel instant —
-   same easing as the settings modal. Menus keep their transform-origin on the
-   corner they're anchored to, so they grow out of the button, not the middle. */
+/* Every dropdown and popover comes in the same way: a 10px lift out of the
+   button that opened it, growing from 94% and shedding a little blur on the
+   way. The curve covers most of the distance in the first third and coasts
+   into place, so it reads as one quick, soft move rather than a slide. Menus
+   keep their transform-origin on the corner they're anchored to, so they grow
+   out of the button, not the middle. */
 @keyframes menu-in {
-  from { opacity: 0; transform: translateY(var(--menu-in-y, 4px)) scale(0.98); }
-  to { opacity: 1; transform: none; }
+  0% {
+    opacity: 0;
+    transform: translateY(var(--menu-in-y, 12px)) scale(0.92);
+    filter: blur(5px);
+  }
+  /* Carries 2px past its resting place, then settles back — that overshoot is
+     what makes the move register instead of just happening. */
+  62% {
+    opacity: 1;
+    transform: translateY(var(--menu-in-over, -2px)) scale(1.012);
+    filter: blur(0);
+  }
+  100% { opacity: 1; transform: none; filter: blur(0); }
 }
 .branch-menu,
 .mode-menu,
@@ -95,14 +108,15 @@ body {
 .effort-menu,
 .usage-menu,
 .history-menu {
-  animation: menu-in 0.13s cubic-bezier(0.2, 0.9, 0.3, 1);
+  animation: menu-in 0.26s cubic-bezier(0.33, 1, 0.68, 1);
   transform-origin: bottom right;
 }
 .branch-menu,
 .mode-menu { transform-origin: bottom left; }
-/* The only one that drops down instead of rising. */
+/* The only one that drops down instead of rising — start and overshoot flip. */
 .history-menu {
-  --menu-in-y: -4px;
+  --menu-in-y: -12px;
+  --menu-in-over: 2px;
   transform-origin: top right;
 }
 
@@ -3298,7 +3312,7 @@ code.inline {
   justify-content: center;
   padding: 20px;
   background: rgba(0, 0, 0, 0.55);
-  animation: settings-fade 0.14s ease-out;
+  animation: settings-fade 0.2s ease-out;
 }
 @keyframes settings-fade { from { opacity: 0; } to { opacity: 1; } }
 
@@ -3317,11 +3331,13 @@ code.inline {
   border-radius: 14px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
   overflow: hidden;
-  animation: settings-pop 0.16s cubic-bezier(0.2, 0.9, 0.3, 1);
+  /* Same move as the dropdowns, a hair longer for the bigger surface. */
+  animation: settings-pop 0.3s cubic-bezier(0.33, 1, 0.68, 1);
 }
 @keyframes settings-pop {
-  from { opacity: 0; transform: translateY(8px) scale(0.98); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+  0% { opacity: 0; transform: translateY(16px) scale(0.95); }
+  62% { opacity: 1; transform: translateY(-3px) scale(1.008); }
+  100% { opacity: 1; transform: none; }
 }
 
 .settings-head {
