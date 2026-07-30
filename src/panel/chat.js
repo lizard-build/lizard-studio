@@ -5219,19 +5219,17 @@
     // The composer pill already reflects the active model — no transcript note.
   }
 
-  // Shared row builder for the model/effort pickers — identical structure,
-  // the model rows just carry the Claude logo.
-  function renderPickerMenu(menu, title, items, currentId, onPick, withLogo) {
+  // Row builder for the model picker — each row carries the Claude logo, its
+  // label, and a check on the active one. (Effort has its own slider panel.)
+  function renderPickerMenu(menu, title, items, currentId, onPick) {
     menu.innerHTML = "";
     menu.appendChild(el("div", "model-head", title));
     for (const it of items) {
       const isCur = it.id === currentId;
       const row = el("div", "model-item" + (isCur ? " current" : ""));
-      if (withLogo) {
-        const logo = el("span", "model-item-logo");
-        logo.innerHTML = window.RKClaudeHTML(15);
-        row.appendChild(logo);
-      }
+      const logo = el("span", "model-item-logo");
+      logo.innerHTML = window.RKClaudeHTML(15);
+      row.appendChild(logo);
       row.appendChild(el("span", "model-item-label", it.label));
       const ic = el("span", "model-item-ic");
       if (isCur) ic.innerHTML = ICON("check", 13);
@@ -5252,7 +5250,7 @@
   }
   function renderModelMenu() {
     const chat = chats.get(activeId);
-    renderPickerMenu(els.modelMenu, "Model", MODELS, chat && chat.model, applyModel, true);
+    renderPickerMenu(els.modelMenu, "Model", MODELS, chat && chat.model, applyModel);
   }
   function hideModelMenu() {
     els.modelMenu.classList.add("hidden");
@@ -5273,17 +5271,400 @@
     scheduleSessionRestart(chat);
   }
 
+  // The picker is a slider: one stop per EFFORTS entry, continuous while you
+  // drag, magnetised to the nearest stop and sprung onto it on release. The
+  // last stop (Ultracode) paints the track with an animated pixel field in the
+  // brand green.
+  const effortSlider = {
+    value: 1,
+    index: 1,
+    dragging: false,
+    samples: [],
+    springFrame: 0,
+    canvasFrame: 0,
+    labelFrame: 0,
+    labelTimer: 0,
+    lastFrame: 0,
+    ultraStart: 0,
+    reveal: 0,
+    ultra: false,
+  };
+  const effortMotionOff = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+  function effortClamp(v, min, max) { return Math.min(max, Math.max(min, v)); }
+  function effortMix(a, b, t) { return a + (b - a) * t; }
+  function effortStep(edge0, edge1, v) {
+    const x = effortClamp((v - edge0) / (edge1 - edge0), 0, 1);
+    return x * x * (3 - 2 * x);
+  }
+
   function toggleEffortMenu() {
     if (!els.effortMenu.classList.contains("hidden")) return hideEffortMenu();
     renderEffortMenu();
     els.effortMenu.classList.remove("hidden");
+    resizeEffortCanvas();
+    if (effortSlider.ultra) ensureEffortCanvasLoop();
   }
+  // Opening re-seats the slider on the chat's current effort — no animation,
+  // it should already be there when the panel appears.
   function renderEffortMenu() {
     const chat = chats.get(activeId);
-    renderPickerMenu(els.effortMenu, "Effort", EFFORTS, chat && chat.effort, applyEffort, false);
+    const id = (chat && chat.effort) || DEFAULT_EFFORT;
+    const idx = Math.max(0, EFFORTS.findIndex((e) => e.id === id));
+    setEffortValue(idx, false);
   }
   function hideEffortMenu() {
     els.effortMenu.classList.add("hidden");
+    els.effortHelp.classList.remove("is-open");
+    cancelAnimationFrame(effortSlider.canvasFrame);
+    effortSlider.canvasFrame = 0;
+  }
+
+  function setEffortValue(next, animateLabel) {
+    const max = EFFORTS.length - 1;
+    const value = effortClamp(Number.isFinite(next) ? next : 0, 0, max);
+    const index = effortClamp(Math.round(value), 0, max);
+    const prev = effortSlider.index;
+    effortSlider.value = value;
+    effortSlider.index = index;
+    els.effortRange.value = String(value);
+    els.effortRange.setAttribute("aria-valuetext", EFFORTS[index].label);
+    els.effortMenu.style.setProperty("--effort-progress", String(value / max));
+    if (index !== prev) swapEffortLabel(EFFORTS[index].label, index > prev, animateLabel);
+    else if (!els.effortLevel.textContent) els.effortLevel.textContent = EFFORTS[index].label;
+    setEffortUltra(index === max);
+  }
+
+  // Pulls the handle toward the nearest stop while dragging, so it settles on a
+  // level rather than between two.
+  function effortMagnet(value) {
+    const nearest = Math.round(value);
+    const delta = value - nearest;
+    const distance = Math.abs(delta);
+    if (distance < 0.001 || distance > 0.5) return value;
+    const t = 1 - distance / 0.5;
+    return value - delta * (0.68 + 0.42 * t) * t * t;
+  }
+
+  function commitEffort(index) {
+    const chat = chats.get(activeId);
+    if (!chat) return;
+    const id = EFFORTS[index].id;
+    if (chat.effort === id) return;
+    applyEffort(chat, id);
+  }
+
+  function snapEffort() {
+    const target = Math.round(effortSlider.value);
+    // Commit on release, not when the spring settles — the animation is
+    // decoration, and a throttled frame loop must never swallow the choice.
+    commitEffort(target);
+    if (effortMotionOff.matches || Math.abs(target - effortSlider.value) < 0.001) {
+      setEffortValue(target, false);
+      return;
+    }
+    let velocity = 0;
+    if (effortSlider.samples.length >= 2) {
+      const first = effortSlider.samples[0];
+      const last = effortSlider.samples[effortSlider.samples.length - 1];
+      const elapsed = Math.max((last.time - first.time) / 1000, 0.016);
+      velocity = effortClamp((last.value - first.value) / elapsed, -8, 8);
+    }
+    springEffort(target, velocity);
+  }
+
+  function springEffort(target, velocity) {
+    cancelAnimationFrame(effortSlider.springFrame);
+    let position = effortSlider.value;
+    let v = velocity;
+    let prevTime = performance.now();
+    const step = (time) => {
+      const dt = Math.min((time - prevTime) / 1000, 0.032);
+      prevTime = time;
+      v += (-920 * (position - target) - 40 * v) * dt;
+      position = effortClamp(position + v * dt, 0, EFFORTS.length - 1);
+      setEffortValue(position, true);
+      if (Math.abs(position - target) < 0.001 && Math.abs(v) < 0.01) {
+        effortSlider.springFrame = 0;
+        setEffortValue(target, false);
+        return;
+      }
+      effortSlider.springFrame = requestAnimationFrame(step);
+    };
+    effortSlider.springFrame = requestAnimationFrame(step);
+  }
+
+  // The level name swaps in place: the old one blurs out upward (or down, when
+  // stepping back), the new one arrives from the other side.
+  function swapEffortLabel(next, forward, animate) {
+    cancelAnimationFrame(effortSlider.labelFrame);
+    clearTimeout(effortSlider.labelTimer);
+    effortSlider.labelFrame = 0;
+    const previous = els.effortLevel.textContent;
+    els.effortLevel.classList.remove("is-preparing");
+    els.effortLevelOut.classList.remove("is-exiting");
+    if (!animate || effortMotionOff.matches) {
+      els.effortLevelOut.textContent = "";
+      els.effortLevel.textContent = next;
+      return;
+    }
+    els.effortLevelOut.textContent = previous;
+    els.effortLevel.textContent = next;
+    els.effortLevel.style.setProperty("--effort-enter-y", forward ? "3px" : "-3px");
+    els.effortLevelOut.style.setProperty("--effort-exit-y", forward ? "-3px" : "3px");
+    els.effortLevel.classList.add("is-preparing");
+    els.effortLevel.getBoundingClientRect(); // flush the start state
+    effortSlider.labelFrame = requestAnimationFrame(() => {
+      effortSlider.labelFrame = 0;
+      els.effortLevel.classList.remove("is-preparing");
+      els.effortLevelOut.classList.add("is-exiting");
+    });
+    effortSlider.labelTimer = setTimeout(() => {
+      els.effortLevelOut.textContent = "";
+      els.effortLevelOut.classList.remove("is-exiting");
+    }, 200);
+  }
+
+  function setEffortUltra(on) {
+    if (on === effortSlider.ultra) return;
+    effortSlider.ultra = on;
+    els.effortMenu.classList.toggle("is-ultra", on);
+    if (on) {
+      effortSlider.reveal = effortMotionOff.matches ? 1 : 0;
+      effortSlider.ultraStart = performance.now();
+      ensureEffortCanvasLoop();
+    } else {
+      effortSlider.reveal = 0;
+      cancelAnimationFrame(effortSlider.canvasFrame);
+      effortSlider.canvasFrame = 0;
+      drawEffortPixels(performance.now());
+    }
+  }
+
+  function resizeEffortCanvas() {
+    const rect = els.effortTrack.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.round(rect.width * ratio);
+    const h = Math.round(rect.height * ratio);
+    if (els.effortCanvas.width === w && els.effortCanvas.height === h) return;
+    els.effortCanvas.width = w;
+    els.effortCanvas.height = h;
+    drawEffortPixels(performance.now());
+  }
+
+  function ensureEffortCanvasLoop() {
+    if (effortSlider.canvasFrame || !effortSlider.ultra) return;
+    if (effortMotionOff.matches || els.effortMenu.classList.contains("hidden")) {
+      drawEffortPixels(performance.now());
+      return;
+    }
+    const frame = (time) => {
+      if (!effortSlider.ultra || els.effortMenu.classList.contains("hidden")) {
+        effortSlider.canvasFrame = 0;
+        return;
+      }
+      if (time - effortSlider.lastFrame >= 33) { // ~30fps is plenty for the field
+        effortSlider.lastFrame = time;
+        effortSlider.reveal = effortStep(0, 1, (time - effortSlider.ultraStart) / 1000);
+        drawEffortPixels(time);
+      }
+      effortSlider.canvasFrame = requestAnimationFrame(frame);
+    };
+    effortSlider.canvasFrame = requestAnimationFrame(frame);
+  }
+
+  // Ultracode track: a grid of cells that sweeps in from the left, each one
+  // flickering on its own clock through the green ramp below.
+  const EFFORT_TONES = [
+    [16, 185, 129], [16, 185, 129], [26, 191, 138], [26, 191, 138],
+    [52, 211, 153], [52, 211, 153], [52, 211, 153],
+    [74, 222, 168], [74, 222, 168], [110, 231, 183], [134, 239, 199],
+  ];
+  const EFFORT_DARK = [34, 38, 36];
+  const EFFORT_HILITE = [167, 243, 208];
+  const EFFORT_PEAK = [214, 250, 233];
+
+  function effortHash(a, b) { return Math.abs(Math.sin(a) * b) % 1; }
+
+  function drawEffortPixels(time) {
+    const canvas = els.effortCanvas;
+    if (!canvas || !canvas.width || !canvas.height) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    const width = canvas.width / ratio;
+    const height = canvas.height / ratio;
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    if (!effortSlider.ultra) return;
+
+    const reveal = effortMotionOff.matches ? 1 : effortSlider.reveal;
+    const frontier = 1 - reveal;
+    const cell = width < 280 ? 5 : 6;
+    const gap = 1.1;
+    const columns = Math.ceil(width / cell);
+    const rows = Math.ceil(height / cell);
+    const elapsed = Math.max(0, time - effortSlider.ultraStart);
+    const rawFlow = elapsed / 4000;
+    const flowCycle = Math.floor(rawFlow);
+    const flow = flowCycle + effortStep(0, 1, rawFlow - flowCycle);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(0, 0, width, height, 8);
+    ctx.clip();
+
+    for (let row = 0; row < rows; row += 1) {
+      for (let column = 0; column < columns; column += 1) {
+        const x = column * cell;
+        const y = row * cell;
+        const nx = (x + cell * 0.5) / width;
+        const revealAlpha = effortStep(frontier - 0.1, frontier + 0.07, nx);
+        if (revealAlpha <= 0.002) continue;
+
+        const greenAmount = effortStep(0.1, 0.88, nx);
+        const fieldIntensity = effortStep(0.04, 0.38, nx);
+        const depthBias = effortStep(0.35, 0.95, nx);
+
+        const baseHash = effortHash(column * 12.9898 + row * 78.233, 43758.5453);
+        const tempoHash = effortHash(column * 7.13 + row * 19.41, 19341.731);
+        const phaseHash = effortHash(column * 31.17 + row * 11.93, 28437.123);
+        const chromaHash = effortHash(column * 9.47 + row * 67.13, 15823.917);
+
+        const period = 500 + tempoHash * 1500;
+        const localTime = elapsed + phaseHash * period;
+        const cycle = Math.floor(localTime / period);
+        const cycleProgress = (localTime % period) / period;
+        const cycleHash = effortHash(column * 17.17 + row * 41.73 + cycle * 13.11, 24634.6345);
+        const widthHash = effortHash(column * 5.37 + row * 29.11 + cycle * 7.43, 17391.443);
+
+        const pulseCenter = 0.2 + cycleHash * 0.55;
+        const pulseWidth = 0.09 + widthHash * 0.08;
+        const pulseDistance = (cycleProgress - pulseCenter) / pulseWidth;
+        const pulse = Math.exp(-pulseDistance * pulseDistance * 1.45) * (cycleHash > 0.12 ? 1 : 0.26);
+
+        const flowCoordinate = (nx + flow) * 9;
+        const flowIndex = Math.floor(flowCoordinate);
+        const flowProgress = effortStep(0, 1, flowCoordinate - flowIndex);
+        const flowA = effortHash(flowIndex * 18.31 + row * 37.17, 19283.173);
+        const flowB = effortHash((flowIndex + 1) * 18.31 + row * 37.17, 19283.173);
+        const cluster = effortStep(0.46, 0.84, effortMix(flowA, flowB, flowProgress));
+        const wavePhase = (nx + flow + row * 0.06 + baseHash * 0.02) * Math.PI * 2;
+        const wave = Math.pow(0.5 + 0.5 * Math.cos(wavePhase), 5);
+        const directional = Math.max(cluster, wave * 0.62);
+        const flicker = Math.max(
+          pulse * (0.48 + directional * 0.58),
+          directional * (0.38 + baseHash * 0.28),
+        );
+
+        const revealGlow = reveal < 0.995
+          ? Math.exp(-((nx - frontier) ** 2) / 0.012) * (1 - effortStep(0.7, 1, reveal))
+          : 0;
+        const light = Math.max(flicker, revealGlow * (0.4 + baseHash * 0.4));
+
+        const isPeak = light > 0.4 && pulse > 0.16 && cycleHash > 0.26 && cluster > 0.04;
+        const isHottest = light > 0.68 && pulse > 0.3 && cycleHash > 0.48 && cluster > 0.12;
+        const highlight = isPeak ? 0.97 : effortClamp(light * (0.44 + cycleHash * 0.3), 0, 0.64);
+
+        const drift = baseHash * 0.28 + depthBias * 0.28 + cycleProgress * 0.38 + flow * 0.18
+          + cycleHash * 0.2 + Math.sin(elapsed * 0.00135 + phaseHash * Math.PI * 2) * 0.14;
+        const tonePos = ((drift % 1) + 1) % 1 * EFFORT_TONES.length;
+        const toneIndex = Math.floor(tonePos);
+        const toneMix = tonePos - toneIndex;
+        const toneA = EFFORT_TONES[toneIndex];
+        const toneB = EFFORT_TONES[(toneIndex + 1) % EFFORT_TONES.length];
+
+        const nudge = (chromaHash - 0.5) * 10 + depthBias * 12;
+        const green = [
+          effortClamp(effortMix(toneA[0], toneB[0], toneMix) - depthBias * 8 + (baseHash - 0.5) * 6, 10, 120),
+          effortClamp(effortMix(toneA[1], toneB[1], toneMix) + nudge * 0.35 - depthBias * 10, 168, 240),
+          effortClamp(effortMix(toneA[2], toneB[2], toneMix) + depthBias * 6 + (cycleHash - 0.5) * 6, 120, 205),
+        ];
+        const base = [
+          effortMix(EFFORT_DARK[0], green[0], greenAmount),
+          effortMix(EFFORT_DARK[1], green[1], greenAmount),
+          effortMix(EFFORT_DARK[2], green[2], greenAmount),
+        ];
+        const target = isHottest ? EFFORT_PEAK : EFFORT_HILITE;
+        const amount = isHottest ? 0.95 : highlight;
+        const color = "rgb(" + Math.round(effortMix(base[0], target[0], amount)) + " "
+          + Math.round(effortMix(base[1], target[1], amount)) + " "
+          + Math.round(effortMix(base[2], target[2], amount)) + ")";
+
+        const baseOpacity = 0.7 + baseHash * 0.2;
+        ctx.globalAlpha = isPeak || isHottest
+          ? revealAlpha * fieldIntensity
+          : revealAlpha * fieldIntensity * effortClamp(baseOpacity + flicker * 0.12, 0, 1);
+        ctx.fillStyle = color;
+        ctx.fillRect(x + gap * 0.5, y + gap * 0.5, cell - gap, cell - gap);
+      }
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  function bindEffortSlider() {
+    const ticks = els.effortMenu.querySelector(".effort-ticks");
+    for (let i = 0; i < EFFORTS.length; i += 1) ticks.appendChild(el("span", "effort-tick"));
+    els.effortRange.max = String(EFFORTS.length - 1);
+
+    els.effortRange.addEventListener("pointerdown", () => {
+      cancelAnimationFrame(effortSlider.springFrame);
+      effortSlider.springFrame = 0;
+      effortSlider.dragging = true;
+      effortSlider.samples = [{ time: performance.now(), value: effortSlider.value }];
+    });
+    const endDrag = () => {
+      if (!effortSlider.dragging) return;
+      effortSlider.dragging = false;
+      snapEffort();
+    };
+    els.effortRange.addEventListener("pointerup", endDrag);
+    els.effortRange.addEventListener("pointercancel", endDrag);
+    els.effortRange.addEventListener("input", () => {
+      let value = Number.parseFloat(els.effortRange.value);
+      if (effortSlider.dragging) {
+        value = effortMagnet(value);
+        els.effortRange.value = String(value);
+        const now = performance.now();
+        effortSlider.samples.push({ time: now, value });
+        effortSlider.samples = effortSlider.samples.filter((s) => now - s.time < 90).slice(-5);
+      }
+      setEffortValue(value, true);
+    });
+    // Arrows/Home/End move a whole stop at a time and commit right away.
+    els.effortRange.addEventListener("keydown", (e) => {
+      const targets = {
+        ArrowLeft: effortSlider.index - 1,
+        ArrowDown: effortSlider.index - 1,
+        ArrowRight: effortSlider.index + 1,
+        ArrowUp: effortSlider.index + 1,
+        PageDown: effortSlider.index - 1,
+        PageUp: effortSlider.index + 1,
+        Home: 0,
+        End: EFFORTS.length - 1,
+      };
+      if (!(e.key in targets)) return;
+      e.preventDefault();
+      const target = effortClamp(targets[e.key], 0, EFFORTS.length - 1);
+      setEffortValue(target, true);
+      commitEffort(target);
+    });
+    els.effortMenu.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      hideEffortMenu();
+      els.effortBtn.focus();
+    });
+    // Tap-to-open for the tooltip on touch, where there's no hover.
+    els.effortHelp.querySelector(".effort-help-btn").addEventListener("click", (e) => {
+      e.stopPropagation();
+      els.effortHelp.classList.toggle("is-open");
+    });
+    window.addEventListener("resize", () => {
+      if (!els.effortMenu.classList.contains("hidden")) resizeEffortCanvas();
+    });
   }
 
   // ---- usage meter (context window + plan usage) ----------------------------
@@ -5888,6 +6269,8 @@
     els.modelBtn.querySelector(".model-label").textContent = model.label;
     const effort = EFFORTS.find((e) => e.id === chat.effort) || EFFORTS.find((e) => e.id === DEFAULT_EFFORT);
     if (els.effortBtn) els.effortBtn.querySelector(".effort-label").textContent = effort.label;
+    // Ultracode is the one effort that reads in the brand green, on the pill too.
+    if (els.effortPicker) els.effortPicker.classList.toggle("is-ultra", effort.id === "ultracode");
     refreshUsageUI();
     setRunningUI(chat.turnRunning);
     syncBashMode(chat);
@@ -7087,6 +7470,13 @@
     els.modelMenu = root.querySelector("#model-menu");
     els.effortBtn = root.querySelector("#effort-btn");
     els.effortMenu = root.querySelector("#effort-menu");
+    els.effortPicker = root.querySelector("#effort-picker");
+    els.effortRange = els.effortMenu.querySelector(".effort-range");
+    els.effortTrack = els.effortMenu.querySelector(".effort-track");
+    els.effortCanvas = els.effortMenu.querySelector(".effort-pixels");
+    els.effortLevel = els.effortMenu.querySelector(".effort-level");
+    els.effortLevelOut = els.effortMenu.querySelector(".effort-level-out");
+    els.effortHelp = els.effortMenu.querySelector(".effort-help");
     els.usageBtn = root.querySelector("#usage-btn");
     els.usageMenu = root.querySelector("#usage-menu");
     els.mode = root.querySelector("#mode-btn");
@@ -7276,6 +7666,7 @@
       e.stopPropagation();
       toggleEffortMenu();
     });
+    bindEffortSlider();
     els.usageBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       toggleUsageMenu();
@@ -7296,7 +7687,9 @@
       for (const [menu, btn] of dropdownPairs) {
         if (!menu || menu.classList.contains("hidden")) continue;
         if (menu.contains(e.target) || (btn && btn.contains(e.target))) continue;
-        menu.classList.add("hidden");
+        // The effort panel has an animation loop and a tooltip to put away.
+        if (menu === els.effortMenu) hideEffortMenu();
+        else menu.classList.add("hidden");
       }
     });
     els.input.addEventListener("input", () => {
@@ -7526,11 +7919,44 @@
             </button>
             <div id="model-menu" class="model-menu hidden"></div>
           </div>
-          <div class="model-picker">
+          <div id="effort-picker" class="model-picker effort-picker">
             <button id="effort-btn" class="model-btn effort-btn" title="Effort">
               <span class="effort-label">Medium</span>
             </button>
-            <div id="effort-menu" class="model-menu hidden"></div>
+            <!-- Effort slider: Low → Ultracode, one stop per EFFORTS entry.
+                 The range is continuous (step 0.001) so dragging feels smooth;
+                 it magnets to the nearest stop and springs onto it on release. -->
+            <div id="effort-menu" class="effort-menu hidden">
+              <div class="effort-head">
+                <div class="effort-title">
+                  <span>Effort</span>
+                  <span class="effort-stage" aria-live="polite" aria-atomic="true">
+                    <span class="effort-level-out" aria-hidden="true"></span>
+                    <span class="effort-level">Medium</span>
+                  </span>
+                </div>
+                <div class="effort-help">
+                  <button class="effort-help-btn" type="button" aria-label="About effort levels">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/>
+                      <path d="M9.8 9.2a2.35 2.35 0 0 1 4.55.82c0 1.8-2.35 2.05-2.35 3.7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                      <path d="M12 17.2h.01" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+                    </svg>
+                  </button>
+                  <div class="effort-tip" role="tooltip">Higher effort buys more thinking before Claude answers. Ultracode runs Extra plus multi-agent workflows.</div>
+                </div>
+              </div>
+              <div class="effort-axis" aria-hidden="true"><span>Faster</span><span>Smarter</span></div>
+              <div class="effort-track-shell">
+                <div class="effort-track" aria-hidden="true">
+                  <div class="effort-fill"></div>
+                  <canvas class="effort-pixels"></canvas>
+                  <div class="effort-ticks"></div>
+                </div>
+                <input class="effort-range" type="range" min="0" max="5" step="0.001" value="1"
+                  aria-label="Effort level" />
+              </div>
+            </div>
           </div>
           <div class="usage-picker">
             <button id="usage-btn" class="usage-btn" title="Usage"></button>

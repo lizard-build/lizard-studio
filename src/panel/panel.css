@@ -518,9 +518,280 @@ body {
 .mode-item.mode-auto .mode-item-label { color: var(--warn-bright); }
 .mode-item-ic { display: inline-flex; width: 13px; flex: 0 0 auto; margin-left: auto; color: var(--text-primary); }
 
-/* effort picker — same look as the model picker, smaller footprint */
+/* effort picker — a slider from Low to Ultracode instead of a list. Same shell
+   as the model dropdown; the innards are a range input over a painted track.
+   Ultracode (the last stop) lights the track up with an animated pixel field in
+   the brand green. */
 .effort-btn { max-width: 90px; }
 .effort-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.effort-picker.is-ultra .effort-label { color: var(--control-primary); }
+
+.effort-menu {
+  --effort-progress: 0;
+  --effort-thumb-w: 22px;
+  --effort-thumb-h: 24px;
+  --effort-track-pad: 1px;
+  --effort-track-radius: 9px;
+  --effort-ease: cubic-bezier(0.2, 0, 0, 1);
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  width: min(300px, calc(100vw - 28px));
+  padding: 12px 14px 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.effort-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 22px;
+}
+.effort-title {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-secondary);
+}
+/* The level name crossfades in place, so it sits absolutely inside a box sized
+   by the longest label. */
+.effort-stage {
+  position: relative;
+  display: inline-block;
+  height: 1.3em;
+  margin-left: 5px;
+  color: var(--text-primary);
+  line-height: inherit;
+}
+.effort-stage::after {
+  content: "Ultracode";
+  visibility: hidden;
+  white-space: nowrap;
+}
+.effort-stage > span {
+  position: absolute;
+  top: 0;
+  left: 0;
+  line-height: inherit;
+  white-space: nowrap;
+}
+.effort-level,
+.effort-level-out {
+  opacity: 1;
+  transform: translateY(0);
+  filter: blur(0);
+  transition: opacity 0.18s var(--effort-ease), transform 0.18s var(--effort-ease),
+    filter 0.18s var(--effort-ease), color 0.18s var(--effort-ease);
+}
+.effort-level { transition-delay: 24ms; }
+.effort-level.is-preparing {
+  opacity: 0;
+  transform: translateY(var(--effort-enter-y, 3px));
+  filter: blur(2px);
+  transition-duration: 0s;
+  transition-delay: 0s;
+}
+.effort-level-out { pointer-events: none; }
+.effort-level-out.is-exiting {
+  opacity: 0;
+  transform: translateY(var(--effort-exit-y, -3px));
+  filter: blur(2px);
+}
+.effort-menu.is-ultra .effort-level { color: var(--control-primary); }
+
+.effort-help { position: relative; flex: 0 0 auto; }
+.effort-help-btn {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin: -2px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: help;
+  transition: background 0.15s, color 0.15s;
+}
+.effort-help-btn:hover { background: rgba(255, 255, 255, 0.06); color: var(--text-secondary); }
+.effort-help-btn svg { width: 14px; height: 14px; display: block; }
+.effort-tip {
+  position: absolute;
+  z-index: 8;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 220px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.45;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-2px);
+  transition: opacity 0.12s ease-in, transform 0.12s ease-in, visibility 0.12s;
+}
+.effort-help:hover .effort-tip,
+.effort-help.is-open .effort-tip,
+.effort-help-btn:focus-visible + .effort-tip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition-timing-function: ease-out;
+}
+
+.effort-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 14px;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.effort-track-shell {
+  position: relative;
+  height: 34px;
+  margin-top: 6px;
+}
+.effort-track {
+  position: absolute;
+  inset: 5px 0;
+  overflow: hidden;
+  border-radius: var(--effort-track-radius);
+  background: #171717;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+/* Fill behind the thumb — plain grey up to Max, hidden once Ultracode paints
+   the whole track. */
+.effort-fill {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  bottom: 0;
+  left: var(--effort-track-pad);
+  width: calc(
+    (100% - (var(--effort-track-pad) * 2) - var(--effort-thumb-w)) * var(--effort-progress, 0)
+      + (var(--effort-thumb-w) * 0.5)
+  );
+  border-radius: calc(var(--effort-track-radius) - 1px) 0 0 calc(var(--effort-track-radius) - 1px);
+  background: rgba(255, 255, 255, 0.07);
+  pointer-events: none;
+  transition: opacity 0.2s var(--effort-ease);
+}
+.effort-menu.is-ultra .effort-fill { opacity: 0; }
+/* Static gradient under the canvas: what Ultracode looks like before the pixel
+   field draws, and the whole of it when motion is reduced. */
+.effort-track::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    #191919 0%,
+    #1a1f1d 18%,
+    #14352b 32%,
+    #0f4f3b 48%,
+    #0a6d50 68%,
+    #099263 82%,
+    #10b981 100%
+  );
+  opacity: 0;
+  transition: opacity 0.34s ease-in;
+}
+.effort-menu.is-ultra .effort-track::before { opacity: 1; }
+.effort-pixels {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s var(--effort-ease);
+}
+.effort-menu.is-ultra .effort-pixels { opacity: 1; }
+
+.effort-ticks {
+  position: absolute;
+  z-index: 1;
+  inset: 0 calc(var(--effort-track-pad) + var(--effort-thumb-w) * 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  pointer-events: none;
+}
+.effort-tick {
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: #4d4d4d;
+  transition: opacity 0.18s var(--effort-ease);
+}
+.effort-tick:last-child { background: var(--control-primary); }
+.effort-menu.is-ultra .effort-tick { opacity: 0; }
+
+.effort-range {
+  position: absolute;
+  z-index: 3;
+  inset: 0 var(--effort-track-pad);
+  width: calc(100% - var(--effort-track-pad) * 2);
+  height: 100%;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.effort-range::-webkit-slider-runnable-track {
+  height: var(--effort-thumb-h);
+  border: 0;
+  background: transparent;
+}
+.effort-range::-webkit-slider-thumb {
+  width: var(--effort-thumb-w);
+  height: var(--effort-thumb-h);
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  background: linear-gradient(#464646, #333);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 4px 10px rgba(0, 0, 0, 0.35);
+  cursor: ew-resize;
+  transition: transform 0.15s ease-out;
+}
+.effort-range:active::-webkit-slider-thumb { transform: scale(0.96); }
+.effort-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.35), 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .effort-level,
+  .effort-level-out,
+  .effort-fill,
+  .effort-track::before,
+  .effort-pixels,
+  .effort-tip { transition-duration: 0.001ms; }
+  .effort-pixels { display: none; }
+}
 
 /* usage meter — a context-fill ring in the toolbar, left of the effort picker,
    opening a popover with context + plan-usage breakdown */
