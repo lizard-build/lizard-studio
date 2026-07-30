@@ -609,7 +609,10 @@ body {
   --effort-track-radius: 9px;
   --effort-ease: cubic-bezier(0.2, 0, 0, 1);
   position: absolute;
-  right: 0;
+  /* Reach past the usage ring (26px) and the send button (26px), plus the two
+     6px gaps, so the panel's right edge lands on the toolbar's — anchored to
+     the pill itself it runs off the left edge of a narrow panel. */
+  right: -64px;
   bottom: calc(100% + 6px);
   z-index: 20;
   width: min(300px, calc(100vw - 28px));
