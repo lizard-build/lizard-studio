@@ -1446,11 +1446,15 @@
     renderAttachmentThumbs();
   }
 
-  // ---- generic file attachments (from the "+" filesystem picker) ------------
+  // ---- generic file attachments (picker, paste, drop) -----------------------
   // Images ride the existing screenshot/paste pipeline. Everything else is read
-  // as text (browsers don't expose a real filesystem path from <input type=file>)
-  // and carried as a removable context chip, embedded as a fenced block on send.
+  // as text (browsers don't expose a real filesystem path from <input type=file>
+  // or from the clipboard) and carried as a removable context chip, embedded as
+  // a fenced block on send.
   const MAX_FILE_TEXT = 100_000;
+  // Only decode a bounded head of the file — a huge one would otherwise be read
+  // whole just to throw nearly all of it away.
+  const MAX_FILE_BYTES = 4 * MAX_FILE_TEXT;
   async function addFile(file) {
     if (!file) return;
     const chat = chats.get(activeId);
@@ -1460,9 +1464,15 @@
       return;
     }
     try {
-      const text = await file.text();
+      const oversized = file.size > MAX_FILE_BYTES;
+      const text = await (oversized ? file.slice(0, MAX_FILE_BYTES) : file).text();
+      // Binary files decode into NUL bytes; embedding that is noise, so say so.
+      if (/\u0000/.test(text)) {
+        systemNote(chat, `"${file.name}" isn't a text file.`, "warn");
+        return;
+      }
       if (!Array.isArray(chat.contexts)) chat.contexts = [];
-      const truncated = text.length > MAX_FILE_TEXT;
+      const truncated = oversized || text.length > MAX_FILE_TEXT;
       chat.contexts.push({
         kind: "file",
         id: newId(),
@@ -7304,25 +7314,23 @@
       if (chat && chat.bashMode) hideSlash();
       else updateSlash();
     });
-    // Paste an image from the clipboard → attach as a thumbnail.
+    // Paste a file from the clipboard → image thumbnail, or a context chip for
+    // anything else. A file copied in Finder also rides along as plain text (its
+    // name), so take the file and drop the text.
     els.input.addEventListener("paste", (e) => {
-      const items = (e.clipboardData && e.clipboardData.items) || [];
-      let took = false;
-      for (const it of items) {
-        if (it.kind === "file" && it.type.startsWith("image/")) {
-          const blob = it.getAsFile();
-          if (blob) {
-            addAttachment(blob);
-            took = true;
-          }
-        }
-      }
-      if (took) e.preventDefault(); // don't also paste the image's text/url
+      const items = Array.from((e.clipboardData && e.clipboardData.items) || []);
+      const files = items
+        .filter((it) => it.kind === "file")
+        .map((it) => it.getAsFile())
+        .filter(Boolean);
+      if (!files.length) return;
+      e.preventDefault(); // don't also paste the file's name / url
+      files.forEach(addFile);
     });
     // Drag & drop image files onto the composer.
     if (els.composerBox) {
       els.composerBox.addEventListener("dragover", (e) => {
-        if (e.dataTransfer && Array.from(e.dataTransfer.items || []).some((i) => i.type.startsWith("image/"))) {
+        if (e.dataTransfer && Array.from(e.dataTransfer.items || []).some((i) => i.kind === "file")) {
           e.preventDefault();
           els.composerBox.classList.add("drag-over");
         }
@@ -7332,11 +7340,10 @@
       });
       els.composerBox.addEventListener("drop", (e) => {
         els.composerBox.classList.remove("drag-over");
-        const files = (e.dataTransfer && e.dataTransfer.files) || [];
-        const imgs = Array.from(files).filter((f) => f.type.startsWith("image/"));
-        if (imgs.length) {
+        const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+        if (files.length) {
           e.preventDefault();
-          imgs.forEach(addAttachment);
+          files.forEach(addFile);
         }
       });
     }
