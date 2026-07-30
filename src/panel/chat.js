@@ -5442,11 +5442,14 @@
   }
 
   function resizeEffortCanvas() {
-    const rect = els.effortTrack.getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
+    // offsetWidth/Height, not a client rect: the panel is mid-scale on its way
+    // in when this runs, and a rect would size the canvas to that frame.
+    const width = els.effortTrack.offsetWidth;
+    const height = els.effortTrack.offsetHeight;
+    if (!width || !height) return;
     const ratio = Math.min(window.devicePixelRatio || 1, 2);
-    const w = Math.round(rect.width * ratio);
-    const h = Math.round(rect.height * ratio);
+    const w = Math.round(width * ratio);
+    const h = Math.round(height * ratio);
     if (els.effortCanvas.width === w && els.effortCanvas.height === h) return;
     els.effortCanvas.width = w;
     els.effortCanvas.height = h;
