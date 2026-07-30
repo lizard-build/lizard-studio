@@ -1701,11 +1701,17 @@
   }
   const USAGE_CMD_RE = /^\/(usage|usage-credits|extra-usage)\b/;
 
-  // Screenshot-matching labels for the two standard windows the CLI reports as
-  // "Current session" / "Current week (all models)".
+  // Screenshot-matching labels for the windows the CLI reports as
+  // "Current session" / "Current week (all models)" / "Current week (Opus)".
+  // The weekly scope lives in the parenthetical and has to survive: without it
+  // the per-model week collapses onto the all-models one and the menu shows the
+  // same heading twice.
   function normalizeUsageLabel(label) {
     if (/session|5[\s-]?hour/i.test(label)) return "5-hour limit";
-    if (/week/i.test(label)) return "Weekly · all models";
+    if (/week/i.test(label)) {
+      const scope = /\(([^)]+)\)/.exec(label);
+      return "Weekly · " + (scope ? scope[1].trim() : "all models");
+    }
     return label;
   }
 
