@@ -267,7 +267,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 22;
+  const EXPECTED_HOST_VERSION = 23;
 
   let els = {};
   let port = null;
@@ -1027,7 +1027,7 @@
         } else if (c.kind === "file") {
           ic.innerHTML = ICON("file", 11);
           label = c.name;
-          chip.title = c.name;
+          chip.title = c.diskPath ? `${c.name}\n${c.diskPath}` : c.name;
         } else {
           ic.innerHTML = ICON("selection", 11);
           label = `<${c.tag}>`;
@@ -1255,7 +1255,7 @@
       } else if (c.kind === "file") {
         ic.innerHTML = ICON("file", 13);
         label = c.name;
-        chip.title = c.name;
+        chip.title = c.diskPath ? `${c.name}\n${c.diskPath}` : c.name;
       } else {
         ic.innerHTML = ICON("selection", 13);
         label = `<${c.tag}>`;
@@ -1292,7 +1292,15 @@
 
     // Attached files (from the "+" filesystem picker). Fenced with the file
     // name so Claude can tell them apart from pasted/selected page text.
+    // Binary ones carry no text at all — just the path the host wrote them to,
+    // for Claude to Read.
     for (const c of chat.contexts.filter((c) => c.kind === "file")) {
+      if (c.diskPath) {
+        blocks.push(
+          `[Attached file: ${c.name}]\nThe user attached this file. It is saved at ${c.diskPath} — read that path to see what's in it.`
+        );
+        continue;
+      }
       const fence = c.text.includes("```") ? "````" : "```";
       blocks.push(
         `[Attached file: ${c.name}]\n${fence}\n${c.text}${c.truncated ? "\n…[file truncated]" : ""}\n${fence}`
@@ -1486,14 +1494,63 @@
   }
 
   // ---- generic file attachments (picker, paste, drop) -----------------------
-  // Images ride the existing screenshot/paste pipeline. Everything else is read
-  // as text (browsers don't expose a real filesystem path from <input type=file>
-  // or from the clipboard) and carried as a removable context chip, embedded as
-  // a fenced block on send.
+  // Images ride the existing screenshot/paste pipeline. Text files are read here
+  // (browsers don't expose a real filesystem path from <input type=file> or from
+  // the clipboard) and carried as a removable context chip, embedded as a fenced
+  // block on send. Anything binary — a PDF, a .docx, an archive — would decode
+  // into garbage, so its bytes go to the host instead: it writes them to a temp
+  // file and hands back the path, and the chip then points claude's Read tool at
+  // that path. Read parses PDFs and Office documents natively, which we can't.
   const MAX_FILE_TEXT = 100_000;
   // Only decode a bounded head of the file — a huge one would otherwise be read
   // whole just to throw nearly all of it away.
   const MAX_FILE_BYTES = 4 * MAX_FILE_TEXT;
+  // Ceiling on what we'll ship to the host. Chrome's extension→host limit is far
+  // higher, but base64 in a JSON message costs about 4/3 of this in memory on
+  // both sides, and nothing good comes of attaching a 500 MB video.
+  const MAX_STASH_BYTES = 32 * 1024 * 1024;
+
+  // Extensions worth sending to disk even when the head of the file happens to
+  // sniff as text. The formats Read parses natively lead the list.
+  const BINARY_EXTS = new Set([
+    "pdf", "docx", "doc", "xlsx", "xls", "pptx", "ppt", "odt", "ods", "odp", "rtf",
+    "pages", "numbers", "key", "epub", "mobi",
+    "zip", "gz", "tgz", "bz2", "xz", "7z", "rar", "tar", "jar", "dmg", "pkg", "iso",
+    "sqlite", "sqlite3", "db", "bin", "exe", "dll", "so", "dylib", "wasm", "class", "pyc",
+    "mp3", "wav", "flac", "ogg", "m4a", "aac", "mp4", "mov", "avi", "mkv", "webm",
+    "ttf", "otf", "woff", "woff2", "eot", "psd", "ai", "sketch", "fig", "heic", "tiff",
+  ]);
+
+  function looksBinary(buf, name) {
+    const ext = (String(name || "").split(".").pop() || "").toLowerCase();
+    if (BINARY_EXTS.has(ext)) return true;
+    const probe = new Uint8Array(buf, 0, Math.min(buf.byteLength, 8192));
+    if (probe.includes(0)) return true;
+    try {
+      // `stream: true` tolerates a multi-byte character cut in half at the probe
+      // boundary; a real decode error means these aren't UTF-8 text bytes.
+      new TextDecoder("utf-8", { fatal: true }).decode(probe, { stream: true });
+    } catch (_) {
+      return true;
+    }
+    return false;
+  }
+
+  function fmtSize(bytes) {
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${bytes} bytes`;
+  }
+
+  function bytesToBase64(bytes) {
+    let binary = "";
+    const chunk = 0x8000; // apply() blows its argument limit on a whole big file
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }
+
   async function addFile(file) {
     if (!file) return;
     const chat = chats.get(activeId);
@@ -1504,13 +1561,13 @@
     }
     try {
       const oversized = file.size > MAX_FILE_BYTES;
-      const text = await (oversized ? file.slice(0, MAX_FILE_BYTES) : file).text();
-      // Binary files decode into NUL bytes; embedding that is noise, so say so.
-      if (/\u0000/.test(text)) {
-        systemNote(chat, `"${file.name}" isn't a text file.`, "warn");
+      const head = await (oversized ? file.slice(0, MAX_FILE_BYTES) : file).arrayBuffer();
+      if (looksBinary(head, file.name)) {
+        await stashFile(chat, file);
         return;
       }
       if (!Array.isArray(chat.contexts)) chat.contexts = [];
+      const text = new TextDecoder().decode(head);
       const truncated = oversized || text.length > MAX_FILE_TEXT;
       chat.contexts.push({
         kind: "file",
@@ -1523,6 +1580,39 @@
       if (els.input) els.input.focus();
     } catch (_) {
       systemNote(chat, `Couldn't read "${file.name}".`, "warn");
+    }
+  }
+
+  // Ship a binary attachment to the host, which writes it to a temp file and
+  // replies `fileStashed` with the path (see the fileStashed case below). The
+  // chip only appears once that write lands — a chip pointing at a file that was
+  // never written would send claude after a path that isn't there.
+  async function stashFile(chat, file) {
+    // A host that predates the op would swallow the message and leave the user
+    // staring at a composer that never grew a chip. The stale-host banner is
+    // already up in that case (see the `ready` handler) — just say why.
+    // 0 means the host is old enough that it doesn't report a version at all.
+    if (hostVersion < 23) {
+      systemNote(chat, `"${file.name}" needs a newer local helper — it's updating now, try again in a moment.`, "warn");
+      return;
+    }
+    if (file.size > MAX_STASH_BYTES) {
+      systemNote(
+        chat,
+        `"${file.name}" is too big to attach — ${fmtSize(file.size)}, and the limit is ${fmtSize(MAX_STASH_BYTES)}.`,
+        "warn"
+      );
+      return;
+    }
+    let data;
+    try {
+      data = bytesToBase64(new Uint8Array(await file.arrayBuffer()));
+    } catch (_) {
+      systemNote(chat, `Couldn't read "${file.name}".`, "warn");
+      return;
+    }
+    if (!post({ type: "stashFile", id: chat.id, reqId: newId(), name: file.name, data })) {
+      systemNote(chat, `Couldn't attach "${file.name}" — the local helper isn't running.`, "warn");
     }
   }
 
@@ -4067,6 +4157,21 @@
           applyFolder(chat, msg.path);
         } else if (chat && msg.manual) {
           promptForFolder(chat);
+        }
+        break;
+      case "fileStashed":
+        if (!chat) break;
+        if (!msg.ok) {
+          systemNote(chat, `Couldn't attach "${msg.name}"${msg.error ? " — " + msg.error : "."}`, "warn");
+          break;
+        }
+        if (!Array.isArray(chat.contexts)) chat.contexts = [];
+        // `diskPath`, not `path` — sameContext() reads `path` as a picked
+        // element's structural path.
+        chat.contexts.push({ kind: "file", id: newId(), name: msg.name, diskPath: msg.path });
+        if (chat.id === activeId) {
+          renderContextChips();
+          if (els.input) els.input.focus();
         }
         break;
       case "gitBranches":

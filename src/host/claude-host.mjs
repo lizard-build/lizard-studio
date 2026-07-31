@@ -40,6 +40,9 @@
 //                                                                 just before the turnIndex-th human
 //                                                                 turn, then kill + resume the session
 //   { type:"pickFolder", id }                                      native folder chooser
+//   { type:"stashFile", id, reqId, name, data }                    write an attached file (base64) to a
+//                                                                 temp dir so claude can Read it by path
+//                                                                 (→ fileStashed)
 //   { type:"gitBranches", id, cwd }                                list local branches + current
 //   { type:"checkoutBranch", id, cwd, branch }                     git checkout <branch>
 //   { type:"gitDiff", id, cwd }                                    working-tree diff vs HEAD (+ untracked files)
@@ -70,6 +73,7 @@
 //   { type:"event",   id, data }                               one claude stream-json object
 //   { type:"exit",    id, code }
 //   { type:"folder",  id, path }                               null path == cancelled
+//   { type:"fileStashed", id, reqId, ok, name, path?, error? } reply to stashFile
 //   { type:"gitBranches", id, cwd, isRepo, current, branches, checkedOut? }
 //   { type:"gitDiff", id, cwd, isRepo, files, insertions, deletions }
 //   { type:"configRead",  id, key, scope, ok, content?, path?, exists?, error? }
@@ -90,10 +94,10 @@
 import { spawn, execFile, execSync } from "node:child_process";
 import { randomBytes, createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { existsSync, readFileSync, appendFileSync, readdirSync, mkdirSync, writeFileSync, renameSync, statSync, createReadStream, chmodSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, appendFileSync, readdirSync, mkdirSync, writeFileSync, renameSync, statSync, createReadStream, chmodSync, unlinkSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { homedir, userInfo } from "node:os";
+import { homedir, userInfo, tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import net from "node:net";
@@ -205,7 +209,10 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 //      works with no live claude), and never signal a subtree that reaches a
 //      protected pid. New probeShells op reports which shells are still alive
 //      so the panel's drawer converges to ground truth.
-const HOST_VERSION = 22;
+// v23: stashFile — binary attachments (PDFs, Office docs) are written to a temp
+//      dir and read back by path, since the panel can only carry text and
+//      images. That dir is on every session's --add-dir list.
+const HOST_VERSION = 23;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -1212,6 +1219,17 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
   }
   if (resume) args.push("--resume", resume);
 
+  // Let claude read the attachment stash (see the attached-files section). The
+  // files there are ones the user picked by hand in the panel, so an
+  // out-of-workspace permission ask for them would be noise. Nothing else is
+  // ever written to that dir.
+  try {
+    mkdirSync(ATTACH_DIR, { recursive: true, mode: 0o700 });
+    args.push("--add-dir", ATTACH_DIR);
+  } catch {
+    /* no temp dir — attachments will fail loudly on their own, don't block the spawn */
+  }
+
   // Ship the lizard-build/skill bootstrap skill to this session (see the
   // refreshBundledSkill block above) — ephemeral, doesn't touch user config.
   if (existsSync(SKILL_MARKER)) args.push("--plugin-dir", SKILL_DIR);
@@ -2013,6 +2031,60 @@ function pickFolder(id) {
   });
 }
 
+// ---- attached files ---------------------------------------------------------
+// A PDF or .docx can't ride in the prompt as text, and a browser never hands out
+// a real filesystem path for a picked file — so the panel ships the bytes here,
+// we drop them in a temp dir of our own, and hand back the path. claude's Read
+// tool takes it from there: it parses PDFs and Office documents natively, which
+// the panel can't.
+//
+// The dir belongs to this host process and is removed when it exits, so
+// attachments never pile up and never land inside the user's project. It's on
+// claude's --add-dir list (see startClaude), so reading one doesn't provoke an
+// out-of-workspace permission ask for a file the user just attached by hand.
+const ATTACH_DIR = join(tmpdir(), `lizard-studio-files-${process.pid}`);
+let attachSeq = 0;
+
+// Keep the user's own file name — claude sees it in the path and the panel chip
+// shows it — but strip anything that could climb out of ATTACH_DIR.
+function attachName(name) {
+  const base = String(name == null ? "" : name)
+    .split(/[\\/]/)
+    .pop()
+    .replace(/[\u0000-\u001f]/g, "")
+    .trim();
+  if (!base || base === "." || base === "..") return "file";
+  if (base.length <= 120) return base;
+  // Truncate the stem, never the extension — Read decides how to parse a file
+  // by its suffix, so a ".pdf" lost to the length cap costs the whole point.
+  const dot = base.lastIndexOf(".");
+  const ext = dot > 0 && base.length - dot <= 12 ? base.slice(dot) : "";
+  return base.slice(0, 120 - ext.length) + ext;
+}
+
+function stashFile(id, msg) {
+  const name = attachName(msg.name);
+  try {
+    // One numbered subdir per file, so two attachments sharing a name coexist.
+    const dir = join(ATTACH_DIR, String(++attachSeq));
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const path = join(dir, name);
+    writeFileSync(path, Buffer.from(String(msg.data || ""), "base64"), { mode: 0o600 });
+    send({ type: "fileStashed", id, reqId: msg.reqId, ok: true, name, path });
+  } catch (e) {
+    send({ type: "fileStashed", id, reqId: msg.reqId, ok: false, name, error: e.message });
+  }
+}
+
+function cleanupAttachments() {
+  try {
+    rmSync(ATTACH_DIR, { recursive: true, force: true });
+  } catch {
+    /* best effort — a temp dir left behind is not worth failing an exit over */
+  }
+}
+process.on("exit", cleanupAttachments);
+
 // ---- git branch helpers -----------------------------------------------------
 // List local branches + the current one for a working dir, so the panel can show
 // a branch chip and let the user switch. Read-only.
@@ -2558,6 +2630,9 @@ function handle(msg) {
       break;
     case "pickFolder":
       pickFolder(id);
+      break;
+    case "stashFile":
+      stashFile(id, msg);
       break;
     case "gitBranches":
       gitBranches(id, msg.cwd);
