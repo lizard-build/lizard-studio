@@ -278,7 +278,7 @@
 
   // ---- minimize to a bottom handle --------------------------------------
   // Tucks the whole bar away into a small pill docked bottom-center; tools keep
-  // running. Click the pill (or press the toggle shortcut) to bring it back.
+  // running. Click the pill — or press any tool hotkey — to bring it back.
   function ensureHandle() {
     if (handleEl) return handleEl;
     handleEl = RK.h("div", { class: "rk-handle", title: "Show Lizard Studio toolbar",
@@ -481,6 +481,11 @@
       if (!id) return;
       e.preventDefault();
       e.stopPropagation();
+      // Bring a minimized bar back up first. The tool would flip either way, but
+      // with the bar tucked away nothing on screen shows which tool just came on
+      // or off, so the keystroke reads as dead. Restoring before the toggle also
+      // keeps tools that conceal the bar themselves (annotate) in charge of it.
+      if (RK.state.minimized) restore();
       RK.toggle(id);
       render(id);
     }, true);
