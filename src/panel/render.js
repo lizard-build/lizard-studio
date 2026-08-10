@@ -144,12 +144,11 @@
     pathLinks = true;
   }
 
-  // Extensions that make a bare name a file on sight, so `render.js` links but
-  // `chat.cwd` doesn't. Inline code is mostly identifiers and commands, so the
-  // whole test errs towards leaving things alone: a wrong guess is a link that
-  // opens nothing.
-  const PATH_EXT =
-    /\.(js|jsx|mjs|cjs|ts|tsx|json|jsonc|md|mdx|txt|csv|tsv|log|ya?ml|toml|ini|cfg|env|lock|sh|bash|zsh|fish|py|rb|go|rs|java|kt|swift|c|h|cc|cpp|hpp|cs|php|sql|html?|css|scss|less|xml|svg|png|jpe?g|gif|webp|ico|pdf|zip|gz|tgz|mov|mp4|ipynb)$/i;
+  // A link is only offered where the text names one file and no other. A bare
+  // name doesn't: a project can hold four "favicon-32.png", and a click would
+  // have to guess which — so it stays plain code. What's left is a path with a
+  // folder in it, which resolves against the chat's folder and can mean one
+  // file only. It also keeps `chat.cwd` out of the links.
   function filePath(code) {
     // "file.ts:42" — the line (and column) is how an editor is told where to
     // jump, not part of the name on disk.
@@ -168,8 +167,7 @@
     // A bare root ("/", "~/", "./") names nothing worth opening.
     if (/^(~[\\/]|\.{1,2}[\\/]|\/|[A-Za-z]:[\\/])/.test(s)) return /[^~./\\]/.test(s) ? s : "";
     if (/\s/.test(s)) return "";
-    // Bare: needs a directory in it, or a suffix that says "file".
-    return s.indexOf("/") !== -1 || PATH_EXT.test(s) ? s : "";
+    return s.indexOf("/") !== -1 ? s : "";
   }
 
   // ---- inline markdown ------------------------------------------------------

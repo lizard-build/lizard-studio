@@ -78,9 +78,7 @@
 //   { type:"exit",    id, code }
 //   { type:"folder",  id, path }                               null path == cancelled
 //   { type:"fileStashed", id, reqId, ok, name, path?, error? } reply to stashFile
-//   { type:"openPath", id, path, ok, resolved?, error? }       reply to openPath (`resolved` is the file
-//                                                              the click landed on — a bare name in the
-//                                                              transcript is looked up in the project)
+//   { type:"openPath", id, path, ok, error? }                  reply to openPath
 //   { type:"gitBranches", id, cwd, isRepo, current, branches, checkedOut? }
 //   { type:"gitDiff", id, cwd, isRepo, files, insertions, deletions }
 //   { type:"configRead",  id, key, scope, ok, content?, path?, exists?, error? }
@@ -2043,11 +2041,8 @@ function pickFolder(id) {
 // ---- open a path in the desktop ---------------------------------------------
 // The panel turns file paths in the transcript into links; a click lands here.
 // Nothing is run through a shell — the path is one argument to the platform
-// opener, and only after it resolves to something that exists.
-//
-// Claude names a file the way a person would — "favicon-32.png", not
-// "icons/favicon-32.png" — so a relative path is first tried against the chat's
-// folder and then looked up in the project (see findInProject).
+// opener, and only after it resolves to something that exists. Relative paths
+// resolve against the chat's own folder, where claude was reading and writing.
 function openPath(id, raw, cwd, reveal) {
   const p = String(raw == null ? "" : raw).trim();
   const fail = (error) => send({ type: "openPath", id, path: p, ok: false, error });
@@ -2055,71 +2050,8 @@ function openPath(id, raw, cwd, reveal) {
   let full = p;
   if (full === "~") full = homedir();
   else if (/^~[\\/]/.test(full)) full = join(homedir(), full.slice(2));
-  const base = cwd && existsSync(cwd) ? cwd : homedir();
-  if (!isAbsolute(full)) full = join(base, full);
-  if (!existsSync(full)) {
-    if (isAbsolute(p) || /^~[\\/]/.test(p)) return fail("no such file or folder.");
-    return findInProject(base, p, (found) => {
-      if (!found) return fail("no such file or folder.");
-      launchOpen(id, p, found, reveal, fail);
-    });
-  }
-  launchOpen(id, p, full, reveal, fail);
-}
-
-// Hunt for a file the transcript named without its folder. git knows the
-// project's files and already skips the junk, so ask it first; a folder that
-// isn't a repo (or a file git ignores, like generated output) falls back to a
-// bounded walk. Shallowest match wins — a file near the top of the tree is the
-// one someone means when they name it bare.
-const SCAN_SKIP = new Set(["node_modules", ".git", "dist", "build", "out", ".next", "target", "vendor", ".venv", "venv", "__pycache__", ".cache"]);
-const SCAN_MAX_ENTRIES = 20000;
-const SCAN_MAX_DEPTH = 6;
-function findInProject(dir, rel, done) {
-  const want = "/" + rel.replace(/^\.\//, "").replace(/\\/g, "/");
-  const pick = (files) => {
-    const hits = files.filter((f) => ("/" + f).endsWith(want));
-    if (!hits.length) return null;
-    hits.sort((a, b) => a.split("/").length - b.split("/").length || a.length - b.length);
-    return join(dir, hits[0]);
-  };
-  execFile(
-    "git",
-    ["-C", dir, "ls-files", "--cached", "--others", "--exclude-standard"],
-    { env: CHILD_ENV, maxBuffer: 16 * 1024 * 1024 },
-    (err, out) => {
-      const tracked = err ? null : pick(out.split("\n").filter(Boolean));
-      // git misses anything it's told to ignore — a generated icon, a build
-      // artifact — so walk the tree before giving up.
-      done(tracked || pick(walkProject(dir)));
-    }
-  );
-}
-
-function walkProject(dir) {
-  const out = [];
-  let budget = SCAN_MAX_ENTRIES;
-  (function rec(cur, prefix, depth) {
-    if (depth > SCAN_MAX_DEPTH || budget <= 0) return;
-    let entries;
-    try {
-      entries = readdirSync(cur, { withFileTypes: true });
-    } catch {
-      return; // unreadable dir — not worth failing the click over
-    }
-    for (const e of entries) {
-      if (--budget <= 0) return;
-      if (e.isDirectory()) {
-        if (!SCAN_SKIP.has(e.name)) rec(join(cur, e.name), prefix + e.name + "/", depth + 1);
-      } else if (e.isFile()) {
-        out.push(prefix + e.name);
-      }
-    }
-  })(dir, "", 0);
-  return out;
-}
-
-function launchOpen(id, p, full, reveal, fail) {
+  if (!isAbsolute(full)) full = join(cwd && existsSync(cwd) ? cwd : homedir(), full);
+  if (!existsSync(full)) return fail("no such file or folder.");
   const [cmd, args] =
     process.platform === "darwin"
       ? ["open", reveal ? ["-R", full] : [full]]
@@ -2132,9 +2064,7 @@ function launchOpen(id, p, full, reveal, fail) {
     if (err && process.platform !== "win32") {
       return fail(String(stderr || "").trim().split("\n").pop() || err.message);
     }
-    // `resolved` says which file the click actually landed on — it can differ
-    // from what was written when the name was looked up in the project.
-    send({ type: "openPath", id, path: p, ok: true, resolved: full });
+    send({ type: "openPath", id, path: p, ok: true });
   });
 }
 
