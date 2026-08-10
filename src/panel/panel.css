@@ -1553,6 +1553,22 @@ body {
 .md a { color: var(--other-blue); text-decoration: none; }
 .md a:hover { text-decoration: underline; }
 
+/* Words at the streaming edge land one by one: fade up out of a blur, in
+   reading order. chat.js (revealTail) hands each span its own delay — often a
+   negative one, which starts the word part-way in. inline-block is what makes
+   the transform apply at all; it doesn't change where lines break. */
+.rv-word {
+  display: inline-block;
+  animation: rv-word-in 600ms cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+@keyframes rv-word-in {
+  from { opacity: 0; transform: translateY(10px); filter: blur(8px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rv-word { animation: none; }
+}
+
 /* GFM tables */
 .md-table {
   width: 100%;
