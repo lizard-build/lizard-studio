@@ -1584,6 +1584,21 @@ code.inline {
   border-radius: 4px;
   padding: 1px 5px;
 }
+/* A file path Claude wrote in backticks — click to open it (see chat.js). Keeps
+   the code chip, borrows the link color so it reads as clickable at a glance. */
+code.inline.path {
+  color: var(--other-blue);
+  cursor: pointer;
+}
+code.inline.path:hover {
+  text-decoration: underline;
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.35);
+}
+code.inline.path:focus-visible {
+  outline: 1px solid var(--other-blue);
+  outline-offset: 1px;
+}
 
 /* code blocks */
 .code-block {

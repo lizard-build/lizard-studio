@@ -134,11 +134,56 @@
     return wrap;
   }
 
+  // ---- file paths in inline code -------------------------------------------
+  // Claude writes paths as inline code (`~/Desktop/notes.md`, `src/panel/render.js:42`),
+  // and those are worth a click. Turning one into a link is opt-in per page:
+  // only the side panel can act on the click — it owns the native-messaging port —
+  // so the standalone plan viewer keeps rendering plain inline code.
+  let pathLinks = false;
+  function enablePathLinks() {
+    pathLinks = true;
+  }
+
+  // Extensions that make a bare name a file on sight, so `render.js` links but
+  // `chat.cwd` doesn't. Inline code is mostly identifiers and commands, so the
+  // whole test errs towards leaving things alone: a wrong guess is a link that
+  // opens nothing.
+  const PATH_EXT =
+    /\.(js|jsx|mjs|cjs|ts|tsx|json|jsonc|md|mdx|txt|csv|tsv|log|ya?ml|toml|ini|cfg|env|lock|sh|bash|zsh|fish|py|rb|go|rs|java|kt|swift|c|h|cc|cpp|hpp|cs|php|sql|html?|css|scss|less|xml|svg|png|jpe?g|gif|webp|ico|pdf|zip|gz|tgz|mov|mp4|ipynb)$/i;
+  function filePath(code) {
+    // "file.ts:42" — the line (and column) is how an editor is told where to
+    // jump, not part of the name on disk.
+    const s = code.trim().replace(/:\d+(?::\d+)?$/, "");
+    if (!s || s.length > 400) return "";
+    // Entities mean the source had a quote or an ampersand; the rest is shell
+    // punctuation. Either way it's a command, not a path.
+    if (/[&<>|*?`$;()\n]/.test(s) || /\s-/.test(s)) return "";
+    // A URL is a link already — the pass below turns it into one.
+    if (/^[a-z][a-z\d+.-]*:\/\//i.test(s)) return "";
+    // The emphasis pass below rewrites the whole string, so a name the italic
+    // rule would bite (/tmp/_draft_.md) can't be trusted to survive into the
+    // attribute intact.
+    if (/\b_[^_\n]+_\b/.test(s)) return "";
+    // Rooted paths are unmistakable, so they may carry spaces (~/Desktop/My notes.md).
+    // A bare root ("/", "~/", "./") names nothing worth opening.
+    if (/^(~[\\/]|\.{1,2}[\\/]|\/|[A-Za-z]:[\\/])/.test(s)) return /[^~./\\]/.test(s) ? s : "";
+    if (/\s/.test(s)) return "";
+    // Bare: needs a directory in it, or a suffix that says "file".
+    return s.indexOf("/") !== -1 || PATH_EXT.test(s) ? s : "";
+  }
+
   // ---- inline markdown ------------------------------------------------------
   // `code`, **bold**, *italic*, [text](url). Input is raw; output is escaped+safe.
   function inlineMarkdown(text) {
     let html = escapeHtml(text);
-    html = html.replace(/`([^`]+)`/g, (_, c) => `<code class="inline">${c}</code>`);
+    html = html.replace(/`([^`]+)`/g, (_, c) => {
+      // `c` is already escaped, and filePath() rejects anything holding an
+      // entity — so the path is safe to put in an attribute as-is.
+      const path = pathLinks ? filePath(c) : "";
+      return path
+        ? `<code class="inline path" data-path="${path}" role="link" tabindex="0" title="Open ${path}">${c}</code>`
+        : `<code class="inline">${c}</code>`;
+    });
     html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     html = html.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
     html = html.replace(/\b_([^_\n]+)_\b/g, "<em>$1</em>");
@@ -395,5 +440,5 @@
     return pre;
   }
 
-  window.RKRender = { escapeHtml, markdown, codeBlock, lineDiff, inlineMarkdown, wireCopyButton };
+  window.RKRender = { escapeHtml, markdown, codeBlock, lineDiff, inlineMarkdown, wireCopyButton, enablePathLinks };
 })();

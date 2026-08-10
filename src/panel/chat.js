@@ -267,7 +267,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install.sh banner only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 23;
+  const EXPECTED_HOST_VERSION = 24;
 
   let els = {};
   let port = null;
@@ -1189,6 +1189,28 @@
       startStatusTicker();
     }
     renderTurnStatus(chat);
+  }
+
+  // ---- file path links ------------------------------------------------------
+  // A path Claude wrote in backticks is a link (render.js marks them up, mount()
+  // wires the delegated click). The host does the opening: it resolves the path
+  // against the chat's folder and hands it to the platform opener, so a click
+  // lands in whatever app owns that file type — or, with alt held, in Finder.
+  function openClickedPath(path, reveal) {
+    const chat = chats.get(activeId);
+    if (!chat || !path) return;
+    // A host too old to know the op would swallow the click without a word.
+    // 0 means it's old enough not to report a version at all.
+    if (hostVersion < 24) {
+      systemNote(chat, "Opening files needs a newer local helper — it's updating now, try again in a moment.", "warn", {
+        ttl: 6000,
+        dismissible: true,
+      });
+      return;
+    }
+    if (!post({ type: "openPath", id: chat.id, path, cwd: chat.cwd, reveal: !!reveal })) {
+      systemNote(chat, `Couldn't open ${path} — the local helper isn't running.`, "warn", { ttl: 6000, dismissible: true });
+    }
   }
 
   // ---- page-element context (from the Selector tool) ------------------------
@@ -4172,6 +4194,16 @@
         if (chat.id === activeId) {
           renderContextChips();
           if (els.input) els.input.focus();
+        }
+        break;
+      case "openPath":
+        // Only failures are worth saying out loud — a successful open speaks
+        // for itself (the file is now on screen in another app).
+        if (chat && !msg.ok) {
+          systemNote(chat, `Couldn't open ${msg.path} — ${msg.error || "the file couldn't be opened."}`, "warn", {
+            ttl: 6000,
+            dismissible: true,
+          });
         }
         break;
       case "gitBranches":
@@ -7594,6 +7626,9 @@
   // ---- mount / lifecycle ----------------------------------------------------
   function mount(root) {
     els.root = root;
+    // The panel owns the host port, so it's the page that can act on a click on
+    // a file path — tell the renderer to mark them up (see openClickedPath).
+    R.enablePathLinks();
     root.innerHTML = TEMPLATE;
     els.tabs = root.querySelector("#chat-tabs");
     els.setup = root.querySelector("#chat-setup");
@@ -7852,6 +7887,25 @@
         if (menu.contains(e.target) || (btn && btn.contains(e.target))) continue;
         closeMenu(menu);
       }
+    });
+    // File paths Claude wrote in backticks are links (render.js marks them) —
+    // one delegated listener covers every message, live or replayed. Alt-click
+    // shows the file in Finder/Explorer instead of opening it.
+    document.addEventListener("click", (e) => {
+      const link = e.target && e.target.closest && e.target.closest("code.path[data-path]");
+      if (!link) return;
+      // Dragging across a path to copy it ends in a click too — selecting text
+      // must not fling a file open.
+      const sel = window.getSelection && window.getSelection();
+      if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+      openClickedPath(link.dataset.path, e.altKey);
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      const link = document.activeElement;
+      if (!link || !link.matches || !link.matches("code.path[data-path]")) return;
+      e.preventDefault();
+      openClickedPath(link.dataset.path, e.altKey);
     });
     els.input.addEventListener("input", () => {
       const chat = chats.get(activeId);

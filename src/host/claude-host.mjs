@@ -40,6 +40,10 @@
 //                                                                 just before the turnIndex-th human
 //                                                                 turn, then kill + resume the session
 //   { type:"pickFolder", id }                                      native folder chooser
+//   { type:"openPath", id, path, cwd?, reveal? }                   open a file/folder the user clicked in
+//                                                                 the transcript with the OS default app
+//                                                                 (reveal: show it in Finder/Explorer
+//                                                                 instead) (→ openPath reply)
 //   { type:"stashFile", id, reqId, name, data }                    write an attached file (base64) to a
 //                                                                 temp dir so claude can Read it by path
 //                                                                 (→ fileStashed)
@@ -74,6 +78,7 @@
 //   { type:"exit",    id, code }
 //   { type:"folder",  id, path }                               null path == cancelled
 //   { type:"fileStashed", id, reqId, ok, name, path?, error? } reply to stashFile
+//   { type:"openPath", id, path, ok, error? }                  reply to openPath
 //   { type:"gitBranches", id, cwd, isRepo, current, branches, checkedOut? }
 //   { type:"gitDiff", id, cwd, isRepo, files, insertions, deletions }
 //   { type:"configRead",  id, key, scope, ok, content?, path?, exists?, error? }
@@ -96,7 +101,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { existsSync, readFileSync, appendFileSync, readdirSync, mkdirSync, writeFileSync, renameSync, statSync, createReadStream, chmodSync, unlinkSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { homedir, userInfo, tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
@@ -212,7 +217,9 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v23: stashFile — binary attachments (PDFs, Office docs) are written to a temp
 //      dir and read back by path, since the panel can only carry text and
 //      images. That dir is on every session's --add-dir list.
-const HOST_VERSION = 23;
+// v24: openPath — file paths in the transcript are clickable; the click asks the
+//      host to hand the path to the platform opener.
+const HOST_VERSION = 24;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -2031,6 +2038,36 @@ function pickFolder(id) {
   });
 }
 
+// ---- open a path in the desktop ---------------------------------------------
+// The panel turns file paths in the transcript into links; a click lands here.
+// Nothing is run through a shell — the path is one argument to the platform
+// opener, and only after it resolves to something that exists. Relative paths
+// resolve against the chat's own folder, where claude was reading and writing.
+function openPath(id, raw, cwd, reveal) {
+  const p = String(raw == null ? "" : raw).trim();
+  const fail = (error) => send({ type: "openPath", id, path: p, ok: false, error });
+  if (!p) return fail("there's no path to open.");
+  let full = p;
+  if (full === "~") full = homedir();
+  else if (/^~[\\/]/.test(full)) full = join(homedir(), full.slice(2));
+  if (!isAbsolute(full)) full = join(cwd && existsSync(cwd) ? cwd : homedir(), full);
+  if (!existsSync(full)) return fail("no such file or folder.");
+  const [cmd, args] =
+    process.platform === "darwin"
+      ? ["open", reveal ? ["-R", full] : [full]]
+      : process.platform === "win32"
+        ? ["explorer.exe", [reveal ? "/select," + full : full]]
+        : // No "reveal" of its own on Linux — open the containing folder instead.
+          ["xdg-open", [reveal ? dirname(full) : full]];
+  execFile(cmd, args, { env: CHILD_ENV }, (err, _out, stderr) => {
+    // explorer.exe exits non-zero even when the window opened fine.
+    if (err && process.platform !== "win32") {
+      return fail(String(stderr || "").trim().split("\n").pop() || err.message);
+    }
+    send({ type: "openPath", id, path: p, ok: true });
+  });
+}
+
 // ---- attached files ---------------------------------------------------------
 // A PDF or .docx can't ride in the prompt as text, and a browser never hands out
 // a real filesystem path for a picked file — so the panel ships the bytes here,
@@ -2630,6 +2667,9 @@ function handle(msg) {
       break;
     case "pickFolder":
       pickFolder(id);
+      break;
+    case "openPath":
+      openPath(id, msg.path, msg.cwd, msg.reveal);
       break;
     case "stashFile":
       stashFile(id, msg);
