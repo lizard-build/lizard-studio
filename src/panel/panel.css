@@ -1372,8 +1372,12 @@ button:active > .copy-swap {
 .chat-messages.pane-in {
   animation: pane-in 0.26s cubic-bezier(0.33, 1, 0.68, 1);
 }
+/* The text is solid less than halfway through and only the last of the travel
+   is left to watch. Fading a whole wall of text the full length of the move
+   reads as a blink, not as an arrival. */
 @keyframes pane-in {
   from { opacity: 0; transform: translateX(var(--pane-from, 12px)); }
+  45% { opacity: 1; }
   to { opacity: 1; transform: none; }
 }
 @media (prefers-reduced-motion: reduce) {

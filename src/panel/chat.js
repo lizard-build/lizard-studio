@@ -509,6 +509,23 @@
   function scrollToBottom(chat) {
     chat.messagesEl.scrollTop = chat.messagesEl.scrollHeight;
   }
+  // A panel hidden with display:none loses its scroll box, and its offset with
+  // it — every tab it comes back on, the conversation is at the top again. So
+  // each chat carries its own place: where it was read to, and whether that
+  // was the bottom (the usual case, and the one that has to survive messages
+  // arriving while the tab was in the background).
+  function rememberScroll(chat) {
+    if (!chat || !chat.messagesEl) return;
+    chat.stick = atBottom(chat);
+    chat.scrollTop = chat.messagesEl.scrollTop;
+  }
+  // Must run in the same task that un-hides the panel: a frame in between is a
+  // frame of the wrong text, and that's the flicker.
+  function restoreScroll(chat) {
+    if (!chat || !chat.messagesEl) return;
+    if (chat.stick === false) chat.messagesEl.scrollTop = chat.scrollTop || 0;
+    else scrollToBottom(chat); // never shown, or left at the bottom
+  }
   // opts.raw skips the queued-bubble anchor below — the one caller that
   // wants it is renderQueuedBubble itself (a newly queued message should
   // stack after ones already waiting, not jump above them).
@@ -700,9 +717,13 @@
     activeId = id;
     // Bringing the tab forward counts as seeing its result.
     chats.get(id).unseen = false;
+    // Note where the tab being left was read to, swap the panels, put the
+    // arriving tab back where it was — all before the browser paints.
+    if (fromId && fromId !== id) rememberScroll(chats.get(fromId));
     for (const [cid, c] of chats) {
       c.messagesEl.classList.toggle("hidden", cid !== id);
     }
+    restoreScroll(chats.get(id));
     // Which way along the strip we just moved: the arriving conversation comes
     // in from that side. 0 on the first tab shown, or a re-select of the tab
     // that's already open — neither is a move.
@@ -714,8 +735,10 @@
     if (connected && hostReady && !chat.started) startChatSession(chat);
     // Re-render a restored/re-opened conversation from its on-disk transcript.
     maybeReplay(chat);
+    // The scroll is already where it belongs (restoreScroll above) — doing it
+    // again a frame later is what used to yank the panel from the top of the
+    // conversation down to the end, in full view.
     requestAnimationFrame(() => {
-      scrollToBottom(chat);
       if (els.input) els.input.focus();
     });
     savePrefs();
