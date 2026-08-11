@@ -69,15 +69,22 @@
   // in step with models.json anyway — it's what a first run with no network
   // shows, and what every run shows until the fetch lands.
   const MODELS_FALLBACK = [
-    { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
+    { id: "claude-haiku-4-5", label: "Haiku 4.5" },
     { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-opus-4-8", label: "Opus 4.8" },
     { id: "claude-opus-5", label: "Opus 5" },
     { id: "claude-fable-5", label: "Fable 5" },
   ];
   let MODELS = MODELS_FALLBACK.slice();
-  const DEFAULT_MODEL_FALLBACK = "claude-opus-4-8";
+  const DEFAULT_MODEL_FALLBACK = "claude-opus-5";
   let DEFAULT_MODEL = DEFAULT_MODEL_FALLBACK;
+
+  // Model ids we used to write into prefs. The CLI still accepts them, so a
+  // stale one keeps working — but it matches no row, so the picker would show
+  // no tick and the context ring would fall back to the default window. Map
+  // them on the way in, where prefs are read.
+  const MODEL_ALIASES = { "claude-haiku-4-5-20251001": "claude-haiku-4-5" };
+  const canonicalModel = (id) => (id && MODEL_ALIASES[id]) || id;
 
   // Reasoning effort — mirrors the CLI's `--effort <level>` flag. "ultracode"
   // isn't a real effort level: it's xhigh reasoning plus dynamic workflow
@@ -109,7 +116,7 @@
     "claude-opus-5": 1000000,
     "claude-sonnet-5": 1000000,
     "claude-fable-5": 1000000,
-    "claude-haiku-4-5-20251001": 200000,
+    "claude-haiku-4-5": 200000,
   };
   let CONTEXT_LIMITS = Object.assign({}, CONTEXT_LIMITS_FALLBACK);
   const DEFAULT_CONTEXT_LIMIT_FALLBACK = 200000;
@@ -378,7 +385,7 @@
     try {
       chrome.storage.local.get(["rkChatV2"], (r) => {
         const p = (r && r.rkChatV2) || {};
-        if (p.lastModel) lastModel = p.lastModel;
+        if (p.lastModel) lastModel = canonicalModel(p.lastModel);
         if (p.lastEffort) lastEffort = p.lastEffort;
         if (p.lastMode) lastMode = p.lastMode;
         if (p.lastCwd) lastCwd = p.lastCwd;
@@ -387,7 +394,7 @@
         if (Array.isArray(p.usageLabels) && p.usageLabels.length) usageLabels = p.usageLabels;
         if (Array.isArray(p.tabs) && p.tabs.length) {
           for (const t of p.tabs) {
-            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, model: t.model, effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory });
+            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory });
             chats.set(chat.id, chat);
             order.push(chat.id);
           }

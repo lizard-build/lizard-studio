@@ -1,10 +1,10 @@
 {
   "_comment": "Model catalog for the Lizard Studio panel. The panel fetches this file from raw.githubusercontent.com at startup, so adding a model here ships to every user without an extension release. src/panel/chat.js keeps a copy of this list as the offline fallback — update both when you edit rows, so a user with no network still sees something current. contextLimit is the usable window Claude Code's own /context reports for that model (window minus its reply reserve), not the model's raw window: the panel's ring has to read 1:1 with the terminal. Models the installed CLI doesn't know fall back to 200k there, so give them 200000 until the CLI catches up.",
   "version": 1,
-  "defaultModel": "claude-opus-4-8",
+  "defaultModel": "claude-opus-5",
   "defaultContextLimit": 200000,
   "models": [
-    { "id": "claude-haiku-4-5-20251001", "label": "Haiku 4.5", "contextLimit": 200000 },
+    { "id": "claude-haiku-4-5", "label": "Haiku 4.5", "contextLimit": 200000 },
     { "id": "claude-sonnet-5", "label": "Sonnet 5", "contextLimit": 1000000 },
     { "id": "claude-opus-4-8", "label": "Opus 4.8", "contextLimit": 1000000 },
     { "id": "claude-opus-5", "label": "Opus 5", "contextLimit": 1000000 },
