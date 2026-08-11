@@ -1619,20 +1619,31 @@ button:active > .copy-swap {
 .md a { color: var(--other-blue); text-decoration: none; }
 .md a:hover { text-decoration: underline; }
 
-/* Words at the streaming edge land one by one: fade up out of a blur, in
-   reading order. chat.js (revealTail) hands each span its own delay — often a
-   negative one, which starts the word part-way in. inline-block is what makes
-   the transform apply at all; it doesn't change where lines break. */
-.rv-word {
+/* The streaming edge. Words land sharp and readable — the only moving part is
+   a caret at the end of the revealed text, on the last line of the tail chat.js
+   re-parses each frame (.stream-live). It is a cursor, so it blinks on and off
+   with one short ramp between rather than breathing in and out. Code blocks and
+   tables arrive as a slab and get no caret; a list hangs it off the last item,
+   since an ::after on the <ul> itself would drop below the list. */
+.stream-live > :last-child:not(.code-wrap, ul, ol, table)::after,
+.stream-live > :is(ul, ol):last-child > li:last-child::after {
+  content: "";
   display: inline-block;
-  animation: rv-word-in 600ms cubic-bezier(0.23, 1, 0.32, 1) both;
+  width: 2px;
+  height: 1.1em;
+  margin-left: 2px;
+  vertical-align: -0.22em;
+  border-radius: 1px;
+  background: var(--text-primary);
+  animation: stream-caret 1.06s linear infinite;
 }
-@keyframes rv-word-in {
-  from { opacity: 0; transform: translateY(10px); filter: blur(8px); }
-  to { opacity: 1; transform: none; filter: none; }
+@keyframes stream-caret {
+  0%, 45% { opacity: 1; }
+  50%, 100% { opacity: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .rv-word { animation: none; }
+  .stream-live > :last-child:not(.code-wrap, ul, ol, table)::after,
+  .stream-live > :is(ul, ol):last-child > li:last-child::after { animation: none; }
 }
 
 /* GFM tables */
