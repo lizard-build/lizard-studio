@@ -266,8 +266,13 @@
   // Minimum native-host protocol version this panel needs (the host reports
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
-  // the manual install.sh banner only shows when that goes unanswered.
+  // the manual install command only shows when that goes unanswered.
   const EXPECTED_HOST_VERSION = 24;
+  // How long to wait on a `selfUpdate` reply before deciding the host is too
+  // old to have heard the question at all, and how long to give the new copy
+  // to come back up once the old one says it's restarting.
+  const HOST_UPDATE_GRACE_MS = 8000;
+  const HOST_RESTART_GRACE_MS = 15000;
 
   let els = {};
   let port = null;
@@ -295,6 +300,9 @@
   // "host not installed" onboarding flash for that one disconnect instead of
   // showing it for the ~1s it takes to reconnect.
   let expectHostRestart = false;
+  // Package version the host reported when it swapped itself out, so the pod
+  // can name it once the new copy is back up.
+  let hostUpdateVersion = "";
   // "Install Claude Code" onboarding step: when the host is linked but can't
   // find the `claude` CLI, we poll by forcing a reconnect — a fresh host process
   // re-runs resolveClaude and its `ready` tells us if `claude` showed up.
@@ -1611,8 +1619,8 @@
   // never written would send claude after a path that isn't there.
   async function stashFile(chat, file) {
     // A host that predates the op would swallow the message and leave the user
-    // staring at a composer that never grew a chip. The stale-host banner is
-    // already up in that case (see the `ready` handler) — just say why.
+    // staring at a composer that never grew a chip. The update pod is already
+    // up in that case (see the `ready` handler) — just say why.
     // 0 means the host is old enough that it doesn't report a version at all.
     if (hostVersion < 23) {
       systemNote(chat, `"${file.name}" needs a newer local helper — it's updating now, try again in a moment.`, "warn");
@@ -3908,23 +3916,83 @@
     if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
   }
 
-  // ---- host-outdated banner ---------------------------------------------
-  // "updating": a stale host was asked to refresh itself — just say so while
-  // it restarts. "manual": the self-update went unanswered or failed (host
-  // too old, offline) — show the install command. "hidden": version is fine.
-  function setHostBanner(state) {
-    if (!els.hostBanner) return;
-    els.hostBanner.classList.toggle("hidden", state === "hidden");
-    els.hostBanner.classList.toggle("updating", state === "updating");
-    if (els.hostBannerText) {
-      els.hostBannerText.textContent =
-        state === "updating"
-          ? "Host is outdated — updating it automatically…"
-          : "Host is outdated — run this, then reload the extension:";
+  // ---- host update, reported in the live activity pod --------------------
+  // Updating the helper isn't why the panel is open, so it says so from a pod
+  // floating over the top of the chat (activity.js) rather than a banner that
+  // shoves the conversation down. It folds itself into a pill after a beat,
+  // and only an error keeps it open.
+  const HOST_INSTALL_CMD = "npx @lizard-build/lizard-studio-host@latest install";
+  let hostPod = null;
+  function hostActivity() {
+    if (!hostPod && window.RKLiveActivity) {
+      hostPod = window.RKLiveActivity.create({ label: "Helper update", dismissLabel: "Dismiss" });
     }
-    if (els.hostBannerIc) {
-      els.hostBannerIc.innerHTML = state === "updating" ? '<span class="host-outdated-spinner"></span>' : ICON("warning", 15);
+    return hostPod;
+  }
+  // A stale host was asked to refresh itself. There's no percentage to report
+  // — the host answers once, when it's done — so the bar just says "working".
+  function hostUpdateStarted() {
+    const pod = hostActivity();
+    if (pod) pod.start({ title: "Updating the helper", detail: "Fetching the newest version", progress: "indeterminate" });
+  }
+  function hostUpdateRestarting(version) {
+    const pod = hostActivity();
+    if (pod) pod.update({ detail: version ? `Installed ${version} — restarting` : "Installed — restarting" });
+  }
+  function hostUpdateDone(version) {
+    const pod = hostActivity();
+    if (pod) pod.succeed({ title: "Helper updated", detail: version ? `Now on ${version}` : "Ready to go" });
+  }
+  // Host errors read like log lines. Keep the shape but cut them to something
+  // a pod can hold, and give the one users actually hit — no network — words.
+  function shortHostError(err) {
+    const text = String(err || "").trim();
+    if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network|fetch failed/i.test(text)) {
+      return "Couldn't reach the registry";
     }
+    return text.length > 90 ? text.slice(0, 89) + "…" : text;
+  }
+  // Two ways it can go wrong. The host answered and failed (offline, a bad
+  // download) — worth another try. Or it never answered at all, which means
+  // it predates self-update: nothing to retry, so hand over the command.
+  function hostUpdateFailed(reason) {
+    const pod = hostActivity();
+    if (!pod) return;
+    pod.fail(
+      { title: "Update failed", detail: reason || "Couldn't reach the registry", mono: false },
+      { label: "Retry", onClick: retryHostUpdate }
+    );
+  }
+  function hostUpdateManual() {
+    const pod = hostActivity();
+    if (!pod) return;
+    let revert = 0;
+    const copy = () => {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) return;
+      navigator.clipboard.writeText(HOST_INSTALL_CMD).then(() => {
+        pod.update({ action: { label: "Copied", onClick: copy } });
+        clearTimeout(revert);
+        revert = setTimeout(() => pod.update({ action: { label: "Copy", onClick: copy } }), 1400);
+      }).catch(() => {});
+    };
+    pod.fail(
+      { title: "Update the helper by hand", detail: HOST_INSTALL_CMD, mono: true },
+      { label: "Copy", onClick: copy }
+    );
+  }
+  function retryHostUpdate() {
+    clearTimeout(hostUpdateTimer);
+    hostUpdatePending = true;
+    hostUpdateStarted();
+    if (!post({ type: "selfUpdate" })) {
+      hostUpdatePending = false;
+      hostUpdateManual();
+      return;
+    }
+    hostUpdateTimer = setTimeout(() => {
+      hostUpdatePending = false;
+      hostUpdateManual();
+    }, HOST_UPDATE_GRACE_MS);
   }
 
   // ---- host transport -------------------------------------------------------
@@ -4036,21 +4104,25 @@
         // unknown ops). Ask a stale host to update itself: v4+ hosts refetch
         // their files from GitHub and restart (the reconnect lands back here
         // with a good version). Hosts too old to know the op ignore it, and
-        // the grace timer swaps the banner to the manual install command.
+        // the grace timer turns the pod over to the manual install command.
         // Hosts older than the version check don't send `version` at all,
         // which reads as 0 and takes the same path.
         clearTimeout(hostUpdateTimer);
         if ((msg.version || 0) >= EXPECTED_HOST_VERSION) {
+          // This `ready` is the one the update was waiting for — the new copy
+          // is up. Any other one means nothing was wrong to begin with, so
+          // there's nothing to report.
+          if (hostUpdatePending) hostUpdateDone(hostUpdateVersion);
           hostUpdatePending = false;
-          setHostBanner("hidden");
+          hostUpdateVersion = "";
         } else {
           hostUpdatePending = true;
-          setHostBanner("updating");
+          hostUpdateStarted();
           post({ type: "selfUpdate" });
           hostUpdateTimer = setTimeout(() => {
             hostUpdatePending = false; // gave up — let the recheck resume
-            setHostBanner("manual");
-          }, 8000);
+            hostUpdateManual();
+          }, HOST_UPDATE_GRACE_MS);
         }
         // Host is linked but the `claude` CLI isn't installed — surface the real
         // "Install Claude Code" onboarding step (platform-aware) and keep polling.
@@ -4129,14 +4201,27 @@
         }
         break;
       case "selfUpdate":
-        // updated:true → the host is about to restart; keep "updating…" up
-        // until the reconnect's `ready` re-evaluates the version. Anything
-        // else (already current yet still stale, fetch failed) → manual.
+        // updated:true → the host is about to restart; keep the pod running
+        // until the reconnect's `ready` re-evaluates the version. A reported
+        // error is worth retrying; "already current yet still stale" is the
+        // host telling us it can't get any newer, so that one goes manual.
         if (msg.updated) {
           expectHostRestart = true;
+          hostUpdateVersion = msg.version || "";
+          hostUpdateRestarting(msg.version);
+          // The host heard us and is on its way out, so the grace timer has
+          // done its job — but the new copy still has to come back up, and a
+          // restart that never lands can't be left spinning either.
+          clearTimeout(hostUpdateTimer);
+          hostUpdateTimer = setTimeout(() => {
+            hostUpdatePending = false;
+            hostUpdateManual();
+          }, HOST_RESTART_GRACE_MS);
         } else {
           clearTimeout(hostUpdateTimer);
-          setHostBanner("manual");
+          hostUpdatePending = false;
+          if (msg.error) hostUpdateFailed(shortHostError(msg.error));
+          else hostUpdateManual();
         }
         break;
       case "browser":
@@ -7703,10 +7788,6 @@
     els.obCopyClaude = root.querySelector("#chat-copy-claude");
     els.attachFileBtn = root.querySelector("#attach-file-btn");
     els.fileInput = root.querySelector("#file-input");
-    els.hostBanner = root.querySelector("#host-outdated-banner");
-    els.hostBannerText = root.querySelector("#host-outdated-text");
-    els.hostBannerCopy = root.querySelector("#host-outdated-copy");
-    els.hostBannerIc = root.querySelector("#host-outdated-ic");
     els.gitBar = root.querySelector("#git-status-bar");
     els.gitBarIc = root.querySelector("#git-bar-ic");
     els.gitBarBranch = root.querySelector("#git-bar-branch");
@@ -7739,7 +7820,6 @@
     els.gitDrawerClose.innerHTML = ICON("caret-down", 15);
     els.tasksDrawerClose.innerHTML = ICON("caret-down", 15);
     els.tasksDrawerBack.innerHTML = ICON("caret-left", 16);
-    wireCopyButton(els.hostBannerCopy, () => els.hostBannerCopy.dataset.cmd, 13);
     if (els.copyInstall) wireCopyButton(els.copyInstall, () => els.copyInstall.dataset.cmd, 14);
     const claudeLogo = root.querySelector("#onboarding-logo-claude");
     const lizardLogo = root.querySelector("#onboarding-logo-lizard");
@@ -8039,16 +8119,6 @@
         <button id="new-chat-btn" class="icon-btn" title="New chat"></button>
         <button id="history-btn" class="icon-btn" title="Chat history"></button>
         <button id="settings-btn" class="icon-btn" title="Settings"></button>
-      </div>
-    </div>
-    <div id="host-outdated-banner" class="host-outdated-banner hidden">
-      <span id="host-outdated-ic" class="host-outdated-ic"></span>
-      <div class="host-outdated-body">
-        <div id="host-outdated-text" class="host-outdated-text">Host is outdated — run this, then reload the extension:</div>
-        <div class="host-outdated-cmd">
-          <code id="host-outdated-code">npx @lizard-build/lizard-studio-host@latest install</code>
-          <button id="host-outdated-copy" class="host-outdated-copy-btn" title="Copy install command" data-cmd="npx @lizard-build/lizard-studio-host@latest install"></button>
-        </div>
       </div>
     </div>
     <div id="chat-stack" class="chat-stack">

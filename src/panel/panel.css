@@ -218,7 +218,7 @@ body {
 }
 /* The press: the mark dips a pixel at once and springs back on release. It
    rides the marks rather than the button so one that is a slice of a bigger
-   surface (the host-outdated banner) doesn't drag its divider down with it. */
+   surface (the code block's corner) doesn't drag its divider down with it. */
 button:active > .copy-swap {
   transform: translateY(1px);
   transition-duration: 0.06s;
@@ -1076,69 +1076,223 @@ button:active > .copy-swap {
 .attach-file-btn:hover { background: rgba(255, 255, 255, 0.08); }
 .hidden-file-input { display: none; }
 
-/* ---- host-outdated banner: persistent above the chat stack, survives tab
-   switches (lives outside .chat-stack), until the host is reinstalled and the
-   extension reloaded. ---- */
-.host-outdated-banner {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin: 6px 8px 0;
-  padding: 9px 10px;
-  border-radius: 8px;
-  background: rgba(245, 158, 11, 0.1);
-  color: var(--warn-soft);
-}
-.host-outdated-ic { display: inline-flex; flex: 0 0 auto; margin-top: 1px; }
-.host-outdated-spinner {
-  width: 15px;
-  height: 15px;
-  border-radius: 50%;
-  border: 2px solid rgba(251, 191, 36, 0.3);
-  border-top-color: var(--warn-soft);
-  animation: spin 0.7s linear infinite;
-}
-/* Shared by every spinner (host banner, login card). */
+/* Shared by every spinner (login card, tool cards, task rows). */
 @keyframes spin { to { transform: rotate(360deg); } }
-.host-outdated-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-.host-outdated-text { font-size: 12px; font-weight: 500; line-height: 1.4; }
-.host-outdated-cmd {
+
+/* ---- live activity pod (activity.js) ------------------------------------
+   Ongoing work worn as a small object at the top of the panel: it floats over
+   the chat rather than pushing it down, folds itself into a pill when nobody
+   is looking, and opens back up on hover, on focus, or when it fails. The pod
+   is sized in JS from whichever face is showing — everything here just has to
+   animate between those two sizes. ---- */
+.la-layer {
+  position: fixed;
+  top: 8px;
+  left: 0;
+  right: 0;
+  z-index: 400;
   display: flex;
-  align-items: stretch;
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(245, 158, 11, 0.25);
-  border-radius: 6px;
-  overflow: hidden;
+  justify-content: center;
+  pointer-events: none;
 }
-.host-outdated-cmd code {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: 5px 8px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-secondary);
+.la-pod {
+  position: relative;
+  pointer-events: auto;
+  overflow: hidden;
+  border-radius: 999px;
+  border: 1px solid var(--border-primary);
+  background: rgba(18, 18, 18, 0.92);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+  /* The size carries the morph, so it gets the spring; the rest is a plain
+     fade so opening never reads as two separate moves. */
+  transition:
+    width 0.42s cubic-bezier(0.22, 1.12, 0.36, 1),
+    height 0.42s cubic-bezier(0.22, 1.12, 0.36, 1),
+    border-radius 0.34s ease,
+    opacity 0.22s ease,
+    transform 0.42s cubic-bezier(0.22, 1.12, 0.36, 1),
+    filter 0.22s ease;
+}
+.la-pod.la-open { border-radius: 14px; }
+/* Sizing that shouldn't be watched — the first measurement, before the pod
+   has even arrived. Its entrance keeps its own transition. */
+.la-pod.la-nomove { transition-property: opacity, transform, filter; }
+.la-pod.la-enter,
+.la-pod.la-out {
+  opacity: 0;
+  transform: translateY(-10px) scale(0.9);
+  filter: blur(6px);
+}
+.la-pod.la-out { transition-duration: 0.2s; }
+.la-pod:focus-visible { outline: none; }
+
+/* Both faces sit in the same spot, centred on the pod, so the one arriving
+   grows out of the one leaving instead of sliding in beside it. */
+.la-face {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  transition:
+    opacity 0.24s cubic-bezier(0.33, 1, 0.68, 1),
+    transform 0.32s cubic-bezier(0.22, 1.12, 0.36, 1),
+    filter 0.24s ease;
+}
+.la-pod .la-face-full,
+.la-pod.la-open .la-face-compact {
+  opacity: 0;
+  transform: translateX(-50%) scale(0.94);
+  filter: blur(3px);
+  pointer-events: none;
+}
+.la-pod.la-open .la-face-full {
+  opacity: 1;
+  transform: translateX(-50%) scale(1);
+  filter: none;
+  pointer-events: auto;
+}
+
+/* The pill: a glyph and one line — the percentage while it can be counted,
+   the title when it can't. */
+.la-face-compact {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  max-width: calc(100vw - 24px);
+  padding: 0 11px;
   white-space: nowrap;
+}
+.la-compact-text {
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
 }
-.host-outdated-copy-btn {
+.la-face-full {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: var(--la-w, 300px);
+  padding: 10px 11px;
+}
+.la-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-right: 16px; /* clear of the close button in the corner */
+}
+.la-title { font-size: 12.5px; font-weight: 600; line-height: 1.35; }
+.la-detail {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.la-detail.la-mono { font-family: var(--font-mono); font-size: 11px; }
+
+/* One accent per phase, worn by the glyph and the progress fill. */
+.la-glyph { display: inline-flex; flex: 0 0 auto; color: var(--other-blue); }
+.la-glyph-lg { margin-top: 1px; }
+.la-pod[data-phase="success"] .la-glyph { color: var(--control-primary); }
+.la-pod[data-phase="error"] .la-glyph { color: var(--other-red); }
+.la-spin { animation: spin 0.85s linear infinite; }
+.la-check path {
+  stroke-dasharray: 26;
+  stroke-dashoffset: 26;
+  animation: la-draw 0.4s cubic-bezier(0.2, 0.9, 0.3, 1) forwards;
+}
+@keyframes la-draw { to { stroke-dashoffset: 0; } }
+
+.la-track {
+  position: relative;
+  height: 3px;
+  margin-top: 2px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+.la-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--other-blue);
+  transition: width 0.5s cubic-bezier(0.33, 1, 0.68, 1);
+}
+/* Nothing to count — the bar says "working", not "this far along". */
+.la-track.la-indet .la-fill {
+  width: 42%;
+  animation: la-slide 1.3s cubic-bezier(0.6, 0.05, 0.35, 0.95) infinite;
+}
+@keyframes la-slide {
+  from { transform: translateX(-115%); }
+  to { transform: translateX(255%); }
+}
+
+.la-action {
   appearance: none;
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  border: none;
-  border-left: 1px solid rgba(245, 158, 11, 0.25);
-  background: transparent;
-  color: var(--warn-soft);
+  align-self: flex-start;
+  margin-top: 3px;
+  padding: 3px 9px;
+  border: 1px solid var(--border-primary);
+  border-radius: 999px;
+  background: var(--control-secondary);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
   cursor: pointer;
   transition: background 0.15s;
 }
-.host-outdated-copy-btn:hover { background: rgba(245, 158, 11, 0.15); }
-.host-outdated-copy-btn.copied { color: var(--control-primary); }
-/* While the host self-updates there is nothing for the user to run. */
-.host-outdated-banner.updating .host-outdated-cmd { display: none; }
+.la-action:hover { background: var(--control-secondary-hover); }
+.la-close {
+  appearance: none;
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.la-close:hover { background: rgba(255, 255, 255, 0.08); color: var(--text-secondary); }
+/* Announced, not shown. */
+.la-say {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+@media (prefers-reduced-motion: reduce) {
+  .la-pod,
+  .la-face,
+  .la-fill { transition: none; }
+  .la-spin,
+  .la-check path,
+  .la-track.la-indet .la-fill { animation: none; }
+  .la-check path { stroke-dashoffset: 0; }
+  .la-track.la-indet .la-fill { width: 100%; opacity: 0.5; }
+}
 
 /* ---- chat stack: one scrollable .chat-messages per tab, only active shown ---- */
 .chat-stack {
