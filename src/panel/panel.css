@@ -103,10 +103,6 @@ body {
   100% { opacity: 1; transform: none; filter: blur(0); }
 }
 .branch-menu,
-.mode-menu,
-.model-menu,
-.effort-menu,
-.usage-menu,
 .history-menu {
   animation: menu-in 0.26s cubic-bezier(0.33, 1, 0.68, 1);
   transform-origin: bottom right;
@@ -122,16 +118,11 @@ body {
   }
 }
 .branch-menu.is-closing,
-.mode-menu.is-closing,
-.model-menu.is-closing,
-.effort-menu.is-closing,
-.usage-menu.is-closing,
 .history-menu.is-closing {
   animation: menu-out 0.13s cubic-bezier(0.4, 0, 1, 1) forwards;
   pointer-events: none;
 }
-.branch-menu,
-.mode-menu { transform-origin: bottom left; }
+.branch-menu { transform-origin: bottom left; }
 /* The only one that drops down instead of rising — start and overshoot flip. */
 .history-menu {
   --menu-in-y: -12px;
@@ -139,19 +130,72 @@ body {
   transform-origin: top right;
 }
 
+/* ---- the composer's pickers: mode, model, effort, usage ----
+   These four sit on the toolbar and point at the button that owns them, in
+   interior.dev's popover shape: an arrow tracking the trigger's centre, and a
+   panel that grows out of that arrow rather than out of its own corner. The
+   colours are the panel's — surface, border and shadow are the same values the
+   other menus use; only the movement and the arrow are new.
+
+   chat.js (anchorPopover) measures the trigger on open and hands the panel
+   --pop-arrow-x: how far along its own edge the arrow sits, clamped so it can
+   never ride up onto a rounded corner.
+
+   --pop-shift is the other half: how far the panel had to come back from a
+   viewport edge. It rides on transform rather than a margin, because these
+   panels are pinned by `right`, and a margin on a right-pinned box resizes it
+   instead of moving it. Every keyframe carries the same translate so the
+   entrance can't undo it. */
+.pop {
+  --pop-arrow: 9px;
+  transform: translateX(var(--pop-shift, 0px));
+  animation: pop-in 0.22s cubic-bezier(0.23, 1, 0.32, 1);
+}
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateX(var(--pop-shift, 0px)) translateY(6px) scale(0.95);
+  }
+  to { opacity: 1; transform: translateX(var(--pop-shift, 0px)); }
+}
+/* Dismissal is shorter and barely moves — it only has to get out of the way. */
+.pop.is-closing {
+  animation: pop-out 0.13s cubic-bezier(0.23, 1, 0.32, 1) forwards;
+  pointer-events: none;
+}
+@keyframes pop-out {
+  from { opacity: 1; transform: translateX(var(--pop-shift, 0px)); }
+  to { opacity: 0; transform: translateX(var(--pop-shift, 0px)) scale(0.97); }
+}
+/* The arrow: a square stood on its corner, half of it tucked under the panel
+   so only the tip shows. Two of its four borders face outwards — those are the
+   ones that carry the panel's stroke; the other two would draw a seam across
+   the panel's own edge. All four pickers open upward, so the tip points down. */
+.pop::after {
+  content: "";
+  position: absolute;
+  bottom: calc(var(--pop-arrow) / -2);
+  left: var(--pop-arrow-x, 50%);
+  width: var(--pop-arrow);
+  height: var(--pop-arrow);
+  margin-left: calc(var(--pop-arrow) / -2);
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-primary);
+  border-bottom: 1px solid var(--border-primary);
+  border-bottom-right-radius: 2px;
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+.pop:focus,
+.pop:focus-visible { outline: none; }
+
 @media (prefers-reduced-motion: reduce) {
   .branch-menu,
-  .mode-menu,
-  .model-menu,
-  .effort-menu,
-  .usage-menu,
   .history-menu,
   .branch-menu.is-closing,
-  .mode-menu.is-closing,
-  .model-menu.is-closing,
-  .effort-menu.is-closing,
-  .usage-menu.is-closing,
   .history-menu.is-closing,
+  .pop,
+  .pop.is-closing,
   .settings-overlay,
   .settings-modal { animation: none; }
 }

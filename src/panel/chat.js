@@ -461,11 +461,13 @@
     menuCloseTimers.delete(menu);
     menu.classList.remove("is-closing");
     menu.classList.remove("hidden");
+    openPopover(menu);
   }
   function closeMenu(menu) {
     if (!menuIsOpen(menu)) return;
     const teardown = menuTeardowns.get(menu);
     if (teardown) teardown();
+    closingPopover(menu);
     if (reducedMotion.matches) {
       menu.classList.add("hidden");
       return;
@@ -476,6 +478,73 @@
       menu.classList.remove("is-closing");
       menu.classList.add("hidden");
     }, MENU_CLOSE_MS));
+  }
+
+  // ---- popovers (the composer's four pickers) --------------------------------
+  // The panels are anchored in CSS, which is enough to place them but can't
+  // know two things: where the trigger sits along the panel's edge, and how
+  // much room is left before the panel runs off. Both are measured on open —
+  // the first drives the arrow and the transform-origin, so the panel grows out
+  // of its button; the second nudges the panel back inside the viewport.
+  const POP_ARROW = 9; // arrow square, px — keep in step with panel.css
+  const POP_EDGE = 8; // closest the panel may sit to the panel edge
+  const popoverTriggers = new WeakMap();
+  function registerPopover(menu, trigger, label) {
+    if (!menu || !trigger) return;
+    popoverTriggers.set(menu, trigger);
+    menu.setAttribute("role", "dialog");
+    menu.setAttribute("tabindex", "-1");
+    if (label) menu.setAttribute("aria-label", label);
+    trigger.setAttribute("aria-haspopup", "dialog");
+    trigger.setAttribute("aria-expanded", "false");
+  }
+
+  function anchorPopover(menu, trigger) {
+    // Measure with the entrance suppressed: mid-animation the panel is scaled,
+    // and a scaled rect would put the arrow in the wrong place. Clearing and
+    // restoring `animation` also restarts it, which is what we want anyway.
+    menu.style.animation = "none";
+    menu.style.setProperty("--pop-shift", "0px");
+    const m = menu.getBoundingClientRect(); // forces layout — unshifted, unscaled
+    const t = trigger.getBoundingClientRect();
+    // Slide the panel back inside. Both edges have to be honoured at once —
+    // correcting only the overhanging one pushes the panel off the other side.
+    // A panel too wide for the viewport pins to the left and overhangs right,
+    // which at least keeps its first column readable.
+    const room = Math.max(POP_EDGE, window.innerWidth - POP_EDGE - m.width);
+    const shift = Math.min(Math.max(m.left, POP_EDGE), room) - m.left;
+    menu.style.setProperty("--pop-shift", shift + "px");
+    // The arrow tracks the trigger's centre, stopping short of the corners so
+    // it never straddles the radius. `left` on the arrow resolves against the
+    // padding box, so the border comes off the measured offset.
+    const cs = getComputedStyle(menu);
+    const half = POP_ARROW / 2;
+    const border = parseFloat(cs.borderLeftWidth) || 0;
+    const radius = parseFloat(cs.borderBottomLeftRadius) || 10;
+    const centre = t.left + t.width / 2 - (m.left + shift) - border;
+    const point = Math.max(radius + half, Math.min(m.width - radius - half, centre));
+    menu.style.setProperty("--pop-arrow-x", point + "px");
+    menu.style.transformOrigin = point + "px " + m.height + "px";
+    menu.style.animation = "";
+  }
+
+  function openPopover(menu) {
+    const trigger = popoverTriggers.get(menu);
+    if (!trigger) return;
+    anchorPopover(menu, trigger);
+    trigger.setAttribute("aria-expanded", "true");
+    // Focus the panel, not the first row: Escape has somewhere to fire from,
+    // and nothing inside is pre-selected for a stray Enter to act on.
+    try { menu.focus({ preventScroll: true }); } catch (_) { menu.focus(); }
+  }
+
+  function closingPopover(menu) {
+    const trigger = popoverTriggers.get(menu);
+    if (!trigger) return;
+    trigger.setAttribute("aria-expanded", "false");
+    // Hand focus back only if it's still inside the panel — a click elsewhere
+    // has already moved it, and yanking it back would fight the user.
+    if (menu.contains(document.activeElement)) trigger.focus();
   }
 
   function el(tag, cls, text) {
@@ -8078,6 +8147,21 @@
       [els.usageMenu, els.usageBtn],
     ];
     for (const [menu, , onClose] of dropdownPairs) registerMenu(menu, onClose);
+    // The four composer pickers are popovers: they point at their button and
+    // grow out of it (see anchorPopover), and Escape closes them from anywhere.
+    registerPopover(els.modeMenu, els.mode, "Permission mode");
+    registerPopover(els.modelMenu, els.modelBtn, "Model");
+    registerPopover(els.effortMenu, els.effortBtn, "Effort");
+    registerPopover(els.usageMenu, els.usageBtn, "Usage");
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      for (const [menu] of dropdownPairs) {
+        if (!popoverTriggers.has(menu) || !menuIsOpen(menu)) continue;
+        e.preventDefault();
+        closeMenu(menu); // hands focus back to the trigger
+        return;
+      }
+    });
     document.addEventListener("click", (e) => {
       for (const [menu, btn] of dropdownPairs) {
         if (!menuIsOpen(menu)) continue;
@@ -8269,7 +8353,7 @@
     </div>
     <div class="composer">
       <div id="slash-menu" class="slash-menu hidden"></div>
-      <div id="mode-menu" class="mode-menu hidden"></div>
+      <div id="mode-menu" class="mode-menu pop hidden"></div>
       <!-- Pre-chat setup chips: folder + git branch. Shown only while the
            active chat is empty; hidden once the conversation starts. -->
       <div id="chat-setup" class="chat-setup">
@@ -8319,7 +8403,7 @@
             <button id="model-btn" class="model-btn" title="Model">
               <span class="model-label">Opus 4.8</span>
             </button>
-            <div id="model-menu" class="model-menu hidden"></div>
+            <div id="model-menu" class="model-menu pop hidden"></div>
           </div>
           <div id="effort-picker" class="model-picker effort-picker">
             <button id="effort-btn" class="model-btn effort-btn" title="Effort">
@@ -8328,7 +8412,7 @@
             <!-- Effort slider: Low → Ultracode, one stop per EFFORTS entry.
                  The range is continuous (step 0.001) so dragging feels smooth;
                  it magnets to the nearest stop and springs onto it on release. -->
-            <div id="effort-menu" class="effort-menu hidden">
+            <div id="effort-menu" class="effort-menu pop hidden">
               <div class="effort-head">
                 <div class="effort-title">
                   <span>Effort</span>
@@ -8362,7 +8446,7 @@
           </div>
           <div class="usage-picker">
             <button id="usage-btn" class="usage-btn" title="Usage"></button>
-            <div id="usage-menu" class="usage-menu hidden"></div>
+            <div id="usage-menu" class="usage-menu pop hidden"></div>
           </div>
           <!-- One button for both jobs: the arrow turns into the stop square
                while a turn runs (setRunningUI), so the control under the
