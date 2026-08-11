@@ -2078,10 +2078,10 @@
   // top-level blocks are parsed once and frozen into the DOM (re-rendering the
   // whole buffer every frame made a long reply cost O(length²) overall).
 
-  // Words land sharp and readable the moment they are revealed — an entrance
-  // animation on each one buys nothing here and costs the reader the first
-  // fraction of a second of every word. What marks the leading edge instead is
-  // a blinking caret (.stream-live in panel.css).
+  // Each revealed word fades up out of a blur instead of blinking into place
+  // (the .rv-word keyframes in panel.css). Keep this in sync with the CSS.
+  const REVEAL_MS = 600;
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
   // End offset of the next word after `from`: the leading whitespace run plus
   // the non-whitespace run that follows it.
@@ -2131,6 +2131,7 @@
             blk.carry -= cost;
           }
           blk.shown = end;
+          blk.revealTimes.push(now); // when this word landed — see revealTail
           advanced = true;
         }
         if (advanced) renderStreamSlice(chat, blk);
@@ -2170,8 +2171,73 @@
       blk.stable = blk.safe;
     }
     const tail = R.markdown(blk.buf.slice(blk.stable, blk.shown));
+    revealTail(blk, tail);
     blk.live.replaceChildren(...tail.childNodes);
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+  }
+
+  // ---- word reveal ----------------------------------------------------------
+  // The words at the leading edge fade up out of a blur as they land, in reading
+  // order. The tail is re-parsed every frame, so a word's span is a brand new
+  // element each time — what keeps the motion continuous is the delay: a word
+  // revealed 200ms ago is handed animation-delay:-200ms, which drops it back in
+  // 200ms deep. Once a word's animation is over it gets no span at all, so what
+  // the reader is left scrolling through is plain text.
+  //
+  // Words are matched to reveal times from the END of the render, not the start:
+  // markdown eats a token here and there (a list bullet, a pair of asterisks),
+  // and counting back keeps that drift away from the newest words, where it
+  // would be the one place it shows.
+  function revealTail(blk, root) {
+    const times = blk.revealTimes;
+    if (!times.length || reduceMotion.matches) return;
+    const now = performance.now();
+    let live = 0; // how many of the most recent reveals are still animating
+    while (live < times.length && now - times[times.length - 1 - live] < REVEAL_MS) live++;
+    if (!live) return;
+    // Text nodes in reading order, each with where its words fall in the render.
+    // Code blocks sit this out: they arrive as a slab, not as prose.
+    const nodes = [];
+    let total = 0;
+    (function walk(n) {
+      for (let c = n.firstChild; c; c = c.nextSibling) {
+        if (c.nodeType === 3) {
+          const words = c.data.match(/\S+/g);
+          if (words) {
+            nodes.push({ node: c, at: total, count: words.length });
+            total += words.length;
+          }
+        } else if (c.nodeType === 1 && c.tagName !== "PRE") {
+          walk(c);
+        }
+      }
+    })(root);
+    const from = Math.max(0, total - live); // first word still worth a span
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      if (nodes[i].at + nodes[i].count <= from) break;
+      wrapRevealWords(nodes[i], from, total, times, now);
+    }
+  }
+
+  function wrapRevealWords(entry, from, total, times, now) {
+    const frag = document.createDocumentFragment();
+    let idx = entry.at;
+    for (const part of entry.node.data.split(/(\s+)/)) {
+      if (!part) continue;
+      if (!/\S/.test(part)) {
+        frag.appendChild(document.createTextNode(part));
+        continue;
+      }
+      if (idx >= from) {
+        const span = el("span", "rv-word", part);
+        span.style.animationDelay = Math.round(times[times.length - (total - idx)] - now) + "ms";
+        frag.appendChild(span);
+      } else {
+        frag.appendChild(document.createTextNode(part));
+      }
+      idx++;
+    }
+    entry.node.replaceWith(frag);
   }
 
   // The block's wire buffer is complete — swap in the canonical one-shot
@@ -2188,6 +2254,20 @@
         blk.body.appendChild(blk.el);
       }
       const full = R.markdown(blk.buf);
+      // Carry the last words' reveal over the swap, so a message doesn't end on
+      // its own tail snapping into place. Skipped when the typewriter was cut
+      // short (hidden tab, huge backlog): the reveal times then belong to words
+      // far behind the end, and matching from the end would light the wrong ones.
+      if (blk.shown >= blk.buf.length) {
+        revealTail(blk, full);
+        // Nothing re-renders this block again, so the last spans would sit in
+        // the transcript forever. Once their animation is over, unwrap them and
+        // leave the same plain text every other message is made of.
+        setTimeout(() => {
+          for (const span of blk.el.querySelectorAll(".rv-word")) span.replaceWith(span.firstChild || "");
+          blk.el.normalize();
+        }, REVEAL_MS + 50);
+      }
       blk.el.replaceChildren(full);
       blk.el.classList.remove("streaming");
     }
@@ -2264,7 +2344,7 @@
           chat.streamBlocks.set(ev.index, {
             type: "text", el: node, body, buf: "", raf: 0, appended: false,
             // typewriter state (see paceStreamBlock)
-            shown: 0, done: false, lastT: 0, carry: 0,
+            shown: 0, done: false, lastT: 0, carry: 0, revealTimes: [],
             // incremental-render state (see renderStreamSlice/advanceStreamScan)
             md: null, live: null, stable: 0, scan: 0, safe: 0, cand: -1, fenceOpen: false, prevList: false,
           });
