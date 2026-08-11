@@ -696,12 +696,17 @@
 
   function setActive(id) {
     if (!chats.has(id)) return;
+    const fromId = activeId;
     activeId = id;
     // Bringing the tab forward counts as seeing its result.
     chats.get(id).unseen = false;
     for (const [cid, c] of chats) {
       c.messagesEl.classList.toggle("hidden", cid !== id);
     }
+    // Which way along the strip we just moved: the arriving conversation comes
+    // in from that side. 0 on the first tab shown, or a re-select of the tab
+    // that's already open — neither is a move.
+    playPaneIn(chats.get(id), fromId && fromId !== id ? (order.indexOf(id) > order.indexOf(fromId) ? 1 : -1) : 0);
     renderTabs();
     syncComposer();
     const chat = chats.get(id);
@@ -738,6 +743,71 @@
       renderTabs();
     }
     savePrefs();
+  }
+
+  // ---- tab switching animation -------------------------------------------
+  // Two moves, and they're independent. The lit shape behind the active tab is
+  // one long-lived element (.chat-tabs-ind) that slides to whichever tab was
+  // just picked, so the fill travels instead of jumping. The conversation the
+  // tab opens comes in from the side that tab sits on. Neither plays on a
+  // rebuild, a resize, or a reorder — only on an actual switch.
+  let tabInd = null;
+  let indAt = ""; // tab the indicator was last placed on, so we know it moved
+  function ensureTabInd() {
+    if (!tabInd) tabInd = el("span", "chat-tabs-ind");
+    if (tabInd.parentNode !== els.tabs) els.tabs.insertBefore(tabInd, els.tabs.firstChild);
+    return tabInd;
+  }
+  // Park the indicator on x/width without animating (a rebuild or a resize put
+  // it there; nothing happened that the eye should follow).
+  function moveTabInd(x, width, animate) {
+    const ind = ensureTabInd();
+    if (!animate) ind.classList.add("no-move");
+    ind.style.transform = `translateX(${x}px)`;
+    ind.style.width = width + "px";
+    if (!animate) {
+      void ind.offsetWidth; // land it before transitions come back
+      ind.classList.remove("no-move");
+    }
+  }
+  function placeTabInd() {
+    if (!els.tabs) return;
+    const node = els.tabs.querySelector(".chat-tab.active");
+    const ind = ensureTabInd();
+    if (!node) {
+      ind.classList.add("hidden");
+      indAt = "";
+      return;
+    }
+    ind.classList.remove("hidden");
+    // Animate only when the selection itself changed — a re-render for a new
+    // title or a dot must not send the fill sliding.
+    moveTabInd(node.offsetLeft, node.offsetWidth, !!indAt && indAt !== activeId);
+    indAt = activeId;
+  }
+  // Tab widths follow their titles, and the strip can be resized out from under
+  // them — either way the fill has to stay on its tab.
+  function watchTabInd() {
+    if (!window.ResizeObserver || !els.tabs) return;
+    new ResizeObserver(() => placeTabInd()).observe(els.tabs);
+  }
+
+  // The arriving conversation, entering from `dir` (+1 right, -1 left). Re-adding
+  // the class mid-animation has to be preceded by a reflow, or the browser sees
+  // no change and the second switch in a row plays nothing. The class comes off
+  // again on a timer: left on, it would replay by itself every time the panel
+  // goes from display:none back on screen.
+  const PANE_IN_MS = 300;
+  function playPaneIn(chat, dir) {
+    if (!chat) return;
+    const node = chat.messagesEl;
+    clearTimeout(chat.paneTimer);
+    node.classList.remove("pane-in");
+    if (!dir || reducedMotion.matches) return;
+    void node.offsetWidth;
+    node.style.setProperty("--pane-from", dir * 12 + "px");
+    node.classList.add("pane-in");
+    chat.paneTimer = setTimeout(() => node.classList.remove("pane-in"), PANE_IN_MS);
   }
 
   // ---- tab hover tooltip ------------------------------------------------
@@ -826,7 +896,11 @@
   }
   function renderTabs() {
     hideTabTip();
-    els.tabs.innerHTML = "";
+    // Everything but the indicator: it has to outlive the rebuild, or a switch
+    // would hand the fill a brand-new element with nowhere to slide from.
+    for (const node of Array.from(els.tabs.children)) {
+      if (node !== tabInd) node.remove();
+    }
     for (const id of order) {
       const chat = chats.get(id);
       const waiting = tabDotWaiting(chat);
@@ -867,7 +941,8 @@
         // simulates each new arrangement from these fixed widths instead of
         // re-measuring the DOM mid-drag — siblings only ever move visually
         // (via transform), never actually reflow, until the drag ends.
-        const nodes = Array.from(els.tabs.children);
+        // Tabs only — the indicator shares the strip but isn't one of them.
+        const nodes = Array.from(els.tabs.children).filter((n) => n.dataset.tabId);
         const gap = parseFloat(getComputedStyle(els.tabs).columnGap) || 0;
         const rects = new Map(nodes.map((n) => [n.dataset.tabId, { left: n.offsetLeft, width: n.offsetWidth }]));
         const nodeById = new Map(nodes.map((n) => [n.dataset.tabId, n]));
@@ -882,6 +957,11 @@
             dragging = true;
             tab.classList.add("dragging");
             for (const n of nodes) if (n !== tab) n.style.transition = "transform 0.15s ease";
+            // The fill travels with its tab for the length of the drag: pinned
+            // to the finger when that tab is the active one, sliding with the
+            // siblings when it's being pushed aside.
+            ensureTabInd().classList.add("drag");
+            if (id === activeId) tabInd.classList.add("no-move");
           }
           tab.style.transform = `translateX(${dx}px)`;
 
@@ -909,6 +989,9 @@
               const node = nodeById.get(oid);
               if (node) node.style.transform = `translateX(${cursor - r.left}px)`;
             }
+            // Whichever tab is active, the fill goes where that tab now looks
+            // to be: under the finger, or in the slot it just slid to.
+            if (oid === activeId) moveTabInd(oid === id ? startLeft + dx : cursor, r.width, true);
             cursor += r.width + gap;
           }
         };
@@ -917,6 +1000,7 @@
           document.removeEventListener("mouseup", onUp);
           if (dragging) {
             wasDragging = true;
+            if (tabInd) tabInd.classList.remove("drag", "no-move");
             renderTabs();
             savePrefs();
           }
@@ -926,6 +1010,7 @@
       });
       els.tabs.appendChild(tab);
     }
+    placeTabInd();
   }
 
   // ---- history dropdown -----------------------------------------------------
@@ -7815,6 +7900,7 @@
     els.tasksDrawerTitle = root.querySelector("#tasks-drawer-title");
     els.imageViewerOverlay = root.querySelector("#image-viewer-overlay");
     els.imageViewerImg = root.querySelector("#image-viewer-img");
+    watchTabInd();
 
     // Static icons.
     root.querySelector("#new-chat-btn").innerHTML = ICON("plus", 17);

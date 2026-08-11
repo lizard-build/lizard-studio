@@ -238,6 +238,7 @@ button:active > .copy-swap {
   padding-bottom: 3px;
 }
 .chat-tabs {
+  position: relative; /* the indicator below is placed against this box */
   display: flex;
   gap: 2px;
   flex: 1 1 auto;
@@ -247,7 +248,44 @@ button:active > .copy-swap {
 }
 .chat-tabs::-webkit-scrollbar { display: none; }
 
+/* The lit shape behind the active tab. It used to be the tab's own background,
+   which meant switching tabs cut it from one to the next; as one element it
+   slides across instead, and the tabs keep their looks exactly. Sized and
+   moved from JS (placeTabInd) — width and offset come off the live tab. */
+.chat-tabs-ind {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 0;
+  width: 0;
+  pointer-events: none;
+  border-radius: 8px 8px 0 0;
+  background: var(--bg-primary);
+  /* Hairline only where the dark tab meets the lighter strip — top + sides. The
+     bottom stays open: the tab's bottom row is flush with the strip's bottom
+     hairline and its opaque background paints over that segment, so the outline
+     detours around the tab instead of the line cutting across it. */
+  box-shadow:
+    inset 0 1px 0 var(--border-primary),
+    inset 1px 0 0 var(--border-primary),
+    inset -1px 0 0 var(--border-primary);
+  /* A firm, overdamped move: most of the distance goes in the first third and
+     it settles without overshooting — nothing about a tab switch should wobble. */
+  transition:
+    transform 0.28s cubic-bezier(0.25, 1, 0.35, 1),
+    width 0.28s cubic-bezier(0.25, 1, 0.35, 1);
+}
+/* While tabs are being reordered the indicator rides with its tab, so it
+   matches the sliding siblings rather than its own longer curve. */
+.chat-tabs-ind.drag { transition: transform 0.15s ease, width 0.15s ease; }
+/* Placed, not moved: a rebuild, a resize, or the tab held under the finger.
+   Last, so it also wins over the drag curve above. */
+.chat-tabs-ind.no-move { transition: none; }
+
 .chat-tab {
+  position: relative; /* keeps the label above the indicator */
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -268,19 +306,11 @@ button:active > .copy-swap {
   transition: color 0.15s, background 0.15s;
 }
 .chat-tab:hover { color: var(--text-secondary); background: rgba(255, 255, 255, 0.03); }
-.chat-tab.dragging { position: relative; z-index: 5; opacity: 0.85; cursor: grabbing; }
-.chat-tab.active {
-  color: var(--text-primary);
-  background: var(--bg-primary);
-  /* Hairline only where the dark tab meets the lighter strip — top + sides. The
-     bottom stays open: the tab's bottom row is flush with the strip's bottom
-     hairline and its opaque background paints over that segment, so the outline
-     detours around the tab instead of the line cutting across it. */
-  box-shadow:
-    inset 0 1px 0 var(--border-primary),
-    inset 1px 0 0 var(--border-primary),
-    inset -1px 0 0 var(--border-primary);
-}
+/* The active tab is already lit by the indicator underneath — a hover tint on
+   top of it would only make it paler. */
+.chat-tab.active:hover { background: transparent; }
+.chat-tab.dragging { z-index: 5; opacity: 0.85; cursor: grabbing; }
+.chat-tab.active { color: var(--text-primary); }
 .chat-tab .tab-ic { display: inline-flex; color: var(--text-tertiary); }
 .chat-tab.active .tab-ic { color: var(--control-primary); }
 .chat-tab .tab-label {
@@ -1335,6 +1365,21 @@ button:active > .copy-swap {
 }
 .chat-messages::-webkit-scrollbar { width: 8px; }
 .chat-messages::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 4px; }
+/* Switching tabs: the arriving conversation comes in from the side its tab
+   sits on — 12px, no further, so it reads as a step across the strip and not
+   as a page turn. The one leaving is simply dropped (only the open chat is
+   ever on screen), which is what keeps two walls of text from crossing. */
+.chat-messages.pane-in {
+  animation: pane-in 0.26s cubic-bezier(0.33, 1, 0.68, 1);
+}
+@keyframes pane-in {
+  from { opacity: 0; transform: translateX(var(--pane-from, 12px)); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-messages.pane-in { animation: none; }
+  .chat-tabs-ind { transition: none; }
+}
 
 /* ---- empty-chat greeting (time-of-day hello + starter shortcuts) ----
    Overlays the (empty) active .chat-messages, below the drawers (z 5) and
