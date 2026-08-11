@@ -3150,8 +3150,7 @@ code.inline.path:focus-visible {
 }
 .composer-spacer { flex: 1 1 auto; }
 
-.send-btn,
-.stop-btn {
+.send-btn {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -3165,11 +3164,55 @@ code.inline.path:focus-visible {
   cursor: pointer;
   transition: background 0.15s, transform 0.1s, opacity 0.15s;
 }
-.send-btn:hover,
-.stop-btn:hover { background: #e6e6e6; }
-.send-btn:active,
-.stop-btn:active { transform: scale(0.92); }
-.stop-btn { font-size: 12px; }
+.send-btn:hover { background: #e6e6e6; }
+.send-btn:active { transform: scale(0.92); }
+
+/* Send and stop are one button, and pressing send turns the arrow into the
+   square instead of swapping one control for another — the target under the
+   cursor stays put. Both marks share a cell and turn the same way, clockwise,
+   so it reads as one thing rotating rather than two fading past each other.
+   The cell is the arrow's 16px; the square keeps its own 14px, centred in it,
+   landing on the pixel it did as its own button. */
+.icon-morph {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+.morph-mark {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* The turn is firm and quick with no overshoot — the spring behind
+     interior.dev's morph is overdamped, so a bounce would be a different
+     gesture. The fade is far shorter than the turn, and the arriving mark
+     waits for the leaving one to clear: overlap here doesn't read as a
+     cross-fade, it reads as an arrow sitting inside a square. */
+  transition-property: opacity, transform;
+  transition-duration: 0.09s, 0.24s;
+  transition-timing-function: linear, cubic-bezier(0.25, 0.9, 0.3, 1);
+  transition-delay: 0s, 0s;
+}
+.send-btn:not(.busy) .morph-send,
+.send-btn.busy .morph-stop { transition-delay: 0.075s, 0s; }
+.morph-stop {
+  opacity: 0;
+  transform: rotate(-90deg) scale(0.8);
+}
+.send-btn.busy .morph-send {
+  opacity: 0;
+  transform: rotate(90deg) scale(0.8);
+}
+.send-btn.busy .morph-stop {
+  opacity: 1;
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .morph-mark { transition: none; }
+}
 
 /* chat onboarding overlay */
 .chat-onboarding {

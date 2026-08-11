@@ -5106,8 +5106,11 @@
   }
 
   function setRunningUI(on) {
-    els.send.classList.toggle("hidden", on);
-    els.stop.classList.toggle("hidden", !on);
+    // .busy is what the button's click reads to decide send-or-interrupt, and
+    // what panel.css morphs the arrow into the square on.
+    els.send.classList.toggle("busy", on);
+    els.send.title = on ? "Interrupt" : "Send";
+    els.send.setAttribute("aria-label", on ? "Interrupt" : "Send");
     els.root.classList.toggle("running", on);
   }
 
@@ -7664,7 +7667,6 @@
     els.attachThumbs = root.querySelector("#attach-thumbs");
     els.composerBox = root.querySelector(".composer-box");
     els.send = root.querySelector("#send-btn");
-    els.stop = root.querySelector("#stop-btn");
     els.folder = root.querySelector("#folder-btn");
     els.branch = root.querySelector("#branch-btn");
     els.branchMenu = root.querySelector("#branch-menu");
@@ -7765,8 +7767,13 @@
         renderClaudeCmd();
       });
     }
-    els.send.innerHTML = ICON("send", 16);
-    els.stop.innerHTML = ICON("stop", 14);
+    // Arrow and square share one cell so the button can turn from one into the
+    // other; panel.css (.icon-morph) drives it off the .busy class.
+    els.send.innerHTML =
+      '<span class="icon-morph">' +
+      '<span class="morph-mark morph-send">' + ICON("send", 16) + "</span>" +
+      '<span class="morph-mark morph-stop">' + ICON("stop", 14) + "</span>" +
+      "</span>";
     els.attachFileBtn.innerHTML = ICON("plus", 15);
 
     els.gitStatusBadge.addEventListener("click", toggleDiffDrawer);
@@ -7807,8 +7814,10 @@
       els.tasksDrawer.classList.remove("opening");
     });
 
-    els.send.addEventListener("click", sendPrompt);
-    els.stop.addEventListener("click", interrupt);
+    els.send.addEventListener("click", () => {
+      if (els.send.classList.contains("busy")) interrupt();
+      else sendPrompt();
+    });
     els.bashPill.addEventListener("click", () => {
       const chat = chats.get(activeId);
       if (chat) exitBashMode(chat);
@@ -8176,8 +8185,10 @@
             <button id="usage-btn" class="usage-btn" title="Usage"></button>
             <div id="usage-menu" class="usage-menu hidden"></div>
           </div>
-          <button id="send-btn" class="send-btn" title="Send"></button>
-          <button id="stop-btn" class="stop-btn hidden" title="Interrupt"></button>
+          <!-- One button for both jobs: the arrow turns into the stop square
+               while a turn runs (setRunningUI), so the control under the
+               cursor never moves out from under it. -->
+          <button id="send-btn" class="send-btn" title="Send" aria-label="Send"></button>
         </div>
       </div>
     </div>
