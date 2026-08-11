@@ -163,6 +163,72 @@ body {
   flex: 0 0 auto;
 }
 
+/* ---- copy → check swap, shared by every copy button (render.js
+   wireCopyButton builds the markup and sets --copy-mark to the icon size).
+   On click the copy glyph shrinks and blurs away while the check scales up
+   and wipes in from the left — the wipe runs the way a tick is drawn, so the
+   mark reads as written rather than dropped in. Reverting plays it backwards.
+   Only the marks move: each button keeps its own box, colour and hover. ---- */
+.copy-swap {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: var(--copy-mark);
+  height: var(--copy-mark);
+  transition: transform 0.24s cubic-bezier(0.34, 1.5, 0.64, 1);
+}
+.copy-mark {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+/* The copy glyph leaves early so it isn't still sitting under the tick. The
+   blur is small because the mark is: 3px on a 13px glyph is a smudge, not a
+   soft edge. */
+.copy-mark-idle {
+  transition: opacity 0.12s linear,
+    filter 0.12s linear,
+    transform 0.26s cubic-bezier(0.22, 1.12, 0.36, 1);
+}
+/* The tick arrives sharp within a tenth of a second and then spends the rest
+   of the beat drawing itself: the wipe is close to linear, so the stroke is
+   seen travelling instead of landing at full length. */
+.copy-mark-done {
+  opacity: 0;
+  transform: scale(0.92);
+  filter: blur(1.5px);
+  clip-path: inset(0 100% 0 0);
+  transition: opacity 0.1s linear,
+    filter 0.1s linear,
+    transform 0.26s cubic-bezier(0.22, 1.12, 0.36, 1),
+    clip-path 0.3s cubic-bezier(0.35, 0.12, 0.3, 1);
+}
+.copied .copy-mark-idle {
+  opacity: 0;
+  transform: scale(0.92);
+  filter: blur(1.5px);
+}
+.copied .copy-mark-done {
+  opacity: 1;
+  transform: none;
+  filter: none;
+  clip-path: inset(0 0 0 0);
+}
+/* The press: the mark dips a pixel at once and springs back on release. It
+   rides the marks rather than the button so one that is a slice of a bigger
+   surface (the host-outdated banner) doesn't drag its divider down with it. */
+button:active > .copy-swap {
+  transform: translateY(1px);
+  transition-duration: 0.06s;
+  transition-timing-function: ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .copy-swap,
+  .copy-mark { transition: none; }
+}
+
 /* ---- Subbar actions (new chat + history), merged into the tab row ---- */
 .subbar-actions {
   display: flex;

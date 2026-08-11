@@ -2026,7 +2026,6 @@
     copyBtn.type = "button";
     copyBtn.title = "Copy";
     copyBtn.setAttribute("aria-label", "Copy message");
-    copyBtn.innerHTML = ICON("copy", 13);
     wireCopyButton(copyBtn, getText, 13);
     const time = el("span", "msg-time");
     time.dataset.ts = String(ts);
@@ -7825,12 +7824,8 @@
     els.gitDrawerClose.innerHTML = ICON("caret-down", 15);
     els.tasksDrawerClose.innerHTML = ICON("caret-down", 15);
     els.tasksDrawerBack.innerHTML = ICON("caret-left", 16);
-    els.hostBannerCopy.innerHTML = ICON("copy", 13);
     wireCopyButton(els.hostBannerCopy, () => els.hostBannerCopy.dataset.cmd, 13);
-    if (els.copyInstall) {
-      els.copyInstall.innerHTML = ICON("copy", 14);
-      wireCopyButton(els.copyInstall, () => els.copyInstall.dataset.cmd, 14);
-    }
+    if (els.copyInstall) wireCopyButton(els.copyInstall, () => els.copyInstall.dataset.cmd, 14);
     const claudeLogo = root.querySelector("#onboarding-logo-claude");
     const lizardLogo = root.querySelector("#onboarding-logo-lizard");
     const claudeLogo2 = root.querySelector("#onboarding-logo-claude2");
@@ -7841,10 +7836,7 @@
     // dots are driven by showOnboarding() (check icon / current-dot / empty ring).
     const installStep = root.querySelector("#ob-step-install");
     if (installStep) installStep.innerHTML = ICON("check", 14);
-    if (els.obCopyClaude) {
-      els.obCopyClaude.innerHTML = ICON("copy", 14);
-      wireCopyButton(els.obCopyClaude, () => els.obCopyClaude.dataset.cmd, 14);
-    }
+    if (els.obCopyClaude) wireCopyButton(els.obCopyClaude, () => els.obCopyClaude.dataset.cmd, 14);
     if (els.obOsToggle) {
       els.obOsToggle.addEventListener("click", (e) => {
         const b = e.target.closest(".ob-os-tab");

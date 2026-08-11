@@ -95,19 +95,30 @@
   // Shared copy-button behavior: write getText() to the clipboard and flash
   // the icon to a check. Used by code blocks, message footers and the
   // host-outdated banner — keep the feedback identical everywhere.
+  //
+  // Both marks are put in the button up front, stacked in one cell, because
+  // the swap is a cross-fade and needs both on screen at once — swapping
+  // innerHTML can only cut. So wiring owns the button's contents: callers set
+  // the class, title and label, not the icon. The box and colours are
+  // untouched; panel.css drives the swap off the .copied class.
   function wireCopyButton(btn, getText, size) {
     const ICON = window.RKIconHTML;
+    const swap = document.createElement("span");
+    swap.className = "copy-swap";
+    swap.style.setProperty("--copy-mark", size + "px");
+    swap.innerHTML =
+      '<span class="copy-mark copy-mark-idle">' + ICON("copy", size) + "</span>" +
+      '<span class="copy-mark copy-mark-done">' + ICON("check", size) + "</span>";
+    btn.replaceChildren(swap);
+    let revert = 0;
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       const text = getText();
       if (!text || !navigator.clipboard || !navigator.clipboard.writeText) return;
       navigator.clipboard.writeText(text).then(() => {
         btn.classList.add("copied");
-        btn.innerHTML = ICON("check", size);
-        setTimeout(() => {
-          btn.classList.remove("copied");
-          btn.innerHTML = ICON("copy", size);
-        }, 1200);
+        clearTimeout(revert);
+        revert = setTimeout(() => btn.classList.remove("copied"), 1200);
       }).catch(() => {});
     });
   }
@@ -128,7 +139,6 @@
     btn.className = "code-copy";
     btn.title = "Copy";
     btn.setAttribute("aria-label", "Copy code");
-    btn.innerHTML = window.RKIconHTML("copy", 12);
     wireCopyButton(btn, () => code, 12);
     wrap.appendChild(btn);
     return wrap;

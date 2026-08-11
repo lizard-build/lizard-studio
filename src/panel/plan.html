@@ -151,6 +151,40 @@
       .code-copy:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.1); }
       .code-copy.copied { opacity: 1; color: var(--control-primary); }
 
+      /* copy → check swap, same as the panel (see panel.css for the why) */
+      .copy-swap {
+        position: relative;
+        display: inline-flex;
+        flex: 0 0 auto;
+        width: var(--copy-mark);
+        height: var(--copy-mark);
+        transition: transform 0.2s cubic-bezier(0.34, 1.45, 0.64, 1);
+      }
+      .copy-mark {
+        position: absolute;
+        inset: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: opacity 0.26s cubic-bezier(0.23, 1, 0.32, 1),
+          transform 0.26s cubic-bezier(0.23, 1, 0.32, 1),
+          filter 0.26s cubic-bezier(0.23, 1, 0.32, 1),
+          clip-path 0.26s cubic-bezier(0.23, 1, 0.32, 1);
+      }
+      .copy-mark-done {
+        opacity: 0;
+        transform: scale(0.92);
+        filter: blur(3px);
+        clip-path: inset(0 100% 0 0);
+      }
+      .copied .copy-mark-idle { opacity: 0; transform: scale(0.92); filter: blur(3px); }
+      .copied .copy-mark-done { opacity: 1; transform: none; filter: none; clip-path: inset(0 0 0 0); }
+      button:active > .copy-swap { transform: translateY(1px); }
+      @media (prefers-reduced-motion: reduce) {
+        .copy-swap,
+        .copy-mark { transition: none; }
+      }
+
       .tok-kw { color: #c792ea; }
       .tok-string { color: #c3e88d; }
       .tok-comment { color: var(--text-tertiary); font-style: italic; }
