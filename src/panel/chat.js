@@ -2065,17 +2065,28 @@
 
   // ---- live streaming (--include-partial-messages) --------------------------
   // Deltas arrive as bursty multi-word chunks; dumping each chunk into the DOM
-  // at once makes the text visibly jump. Instead the buffer is revealed a few
-  // characters per frame — a typewriter whose speed grows with the backlog, so
-  // it never crawls behind the wire but never leaps either. This is the same
-  // "smooth streaming" trick ChatGPT and Claude.ai use, and what carries the
-  // leading edge is a caret sitting on the last revealed character
-  // (.stream-live in panel.css).
+  // at once makes the text visibly jump. Instead the buffer is revealed word
+  // by word — a typewriter whose speed grows with the backlog, so it never
+  // crawls behind the wire but never leaps either. Same "smooth streaming"
+  // trick ChatGPT and Claude.ai use. The pace budget is counted in characters
+  // (words vary in length) but reveals snap to word boundaries: characters
+  // flickering in one by one mid-word are unreadable, and a word the model
+  // hasn't finished emitting is never shown half-typed.
   //
   // Rendering per frame stays cheap the same way it did before: markdown is
   // re-parsed only for the *unfinished tail* of the revealed text — completed
   // top-level blocks are parsed once and frozen into the DOM (re-rendering the
   // whole buffer every frame made a long reply cost O(length²) overall).
+
+  // End offset of the next word after `from`: the leading whitespace run plus
+  // the non-whitespace run that follows it.
+  function nextWordEnd(buf, from) {
+    let i = from;
+    while (i < buf.length && /\s/.test(buf[i])) i++;
+    while (i < buf.length && !/\s/.test(buf[i])) i++;
+    return i;
+  }
+
   function paceStreamBlock(chat, blk) {
     if (blk.raf) return;
     blk.lastT = 0;
@@ -2088,8 +2099,36 @@
         // Base speed plus a catch-up term: equilibrium lag is a fraction of a
         // second regardless of how fast the model streams.
         const rate = 90 + backlog * 3; // chars per second
-        blk.shown = Math.min(blk.buf.length, blk.shown + Math.max(1, Math.round((rate * dt) / 1000)));
-        renderStreamSlice(chat, blk);
+        const budget = (rate * dt) / 1000;
+        // `carry` banks unspent budget between frames so short words don't
+        // come out faster than long ones — but it's capped, so a stall while
+        // waiting for a word to complete can't dump a paragraph afterwards.
+        const cap = Math.max(budget * 2, 60);
+        blk.carry = Math.min(blk.carry + budget, cap);
+        let advanced = false;
+        for (;;) {
+          const end = nextWordEnd(blk.buf, blk.shown);
+          // Nothing left to reveal (shown has caught up to buf.length) —
+          // without this, once done a fully-revealed block would spin here
+          // forever: end===shown forever, cost 0 is never > carry, so the
+          // loop never breaks.
+          if (end === blk.shown) break;
+          // A word is revealed only once its end is known — trailing
+          // whitespace in the buffer, or the block being complete.
+          if (end === blk.buf.length && !blk.done) break;
+          const cost = end - blk.shown;
+          if (cost > blk.carry) {
+            // A saturated carry means the next token is longer than the cap
+            // itself (a URL, a hash) — let it through instead of stalling.
+            if (advanced || blk.carry < cap) break;
+            blk.carry = 0;
+          } else {
+            blk.carry -= cost;
+          }
+          blk.shown = end;
+          advanced = true;
+        }
+        if (advanced) renderStreamSlice(chat, blk);
       }
       if (blk.shown < blk.buf.length) blk.raf = requestAnimationFrame(step);
       else if (blk.done) finalizeStreamBlock(chat, blk);
@@ -2115,7 +2154,7 @@
       // One shared .md container so CSS (first/last-child margins, the
       // streaming caret) sees the same shape a one-shot render produces.
       blk.md = el("div", "md");
-      blk.live = el("div", "stream-live"); // the re-rendered tail; carries the caret
+      blk.live = el("div"); // classless wrapper holding the re-rendered tail
       blk.md.appendChild(blk.live);
       blk.el.replaceChildren(blk.md);
     }
@@ -2218,7 +2257,7 @@
           chat.streamBlocks.set(ev.index, {
             type: "text", el: node, body, buf: "", raf: 0, appended: false,
             // typewriter state (see paceStreamBlock)
-            shown: 0, done: false, lastT: 0,
+            shown: 0, done: false, lastT: 0, carry: 0,
             // incremental-render state (see renderStreamSlice/advanceStreamScan)
             md: null, live: null, stable: 0, scan: 0, safe: 0, cand: -1, fenceOpen: false, prevList: false,
           });
