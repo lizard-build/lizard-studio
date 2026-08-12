@@ -102,10 +102,9 @@ body {
   }
   100% { opacity: 1; transform: none; filter: blur(0); }
 }
-.branch-menu,
-.history-menu {
+.branch-menu {
   animation: menu-in 0.26s cubic-bezier(0.33, 1, 0.68, 1);
-  transform-origin: bottom right;
+  transform-origin: bottom left;
 }
 /* Going away is the same move played backwards and half as far — quicker than
    opening, since nobody wants to wait on a dismissal. */
@@ -117,17 +116,9 @@ body {
     filter: blur(3px);
   }
 }
-.branch-menu.is-closing,
-.history-menu.is-closing {
+.branch-menu.is-closing {
   animation: menu-out 0.13s cubic-bezier(0.4, 0, 1, 1) forwards;
   pointer-events: none;
-}
-.branch-menu { transform-origin: bottom left; }
-/* The only one that drops down instead of rising — start and overshoot flip. */
-.history-menu {
-  --menu-in-y: -12px;
-  --menu-in-over: 2px;
-  transform-origin: top right;
 }
 
 /* ---- the composer's pickers: mode, model, effort, usage ----
@@ -191,9 +182,7 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .branch-menu,
-  .history-menu,
   .branch-menu.is-closing,
-  .history-menu.is-closing,
   .pop,
   .pop.is-closing,
   .settings-overlay,
@@ -273,7 +262,8 @@ button:active > .copy-swap {
   .copy-mark { transition: none; }
 }
 
-/* ---- Subbar actions (new chat + history), merged into the tab row ---- */
+/* ---- Subbar actions, merged into the tab row: the chat-menu burger leading
+   it on the left, new chat closing it on the right ---- */
 .subbar-actions {
   display: flex;
   gap: 2px;
@@ -464,7 +454,7 @@ button:active > .copy-swap {
   white-space: nowrap;
 }
 
-/* ---- Tabs subbar (tabs + new chat / history) ---- */
+/* ---- Tabs subbar (tabs + new chat / chat menu) ---- */
 .chat-subbar {
   display: flex;
   align-items: flex-end;
@@ -599,6 +589,13 @@ button:active > .copy-swap {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* The chat slides a screen's width to the right to uncover the chat menu, so
+     it hangs well past this edge. Clip it off here, or the panel picks up a
+     horizontal scrollbar and the whole thing can be dragged sideways.
+     `clip`, not `hidden`: hidden would still leave this a scroll container —
+     no scrollbar, but a sideways flick or a scroll-into-view could shove the
+     panel off its axis with no way back. Clip has no scroll position to shove. */
+  overflow: clip;
 }
 
 /* =========================================================================
@@ -1512,34 +1509,133 @@ button:active > .copy-swap {
   color: var(--text-primary);
 }
 
-/* ---- history dropdown ---- */
-.history-menu {
-  position: absolute;
-  top: 40px;
-  right: 8px;
-  z-index: 20;
-  width: 260px;
-  max-height: 360px;
-  overflow-y: auto;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-primary);
-  border-radius: 10px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
-  padding: 6px;
-  scrollbar-width: thin;
+/* ---- chat menu ----
+   One list for every conversation — the tabs open now and the ones already
+   closed — newest first, with settings at the foot.
+
+   Nothing here slides. The menu lies still under the chat, full height, and
+   the chat is what moves: opening the menu pushes the chat off to the right to
+   uncover it, leaving a strip of chat on screen to click your way back with.
+   That's why the shell below carries the transition and the menu carries none —
+   and why the chat has to stay opaque, since it's the only thing hiding the
+   menu when it's shut. */
+.view {
+  /* How far the chat travels, and how wide the menu is — one value, so the
+     chat lands exactly on the menu's edge. Mostly a share of the panel, so the
+     strip of chat left showing scales with it; the px floor is what keeps that
+     strip clickable when the panel is squeezed narrow. */
+  --chat-menu-w: min(82%, calc(100% - 56px));
 }
-.history-search {
+/* The bed the chat lies on. It carries the menu's colour across the whole
+   panel, not just the width the list occupies: the chat rounds its corners off
+   as it goes, and those cut-outs sit past the list's right edge — left unpainted
+   they'd show the near-black body through, as two notches in the wrong colour. */
+.chat-menu {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  background: var(--bg-secondary);
+}
+.chat-menu-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: var(--chat-menu-w);
+  height: 100%;
+}
+/* The chat, as one travelling object. Opaque and above the menu, so with the
+   menu shut there's nothing to see through. */
+.chat-shell {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--bg-primary);
+  /* Most of the distance up front, then a coast — the menus' curve, over a
+     longer beat because the whole chat is what's moving. The edge below comes
+     up on the same beat, so it's drawn on by the move rather than switched on. */
+  transition: transform 0.34s cubic-bezier(0.33, 1, 0.68, 1),
+    border-radius 0.34s cubic-bezier(0.33, 1, 0.68, 1),
+    box-shadow 0.34s cubic-bezier(0.33, 1, 0.68, 1);
+}
+.chat-shell.pushed {
+  transform: translateX(var(--chat-menu-w));
+  /* Off its edge the chat reads as a card laid over the menu. Both surfaces
+     are near-black, so the split has to be drawn: a hairline round the corners
+     to say where one ends, and a shadow falling from it onto the menu to say
+     which is on top. The hairline is the panel's standard stroke — the same
+     one every card and menu here is cut with.
+
+     Clipping is only on while it's out there: a fixed-position child (the tab
+     tooltip's kin) must not be trapped by it the rest of the time. */
+  border-radius: 16px 0 0 16px;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 1px var(--border-primary),
+    -20px 0 44px -10px rgba(0, 0, 0, 0.8);
+}
+/* The strip of chat still showing — click anywhere on it to come back. It
+   covers exactly what the pushed chat occupies, and lives outside the shell so
+   the shell can go inert without it. */
+.chat-menu-guard {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--chat-menu-w);
+  right: 0;
+  z-index: 2;
+  appearance: none;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+/* The live-activity pod is pinned to the viewport, not to the chat, so it would
+   sit over the menu instead of travelling with the work it reports on. It goes
+   quiet for as long as the chat is away. */
+body.chat-menu-open .la-layer {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-shell { transition: none; }
+}
+.chat-menu-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  /* The mark's left edge lands where the row titles start, so the heading is
+     cut to the same line as the list it names. */
+  padding: 14px 16px 10px;
+}
+/* The lizard, in the brand emerald — the one spot of colour up here. Its
+   artwork sits about a tenth of the way in from the left of its own viewBox,
+   so the box is pulled back by that much and the drawing itself lands on the
+   16px line rather than the empty space in front of it. */
+.chat-menu-mark {
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin-left: -2px;
+  color: var(--control-primary);
+}
+.chat-menu-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.chat-menu-search {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 0 0 auto;
+  margin: 0 10px 6px;
   padding: 6px 8px;
-  margin-bottom: 4px;
   border-radius: 8px;
   border: 1px solid var(--border-primary);
   background: var(--bg-primary);
 }
-.history-search-ic { display: inline-flex; color: var(--text-tertiary); flex: 0 0 auto; }
-.history-search-input {
+.chat-menu-search-ic { display: inline-flex; color: var(--text-tertiary); flex: 0 0 auto; }
+.chat-menu-search-input {
   flex: 1 1 auto;
   min-width: 0;
   border: none;
@@ -1549,51 +1645,133 @@ button:active > .copy-swap {
   font-size: 12.5px;
   font-family: inherit;
 }
-.history-search-input::placeholder { color: var(--text-tertiary); }
-.history-list { display: flex; flex-direction: column; }
-.history-empty { font-size: 12px; color: var(--text-tertiary); padding: 6px 8px 10px; }
-.history-item {
+.chat-menu-search-input::placeholder { color: var(--text-tertiary); }
+.chat-menu-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* No padding at the top: a sticky heading can only mask what's under its own
+     box, so any gap above it is a band the scrolling rows show through. The
+     first heading carries that 2px itself instead (see :first-child below),
+     where it travels with the mask. */
+  padding: 0 6px 8px;
+  /* Both halves, or Chrome takes the width and keeps its own bright default
+     grey for the thumb — which is what the chat list and the settings body
+     already avoid this same way. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-primary) transparent;
+}
+.chat-menu-list::-webkit-scrollbar { width: 8px; }
+.chat-menu-list::-webkit-scrollbar-track { background: transparent; }
+.chat-menu-list::-webkit-scrollbar-thumb { background: var(--border-primary); border-radius: 4px; }
+/* Date heading. Sticky so the day you're scrolled into stays named. */
+.chat-menu-group {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-tertiary);
+  padding: 10px 8px 4px;
+}
+.chat-menu-group:first-child { padding-top: 2px; }
+.chat-menu-empty { font-size: 12px; color: var(--text-tertiary); padding: 6px 8px 10px; }
+/* Just the title — no leading icon. Every row would carry the same one, which
+   tells you nothing and costs the title the space. */
+.chat-menu-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 8px;
-  border-radius: 6px;
+  padding: 7px 10px;
+  border-radius: 7px;
   cursor: pointer;
   transition: background 0.12s;
 }
-.history-item:hover { background: rgba(255, 255, 255, 0.05); }
-.history-ic { display: inline-flex; color: var(--text-primary); flex: 0 0 auto; }
-.history-meta { flex: 1 1 auto; min-width: 0; }
-.history-title {
-  font-size: 12px;
+.chat-menu-item:hover { background: rgba(255, 255, 255, 0.05); }
+.chat-menu-row-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12.5px;
   line-height: 18px;
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.history-sub {
-  font-family: var(--font-mono);
+/* The chat you're looking at, lit the way its tab is. */
+.chat-menu-item.active { background: rgba(255, 255, 255, 0.07); }
+.chat-menu-item.active .chat-menu-row-title { color: var(--text-primary); font-weight: 600; }
+/* A closed conversation is still here, just not loaded — say so quietly. */
+.chat-menu-item:not(.is-open) .chat-menu-row-title { color: var(--text-secondary); }
+/* Dot and timestamp share the right edge: a chat that's doing something says
+   so, one that isn't says when it last did. Both give way to the hover action. */
+.chat-menu-dot {
+  display: none;
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+.chat-menu-item.dot-wait .chat-menu-dot { display: block; background: var(--other-blue); animation: pulse 1.6s ease-in-out infinite; }
+.chat-menu-item.dot-run .chat-menu-dot { display: block; background: var(--warn-soft); animation: pulse 1.6s ease-in-out infinite; }
+.chat-menu-item.dot-unseen .chat-menu-dot { display: block; background: var(--control-primary); }
+.chat-menu-time {
+  flex: 0 0 auto;
   font-size: 10.5px;
   color: var(--text-tertiary);
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
-.history-del {
+.chat-menu-item:hover .chat-menu-time,
+.chat-menu-item:hover .chat-menu-dot { display: none; }
+/* The hover action sits in the slot the time just left, so nothing shifts —
+   its box matches the title's line so the row can't change height either. */
+.chat-menu-del {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  appearance: none;
+  border: none;
+  padding: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+.chat-menu-item:hover .chat-menu-del { display: inline-flex; }
+.chat-menu-del:hover { color: var(--other-red); background: rgba(239, 68, 68, 0.12); }
+
+.chat-menu-foot {
+  flex: 0 0 auto;
+  padding: 6px;
+  border-top: 1px solid var(--border-primary);
+}
+.chat-menu-foot-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
   appearance: none;
   border: none;
   background: transparent;
-  color: var(--text-tertiary);
-  padding: 4px;
-  border-radius: 6px;
+  color: var(--text-secondary);
+  font-family: var(--font-family);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  padding: 9px 10px;
+  border-radius: 8px;
   cursor: pointer;
-  display: inline-flex;
-  opacity: 0;
-  transition: opacity 0.12s, color 0.12s, background 0.12s;
+  transition: background 0.12s, color 0.12s;
 }
-.history-item:hover .history-del { opacity: 1; }
-.history-del:hover { color: var(--other-red); background: rgba(239, 68, 68, 0.12); }
+.chat-menu-foot-btn:hover { background: rgba(255, 255, 255, 0.05); color: var(--text-primary); }
+.chat-menu-foot-ic { display: inline-flex; color: var(--text-tertiary); flex: 0 0 auto; }
+.chat-menu-foot-btn:hover .chat-menu-foot-ic { color: var(--text-primary); }
 
 /* messages — flat, Cursor-style (no bubbles, no avatars) */
 .msg {
@@ -3698,8 +3876,7 @@ code.inline.path:focus-visible {
 /* ===================================================================== */
 /* Settings modal                                                        */
 /* ===================================================================== */
-/* The gear sits in .subbar-actions alongside new-chat + history, so it
-   inherits their .icon-btn sizing/alignment — no extra rule needed. */
+/* Opened from the Settings row at the foot of the chat menu (.chat-menu-foot). */
 
 /* Dimmed backdrop covering the whole panel; the modal is centred within. */
 .settings-overlay {

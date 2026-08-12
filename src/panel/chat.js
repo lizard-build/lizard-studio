@@ -316,12 +316,13 @@
   let recheckTimer = null;
 
   // Tab model: id -> chat. `order` is the visible tab order; `history` holds
-  // closed conversations you can reopen.
+  // closed conversations you can reopen. The chat menu (the subbar burger)
+  // shows both, merged and newest-first.
   const chats = new Map();
   let order = [];
   let activeId = null;
   let history = [];
-  let historyFilter = "";
+  let menuFilter = "";
   // Null, not DEFAULT_MODEL — this runs before the catalog loads, so pinning it
   // here would freeze a fresh install on the built-in default and make
   // models.json's defaultModel a dead field. makeChat resolves it at use time.
@@ -394,7 +395,7 @@
         if (Array.isArray(p.usageLabels) && p.usageLabels.length) usageLabels = p.usageLabels;
         if (Array.isArray(p.tabs) && p.tabs.length) {
           for (const t of p.tabs) {
-            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory });
+            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt });
             chats.set(chat.id, chat);
             order.push(chat.id);
           }
@@ -410,7 +411,7 @@
     try {
       const tabs = order.map((id) => {
         const c = chats.get(id);
-        return { id: c.id, title: c.title, cwd: c.cwd, model: c.model, effort: c.effort, mode: c.mode, sessionId: c.sessionId, bashHistory: (c.bashHistory || []).slice(-40) };
+        return { id: c.id, title: c.title, cwd: c.cwd, model: c.model, effort: c.effort, mode: c.mode, sessionId: c.sessionId, bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt };
       });
       chrome.storage.local.set({ rkChatV2: { tabs, activeId, history: history.slice(0, 40), lastModel, lastEffort, lastMode, lastCwd, soundOnDone, usageLabels } });
     } catch (_) {}
@@ -766,7 +767,21 @@
       // this has to match the host's own count of "real" user lines in the
       // on-disk transcript (see rewindSession in claude-host.mjs).
       turnIndexCounter: 0,
+      // When this conversation last said or heard anything — the key the chat
+      // menu sorts on. Stamped by touchChat() on every prompt sent and every
+      // turn finished, and persisted so the order survives a panel reload. A
+      // tab restored from a build that didn't record it starts at load time
+      // rather than at zero, so it lands in the list instead of under it.
+      lastActivityAt: opts.lastActivityAt || Date.now(),
     };
+  }
+
+  // "Something happened in this chat just now" — the one place the menu's sort
+  // key is written.
+  function touchChat(chat) {
+    if (!chat) return;
+    chat.lastActivityAt = Date.now();
+    renderChatMenuList();
   }
 
   function createChat(opts, { activate = true } = {}) {
@@ -808,6 +823,10 @@
     // again a frame later is what used to yank the panel from the top of the
     // conversation down to the end, in full view.
     requestAnimationFrame(() => {
+      // Closing a tab from the chat menu switches the active one underneath it.
+      // The composer is behind the drawer at that point, so taking focus there
+      // would send the next keystroke somewhere the user can't see.
+      if (chatMenuIsOpen()) return;
       if (els.input) els.input.focus();
     });
     savePrefs();
@@ -817,8 +836,10 @@
     const chat = chats.get(id);
     if (!chat) return;
     // Remember non-empty conversations so they can be reopened from history.
+    // `ts` is when the conversation last moved, not when the tab was shut —
+    // closing a chat shouldn't jump it to the top of the menu.
     if (!chat.empty || chat.sessionId) {
-      history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, model: chat.model, effort: chat.effort, mode: chat.mode, sessionId: chat.sessionId, ts: Date.now() });
+      history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, model: chat.model, effort: chat.effort, mode: chat.mode, sessionId: chat.sessionId, ts: chat.lastActivityAt || Date.now() });
       history = history.slice(0, 40);
     }
     if (chat.started) post({ type: "close", id });
@@ -977,6 +998,7 @@
       node.classList.toggle("dot-run", running);
       node.classList.toggle("dot-unseen", !waiting && !running && !!chat.unseen);
     }
+    renderChatMenuList(); // the menu wears the same dots
   }
   // A fresh permission/question ask just landed — paint the tab's blue waiting
   // dot, and chime for attention like a finished session does. `wasWaiting` is
@@ -1103,85 +1125,167 @@
       els.tabs.appendChild(tab);
     }
     placeTabInd();
+    renderChatMenuList(); // titles and the open set both live in the menu too
   }
 
-  // ---- history dropdown -----------------------------------------------------
-  function toggleHistory() {
-    if (menuIsOpen(els.historyMenu)) {
-      closeMenu(els.historyMenu);
-      return;
+  // ---- chat menu (the subbar burger) ----------------------------------------
+  // One list for every conversation there is — the tabs open right now and the
+  // ones already closed — newest first by when each last moved, so the menu
+  // reads as one timeline instead of two piles. Settings sits at its foot.
+  //
+  // The menu never covers the chat. It lies under it, full height, and opening
+  // it slides the chat off to the right to uncover it — the chat stays on
+  // screen as a strip you can click to come back. So "open" is a state of the
+  // chat (.chat-shell.pushed), not of the menu; the menu is only unhidden so
+  // there's something to uncover, and hidden again once the chat is back.
+  const MENU_SLIDE_MS = 340; // keep in step with .chat-shell's transition
+  let chatMenuHideTimer = null;
+
+  function chatMenuIsOpen() {
+    return Boolean(els.chatShell) && els.chatShell.classList.contains("pushed");
+  }
+  function toggleChatMenu() {
+    if (chatMenuIsOpen()) closeChatMenu();
+    else openChatMenu();
+  }
+  function openChatMenu() {
+    if (!els.chatMenu || chatMenuIsOpen()) return;
+    clearTimeout(chatMenuHideTimer);
+    chatMenuHideTimer = null;
+    // A picker left open would ride along with the chat and get clipped by the
+    // corners it rounds off as it goes.
+    for (const menu of menuRegistry) closeMenu(menu);
+    menuFilter = "";
+    els.chatMenuSearch.value = "";
+    els.chatMenu.classList.remove("hidden");
+    els.chatMenuGuard.classList.remove("hidden");
+    els.chatShell.classList.add("pushed");
+    els.chatShell.inert = true; // nothing behind the strip is reachable
+    document.body.classList.add("chat-menu-open"); // stands the activity pod down
+    els.menuBtn.setAttribute("aria-expanded", "true");
+    renderChatMenuList();
+    els.chatMenuSearch.focus();
+  }
+  function closeChatMenu() {
+    if (!chatMenuIsOpen()) return;
+    els.chatShell.classList.remove("pushed");
+    els.chatShell.inert = false;
+    document.body.classList.remove("chat-menu-open");
+    els.chatMenuGuard.classList.add("hidden");
+    els.menuBtn.setAttribute("aria-expanded", "false");
+    // Hand focus back only if it's still in the menu — a click elsewhere has
+    // already moved it, and yanking it back would fight the user.
+    if (els.chatMenu.contains(document.activeElement)) els.menuBtn.focus();
+    // Keep the menu around until the chat has finished sliding back over it.
+    chatMenuHideTimer = setTimeout(() => {
+      chatMenuHideTimer = null;
+      els.chatMenu.classList.add("hidden");
+    }, reducedMotion.matches ? 0 : MENU_SLIDE_MS);
+  }
+
+  // Open tabs and closed conversations as one sorted run. Open ones carry their
+  // live chat so the row can show what the tab shows (activity dot, active
+  // highlight); closed ones carry the history entry they'd be reopened from.
+  function chatMenuEntries() {
+    const rows = [];
+    for (const id of order) {
+      const chat = chats.get(id);
+      if (!chat) continue;
+      rows.push({ open: true, chat, title: chat.title || DEFAULT_TITLE, cwd: chat.cwd, ts: chat.lastActivityAt || 0 });
     }
-    historyFilter = "";
-    renderHistory();
-    openMenu(els.historyMenu);
-    const input = els.historyMenu.querySelector(".history-search-input");
-    if (input) input.focus();
+    for (const item of history) {
+      rows.push({ open: false, item, title: item.title || DEFAULT_TITLE, cwd: item.cwd, ts: item.ts || 0 });
+    }
+    return rows.sort((a, b) => b.ts - a.ts);
   }
-  function renderHistory() {
-    els.historyMenu.innerHTML = "";
 
-    const searchWrap = el("div", "history-search");
-    const searchIc = el("span", "history-search-ic");
-    searchIc.innerHTML = ICON("search", 13);
-    searchWrap.appendChild(searchIc);
-    const input = el("input", "history-search-input");
-    input.type = "text";
-    input.placeholder = "Search chats";
-    input.value = historyFilter;
-    input.addEventListener("click", (e) => e.stopPropagation());
-    input.addEventListener("input", () => {
-      historyFilter = input.value;
-      renderHistoryList();
-    });
-    searchWrap.appendChild(input);
-    els.historyMenu.appendChild(searchWrap);
-
-    const list = el("div", "history-list");
-    els.historyMenu.appendChild(list);
-    renderHistoryList();
+  // Date headings down the list, so "newest first" is legible without reading
+  // every timestamp. Buckets are calendar days, not rolling 24h windows —
+  // something from 11pm last night is "Yesterday", not "Today".
+  function menuBucket(ts) {
+    if (!ts) return "Older";
+    const now = new Date();
+    const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const day = 86400000;
+    if (ts >= midnight) return "Today";
+    if (ts >= midnight - day) return "Yesterday";
+    if (ts >= midnight - 7 * day) return "Previous 7 days";
+    if (ts >= midnight - 30 * day) return "Previous 30 days";
+    return "Older";
   }
-  function renderHistoryList() {
-    const list = els.historyMenu.querySelector(".history-list");
-    if (!list) return;
+
+  function renderChatMenuList() {
+    if (!mounted || !els.chatMenuList || !chatMenuIsOpen()) return;
+    const list = els.chatMenuList;
     list.innerHTML = "";
-    const q = historyFilter.trim().toLowerCase();
-    const items = q ? history.filter((h) => (h.title || DEFAULT_TITLE).toLowerCase().includes(q)) : history;
-    if (!history.length) {
-      list.appendChild(el("div", "history-empty", "No past chats yet."));
+    const q = menuFilter.trim().toLowerCase();
+    const all = chatMenuEntries();
+    const rows = q ? all.filter((r) => r.title.toLowerCase().includes(q)) : all;
+    if (!rows.length) {
+      list.appendChild(el("div", "chat-menu-empty", q ? "No matches." : "No chats yet."));
       return;
     }
-    if (!items.length) {
-      list.appendChild(el("div", "history-empty", "No matches."));
-      return;
-    }
-    for (const item of items) {
-      const row = el("div", "history-item");
-      const ic = el("span", "history-ic");
-      ic.innerHTML = ICON("chat", 14);
-      row.appendChild(ic);
-      const meta = el("div", "history-meta");
-      meta.appendChild(el("div", "history-title", item.title || DEFAULT_TITLE));
-      row.appendChild(meta);
-      const del = el("button", "history-del");
-      del.innerHTML = ICON("trash", 14);
-      del.title = "Remove from history";
-      del.addEventListener("click", (e) => {
-        e.stopPropagation();
-        history = history.filter((h) => h !== item);
-        savePrefs();
-        renderHistoryList();
-      });
-      row.appendChild(del);
-      row.addEventListener("click", () => {
-        closeMenu(els.historyMenu);
-        reopenFromHistory(item);
-      });
-      list.appendChild(row);
+    let bucket = null;
+    for (const entry of rows) {
+      // Headings only when the list is in date order — a search result set is
+      // scored by name, and dated dividers through it just add noise.
+      if (!q) {
+        const b = menuBucket(entry.ts);
+        if (b !== bucket) {
+          bucket = b;
+          list.appendChild(el("div", "chat-menu-group", b));
+        }
+      }
+      list.appendChild(chatMenuRow(entry));
     }
   }
+
+  function chatMenuRow(entry) {
+    const chat = entry.chat;
+    const waiting = chat ? tabDotWaiting(chat) : false;
+    const running = chat ? !waiting && tabDotRunning(chat) : false;
+    const dotCls = waiting ? " dot-wait" : running ? " dot-run" : chat && chat.unseen ? " dot-unseen" : "";
+    const active = chat && chat.id === activeId;
+    const row = el("div", "chat-menu-item" + (entry.open ? " is-open" : "") + (active ? " active" : "") + dotCls);
+    row.title = entry.cwd ? entry.title + "\n" + shortPath(entry.cwd) : entry.title;
+
+    row.appendChild(el("div", "chat-menu-row-title", entry.title));
+
+    // The dot and the timestamp share a slot: a chat that's doing something says
+    // so, and one that isn't says when it last did.
+    row.appendChild(el("span", "chat-menu-dot"));
+    row.appendChild(el("span", "chat-menu-time", entry.ts ? relTime(entry.ts) : ""));
+
+    // Same slot, two jobs: an open tab is closed (it lands back in this list a
+    // row down), a closed one is forgotten for good.
+    const del = el("button", "chat-menu-del");
+    del.innerHTML = ICON(entry.open ? "x" : "trash", entry.open ? 13 : 14);
+    del.title = entry.open ? "Close chat" : "Remove from history";
+    del.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (entry.open) closeChat(chat.id);
+      else {
+        history = history.filter((h) => h !== entry.item);
+        savePrefs();
+      }
+      renderChatMenuList();
+      els.chatMenuSearch.focus(); // the row under the cursor just went away
+    });
+    row.appendChild(del);
+
+    row.addEventListener("click", () => {
+      closeChatMenu();
+      if (entry.open) setActive(chat.id);
+      else reopenFromHistory(entry.item);
+    });
+    return row;
+  }
+
   function reopenFromHistory(item) {
     history = history.filter((h) => h !== item);
-    createChat({ title: item.title, cwd: item.cwd, model: item.model, effort: item.effort, mode: item.mode, sessionId: item.sessionId });
+    // Keep the conversation's own place in the menu — reopening a tab isn't the
+    // conversation moving.
+    createChat({ title: item.title, cwd: item.cwd, model: item.model, effort: item.effort, mode: item.mode, sessionId: item.sessionId, lastActivityAt: item.ts });
     savePrefs();
   }
 
@@ -3930,6 +4034,7 @@
 
   function endTurn(chat, result) {
     chat.turnRunning = false;
+    touchChat(chat); // the reply just landed — that's the chat's newest moment
     // A compacted conversation just shrank to a summary; the real size is
     // unknown until the first post-compact reply reports fresh usage.
     if (chat.compacting) { chat.ctxBase = 0; chat.ctxTokens = 0; }
@@ -5282,6 +5387,7 @@
     // reordering the conversation. The failed-post path below hands it back.
     chat.turnRunning = true;
     chat.unseen = false;
+    touchChat(chat); // a prompt going out is the conversation moving
     updateTabDots();
     // A real turn always wins over an in-flight silent usage probe: release its
     // event-swallowing gate now so this prompt's stream renders normally. The
@@ -7989,8 +8095,12 @@
     els.mode = root.querySelector("#mode-btn");
     els.modeMenu = root.querySelector("#mode-menu");
     els.newChat = root.querySelector("#new-chat-btn");
-    els.historyBtn = root.querySelector("#history-btn");
-    els.historyMenu = root.querySelector("#history-menu");
+    els.menuBtn = root.querySelector("#menu-btn");
+    els.chatShell = root.querySelector("#chat-shell");
+    els.chatMenu = root.querySelector("#chat-menu");
+    els.chatMenuGuard = root.querySelector("#chat-menu-guard");
+    els.chatMenuSearch = root.querySelector("#chat-menu-search");
+    els.chatMenuList = root.querySelector("#chat-menu-list");
     els.settingsBtn = root.querySelector("#settings-btn");
     els.settingsOverlay = root.querySelector("#settings-overlay");
     els.settingsClose = root.querySelector("#settings-close");
@@ -8037,8 +8147,10 @@
 
     // Static icons.
     root.querySelector("#new-chat-btn").innerHTML = ICON("plus", 17);
-    root.querySelector("#history-btn").innerHTML = ICON("history", 17);
-    els.settingsBtn.innerHTML = ICON("gear", 17);
+    els.menuBtn.innerHTML = ICON("list", 17);
+    root.querySelector("#chat-menu-mark").innerHTML = LIZARD(20);
+    root.querySelector("#chat-menu-search-ic").innerHTML = ICON("search", 13);
+    root.querySelector("#settings-btn-ic").innerHTML = ICON("gear", 16);
     els.settingsClose.innerHTML = ICON("x", 15);
     root.querySelector("#folder-ic").innerHTML = ICON("folder", 14);
     root.querySelector("#branch-ic").innerHTML = ICON("git-branch", 13);
@@ -8129,12 +8241,19 @@
       for (const f of files) addFile(f);
     });
     els.newChat.addEventListener("click", () => createChat({ cwd: defaultCwd() }));
-    els.historyBtn.addEventListener("click", (e) => {
+    els.menuBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      toggleHistory();
+      toggleChatMenu();
+    });
+    els.chatMenuGuard.addEventListener("click", closeChatMenu);
+    els.chatMenuSearch.addEventListener("input", () => {
+      menuFilter = els.chatMenuSearch.value;
+      renderChatMenuList();
     });
     els.settingsBtn.addEventListener("click", (e) => {
       e.stopPropagation();
+      // The modal covers the whole panel, menu included, so the menu stays as
+      // it was — closing settings puts you back in the list you left.
       openSettings();
     });
     els.settingsClose.addEventListener("click", closeSettings);
@@ -8143,8 +8262,10 @@
       if (e.target === els.settingsOverlay) closeSettings();
     });
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && !els.settingsOverlay.classList.contains("hidden")) closeSettings();
-      if (e.key === "Escape" && !els.imageViewerOverlay.classList.contains("hidden")) closeImageViewer();
+      if (e.key !== "Escape") return;
+      if (!els.settingsOverlay.classList.contains("hidden")) closeSettings();
+      else if (chatMenuIsOpen()) closeChatMenu();
+      if (!els.imageViewerOverlay.classList.contains("hidden")) closeImageViewer();
     });
     // The viewer has nothing to interact with — click anywhere (backdrop or
     // the image itself) to dismiss it.
@@ -8180,7 +8301,6 @@
     // any click that reaches here and is outside a menu closes it. Registering
     // them here is also what makes them exclusive — opening one closes the rest.
     const dropdownPairs = [
-      [els.historyMenu, els.historyBtn],
       [els.branchMenu, els.branch],
       [els.modeMenu, els.mode],
       [els.modelMenu, els.modelBtn],
@@ -8354,12 +8474,43 @@
   }
 
   const TEMPLATE = `
+    <!-- Chat menu: every conversation there is — open tabs and closed ones
+         alike — newest first, with settings parked at the foot. It doesn't
+         cover the chat: it lies underneath, and the chat slides off to the
+         right to uncover it (see .chat-shell.pushed). -->
+    <div id="chat-menu" class="chat-menu hidden">
+      <div class="chat-menu-panel" role="dialog" aria-modal="true" aria-label="Chats">
+        <!-- No close button: the chat itself is the way back — click the strip
+             of it still showing, or press Escape. -->
+        <div class="chat-menu-head">
+          <span id="chat-menu-mark" class="chat-menu-mark"></span>
+          <span class="chat-menu-title">Chats</span>
+        </div>
+        <div class="chat-menu-search">
+          <span id="chat-menu-search-ic" class="chat-menu-search-ic"></span>
+          <input id="chat-menu-search" class="chat-menu-search-input" type="text" placeholder="Search chats" />
+        </div>
+        <div id="chat-menu-list" class="chat-menu-list"></div>
+        <div class="chat-menu-foot">
+          <button id="settings-btn" class="chat-menu-foot-btn" title="Settings">
+            <span id="settings-btn-ic" class="chat-menu-foot-ic"></span>
+            <span>Settings</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- The chat itself: one box so it can travel as a single object. -->
+    <div id="chat-shell" class="chat-shell">
     <div class="chat-subbar">
+      <!-- The burger leads the row: the chat slides right off the menu, so the
+           button that moves it belongs on the edge it moves away from. -->
+      <div class="subbar-actions">
+        <button id="menu-btn" class="icon-btn" title="Chats" aria-haspopup="dialog" aria-expanded="false"></button>
+      </div>
       <div id="chat-tabs" class="chat-tabs"></div>
       <div class="subbar-actions">
         <button id="new-chat-btn" class="icon-btn" title="New chat"></button>
-        <button id="history-btn" class="icon-btn" title="Chat history"></button>
-        <button id="settings-btn" class="icon-btn" title="Settings"></button>
       </div>
     </div>
     <div id="chat-stack" class="chat-stack">
@@ -8496,11 +8647,16 @@
         </div>
       </div>
     </div>
+    </div>
 
-    <div id="history-menu" class="history-menu hidden"></div>
+    <!-- The strip of chat left showing once it has slid right. Clicking it
+         brings the chat back, the way tapping the page does in the app. It
+         sits outside the shell so the shell can go inert while the menu is
+         open without taking this with it. -->
+    <button id="chat-menu-guard" class="chat-menu-guard hidden" aria-label="Back to the chat"></button>
 
     <!-- Settings: a modal overlaying the whole panel, with a tab strip up top.
-         Hidden until the gear button (subbar, far left) opens it. -->
+         Hidden until the Settings row at the foot of the chat menu opens it. -->
     <div id="settings-overlay" class="settings-overlay hidden">
       <div class="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
         <div class="settings-head">
