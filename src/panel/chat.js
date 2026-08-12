@@ -1999,17 +1999,53 @@
     return card;
   }
 
-  // True when a persisted transcript chunk is nothing but plan-usage lines —
-  // i.e. the output of a (possibly background) `/usage`. Used to keep those
-  // snapshots out of transcript replay: a usage card from hours ago is stale
-  // and misleading, and background probes would otherwise stack up on reload.
+  // The "NN% used" plan lines are optional: some replies carry only the
+  // "What's contributing to your limits usage?" breakdown (requests, sessions,
+  // top skills) and no percentage row at all, so parseUsageText sees nothing
+  // and every gate below it opens — which is how a silent probe's dump ended
+  // up pasted into the chat as markdown on the next transcript replay. Match
+  // the report's own opening lines too, anchored at the start so prose that
+  // merely quotes one can't be mistaken for the report.
+  const USAGE_PROSE_RE =
+    /^(?:You are currently using |What.s contributing to your limits usage\?|Last \d+\s*[hd]\s*·\s*[\d,]+\s*requests\b)/i;
+  function isUsageText(text) {
+    const t = String(text || "").trim();
+    return !!t && (USAGE_PROSE_RE.test(t) || !!parseUsageText(t));
+  }
+
+  // True when a persisted transcript chunk is nothing but a `/usage` reply —
+  // the output of a (possibly background) probe. Used to keep those snapshots
+  // out of transcript replay: a usage card from hours ago is stale and
+  // misleading, and background probes would otherwise stack up on reload.
   // The live toolbar meter is the source of truth instead.
   function isUsageDump(raw) {
     if (!raw) return false;
     const out = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(String(raw));
-    return !!parseUsageText(out ? out[1] : String(raw));
+    return isUsageText(out ? out[1] : String(raw));
   }
   const USAGE_CMD_RE = /^\/(usage|usage-credits|extra-usage)\b/;
+
+  // The single chokepoint every `/usage` reply passes through, so none of them
+  // can reach the conversation as prose. Returns false when the text isn't a
+  // usage reply at all — the caller then renders it normally. `asked` means the
+  // user typed the command themselves, which earns the compact card; when the
+  // reply carries no plan rows to build one from, the meter's popover stands in
+  // so the answer still lands somewhere.
+  function takeUsageReply(chat, body, text, asked) {
+    if (!isUsageText(text)) return false;
+    const parsed = parseUsageText(text);
+    if (parsed) absorbUsageDump(text);
+    if (!asked) return true;
+    if (parsed && body) {
+      attachAssistantRow(chat, body);
+      closeToolGroup(chat);
+      body.appendChild(buildUsageCard(parsed));
+      if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+    } else if (chat.id === activeId) {
+      showUsageMenu();
+    }
+    return true;
+  }
 
   // Screenshot-matching labels for the windows the CLI reports as
   // "Current session" / "Current week (all models)" / "Current week (Opus)".
@@ -2138,12 +2174,12 @@
       .filter((b) => b && b.type === "text" && b.text)
       .map((b) => b.text)
       .join("\n");
-    return text && parseUsageText(text) ? text : "";
+    return text && isUsageText(text) ? text : "";
   }
   // The matching zero-turn `result`. Ending the turn on it would stop the
   // spinner on whatever real prompt is running behind the probe.
   function isUsageEchoResult(d) {
-    return !d.num_turns && typeof d.result === "string" && !!parseUsageText(d.result);
+    return !d.num_turns && typeof d.result === "string" && isUsageText(d.result);
   }
 
   // The CLI answers a local, zero-turn command (/usage and friends) with a
@@ -2154,17 +2190,13 @@
   const NO_RESPONSE_RE = /^No response requested\.?$/i;
   function addText(chat, body, text) {
     if (NO_RESPONSE_RE.test((text || "").trim())) return;
+    // Usage replies are settled before the row is attached — a swallowed one
+    // must not leave an empty assistant bubble behind.
+    const asked = chat.pendingUsageCard;
+    if (asked) chat.pendingUsageCard = false;
+    if (takeUsageReply(chat, body, text, asked)) return;
     attachAssistantRow(chat, body);
     closeToolGroup(chat);
-    if (chat.pendingUsageCard) {
-      chat.pendingUsageCard = false;
-      const parsed = parseUsageText(text);
-      if (parsed) {
-        body.appendChild(buildUsageCard(parsed));
-        if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
-        return;
-      }
-    }
     body.appendChild(R.markdown(text));
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
   }
@@ -4729,7 +4761,7 @@
           } else if (block.type === "text") {
             // (thinking blocks are intentionally not rendered.)
             // Skip stale plan-usage dumps — the live toolbar meter owns those.
-            if (parseUsageText(block.text)) continue;
+            if (isUsageText(block.text)) continue;
             addText(chat, body, block.text);
           }
         }
@@ -4764,11 +4796,12 @@
       systemNote(chat, "Context compacted");
       return;
     }
+    // Last line of defence: a usage reply that got this far (a caller's guard
+    // missing a new output shape) goes to the meter, never into the chat.
+    if (takeUsageReply(chat, null, text, false)) return;
     const body = ensureAssistantBody(chat, "local-command-" + ts);
     attachAssistantRow(chat, body);
-    const parsed = parseUsageText(text);
-    if (parsed) body.appendChild(buildUsageCard(parsed));
-    else body.appendChild(R.markdown(text));
+    body.appendChild(R.markdown(text));
     finalizeAssistant(null, body, ts);
   }
 
@@ -6251,6 +6284,14 @@
     menu.appendChild(planSec);
   }
 
+  // Open the popover on demand (a no-op when it's already up) — where a
+  // `/usage` the user typed goes when its reply has no plan rows to draw the
+  // in-chat card from.
+  function showUsageMenu() {
+    if (!els.usageMenu || menuIsOpen(els.usageMenu)) return;
+    renderUsageMenu();
+    openMenu(els.usageMenu);
+  }
   function toggleUsageMenu() {
     if (menuIsOpen(els.usageMenu)) return hideUsageMenu();
     // Refresh stale plan numbers when opening (forced past the throttle).
