@@ -1249,11 +1249,11 @@
     const row = el("div", "chat-menu-item" + (entry.open ? " is-open" : "") + (active ? " active" : "") + dotCls);
     row.title = entry.cwd ? entry.title + "\n" + shortPath(entry.cwd) : entry.title;
 
-    row.appendChild(el("div", "chat-menu-row-title", entry.title));
-
-    // The dot and the timestamp share a slot: a chat that's doing something says
-    // so, and one that isn't says when it last did.
+    // The dot leads the row, so the column of them reads down the list at a
+    // glance. A chat with nothing to say still gets one, drawn hollow, so no
+    // title starts a step to the left of its neighbours.
     row.appendChild(el("span", "chat-menu-dot"));
+    row.appendChild(el("div", "chat-menu-row-title", entry.title));
     row.appendChild(el("span", "chat-menu-time", entry.ts ? relTime(entry.ts) : ""));
 
     // Same slot, two jobs: an open tab is closed (it lands back in this list a
