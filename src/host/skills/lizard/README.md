@@ -1,7 +1,7 @@
-# Lizard agent skill
+# Lizard Skill
 
 Thin bootstrap skill that teaches your AI agent to deploy and manage apps on
-[Lizard](https://lizard.build) through the `lizard` CLI (`@lizard-build/cli`).
+[Lizard](https://lizard.build) through the Lizard CLI (`@lizard-build/cli`).
 
 ## Install
 
