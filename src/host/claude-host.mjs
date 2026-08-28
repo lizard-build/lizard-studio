@@ -1196,6 +1196,11 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
     // Last known Remote Control state: { enabled, name, sessionUrl, connectUrl }.
     rc: null,
     rcRearm: rearm,
+    // Set on this process's `system init`. Until then nothing it was sent has
+    // been read, so an exit here is a failed startup (see the resume fallback
+    // in the exit handler) and `pendingPrompt` is still safe to replay.
+    sawInit: false,
+    pendingPrompt: null,
   };
 
   const args = [
@@ -1340,6 +1345,8 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
       }
       if (obj.type === "system" && obj.subtype === "init" && obj.session_id) {
         s.sessionId = obj.session_id;
+        s.sawInit = true;
+        s.pendingPrompt = null; // claude has the turn now — never replay it
         // The control channel only answers once the session is up, so a re-arm
         // carried over from the process this one replaced waits until here.
         if (s.rcRearm) {
@@ -1365,6 +1372,19 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
     // is an expected restart, not a crash — stay quiet.
     if (proc._intentional) {
       log("claude exited (intentional) id=", id, "code=", code);
+      return;
+    }
+    // A --resume onto a session claude can no longer read (its transcript was
+    // cut back past the first turn by a rewind, deleted, or moved out of this
+    // folder) dies at startup — "No conversation found with session ID: …",
+    // exit 1 — before ever emitting `system init`. There is nothing to resume
+    // to, so start a fresh session instead of ending the chat with an error,
+    // and replay the prompt this child never got to read.
+    if (resume && !s.sawInit && NO_CONVERSATION_RE.test(s.stderrBuf)) {
+      log("resume failed (no conversation) id=", id, "— starting a fresh session");
+      const pending = s.pendingPrompt;
+      startClaude({ id, cwd: s.cwd, model: s.model, effort: s.effort, permissionMode: s.mode });
+      if (pending) writeToChild(id, pending);
       return;
     }
     log("claude exited id=", id, "code=", code, "stderr=", s.stderrBuf.trim().slice(0, 500));
@@ -1829,6 +1849,10 @@ function writeToChild(id, obj) {
     send({ type: "error", id, message: "No active Claude session. Start one first." });
     return false;
   }
+  // Hold on to a turn until the child proves it read it (`system init`), so a
+  // startup that dies on a bad --resume can hand it to the fresh session
+  // instead of losing the message.
+  if (obj && obj.type === "user" && !s.sawInit) s.pendingPrompt = obj;
   s.child.stdin.write(JSON.stringify(obj) + "\n");
   return true;
 }
@@ -2327,6 +2351,27 @@ function findTranscript(sessionId, cwd) {
   return null;
 }
 
+// What `claude --resume` prints (and exits 1 on) when the transcript for a
+// session id holds no messages, or isn't there at all.
+const NO_CONVERSATION_RE = /No conversation found with session ID/i;
+
+// Does this stretch of transcript lines carry any actual conversation? A file
+// left with only bookkeeping (queue-operation, attachment, mode…) reads as an
+// empty session to `--resume`.
+function hasMessages(lines) {
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let o;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if ((o.type === "user" || o.type === "assistant") && o.message) return true;
+  }
+  return false;
+}
+
 function loadTranscript(id, sessionId, cwd) {
   const file = findTranscript(sessionId, cwd);
   if (!file) {
@@ -2436,6 +2481,12 @@ function rewindSession(id, turnIndex, text, images) {
   if (!s || !s.sessionId) return;
   const { cwd, model, effort, mode, sessionId } = s;
   const child = s.child;
+  // Cut back to before the first turn and the transcript keeps only bookkeeping
+  // lines — no messages at all. `claude --resume` refuses such a file outright
+  // ("No conversation found with session ID: …", exit 1), so the rewound turn
+  // starts a brand-new session instead. Nothing is lost: there is no history
+  // left to carry over.
+  let resume = sessionId;
 
   const truncateAndResume = () => {
     const file = findTranscript(sessionId, cwd);
@@ -2476,7 +2527,11 @@ function rewindSession(id, turnIndex, text, images) {
             break;
           }
         }
-        if (cut !== -1) writeFileSync(file, lines.slice(0, cut).join("\n") + (cut > 0 ? "\n" : ""));
+        if (cut !== -1) {
+          const kept = lines.slice(0, cut);
+          writeFileSync(file, kept.join("\n") + (cut > 0 ? "\n" : ""));
+          if (!hasMessages(kept)) resume = null;
+        }
       } catch (err) {
         log("rewind transcript truncate failed", err.message);
       }
@@ -2484,7 +2539,7 @@ function rewindSession(id, turnIndex, text, images) {
     // No `interrupted` here, unlike interrupt()/restartSession: the panel
     // already reset its transcript state and started the spinner for the
     // resent turn — `interrupted` would endTurn() that brand-new turn.
-    startClaude({ id, cwd, model, effort, permissionMode: mode, resume: sessionId });
+    startClaude({ id, cwd, model, effort, permissionMode: mode, resume });
     sendPrompt(id, text, images);
   };
 
