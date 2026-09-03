@@ -1,0 +1,176 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Lizard Studio — panel test bed</title>
+    <script>
+      // The stylesheet gets the same cache-busting treatment as the scripts —
+      // a cached panel.css means checking spacing against yesterday's rules.
+      document.write(`<link rel="stylesheet" href="../../src/panel/panel.css?t=${Date.now()}">`);
+    </script>
+    <style>
+      /* The real side panel is a narrow column; keep the bed the same shape so
+         anything that only breaks at panel width breaks here too. */
+      html, body { margin: 0; height: 100%; background: #070707; }
+      #bed { width: 420px; height: 100vh; display: flex; flex-direction: column; }
+      .views, .view { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+    </style>
+  </head>
+  <body>
+    <main class="views">
+      <section id="bed" class="view"></section>
+    </main>
+
+    <script>
+      // Everything below the panel is faked, and only that: the panel code
+      // itself is the real file the extension ships.
+      //
+      // The native port becomes a recorder. Tests read what the panel sent and
+      // push host messages back in, which is exactly the shape of the real
+      // conversation — so a test can replay a Codex session captured from the
+      // live host and watch the panel render it.
+      const sent = [];
+      const listeners = { message: [], disconnect: [] };
+      const store = {};
+
+      window.__test = {
+        sent,
+        /** Messages the panel posted to the host, optionally filtered by type. */
+        posted(type) {
+          return type ? sent.filter((m) => m.type === type) : sent.slice();
+        },
+        /** Push one host -> panel message in. */
+        emit(msg) {
+          for (const fn of listeners.message) fn(msg);
+          return true;
+        },
+        /** Push many, in order. */
+        emitAll(msgs) {
+          for (const m of msgs) this.emit(m);
+          return msgs.length;
+        },
+        storage: store,
+        seedStorage(value) {
+          store.rkChatV2 = value;
+        },
+        text(sel) {
+          const n = document.querySelector(sel);
+          return n ? n.textContent.trim() : null;
+        },
+        visible(sel) {
+          const n = document.querySelector(sel);
+          if (!n) return false;
+          const cs = getComputedStyle(n);
+          return cs.display !== "none" && cs.visibility !== "hidden" && n.offsetParent !== null;
+        },
+        click(sel) {
+          const n = document.querySelector(sel);
+          if (!n) return false;
+          n.click();
+          return true;
+        },
+        /** Click a row in an open dropdown by its visible name. */
+        clickRow(menuSel, name) {
+          const menu = document.querySelector(menuSel);
+          if (!menu) return false;
+          for (const row of menu.querySelectorAll(".branch-item")) {
+            const label = row.querySelector(".branch-item-name");
+            if (label && label.textContent.trim() === name) {
+              row.click();
+              return true;
+            }
+          }
+          return false;
+        },
+        rows(menuSel) {
+          const menu = document.querySelector(menuSel);
+          if (!menu) return [];
+          return [...menu.querySelectorAll(".branch-item")].map((r) => {
+            const name = r.querySelector(".branch-item-name");
+            const note = r.querySelector(".branch-item-note");
+            return {
+              name: name ? name.textContent.trim() : "",
+              note: note ? note.textContent.trim() : "",
+              current: r.classList.contains("current"),
+            };
+          });
+        },
+        /** Cards the transcript is showing, in order. */
+        toolCards() {
+          return [...document.querySelectorAll(".tool-card")].map((c) => ({
+            name: (c.querySelector(".tool-name") || {}).textContent || "",
+            summary: (c.querySelector(".tool-summary") || {}).textContent || "",
+            done: !!c.querySelector(".tool-toggle.done"),
+            err: !!c.querySelector(".tool-toggle.err"),
+            result: (c.querySelector(".tool-result") || {}).textContent || "",
+          }));
+        },
+        assistantText() {
+          return [...document.querySelectorAll(".assistant-stream, .assistant-body")]
+            .map((n) => n.textContent)
+            .join("\n")
+            .trim();
+        },
+        errors: [],
+      };
+
+      window.addEventListener("error", (e) => window.__test.errors.push(String(e.message)));
+      window.addEventListener("unhandledrejection", (e) => window.__test.errors.push(String(e.reason)));
+
+      window.chrome = {
+        runtime: {
+          lastError: null,
+          id: "test",
+          getURL: (p) => p,
+          connectNative() {
+            return {
+              postMessage: (m) => sent.push(m),
+              disconnect() {},
+              onMessage: { addListener: (fn) => listeners.message.push(fn) },
+              onDisconnect: { addListener: (fn) => listeners.disconnect.push(fn) },
+            };
+          },
+          sendMessage: () => {},
+          onMessage: { addListener: () => {} },
+        },
+        storage: {
+          local: {
+            get: (keys, cb) => cb && cb(JSON.parse(JSON.stringify(store))),
+            set: (obj, cb) => { Object.assign(store, obj); cb && cb(); },
+            remove: (k, cb) => { delete store[k]; cb && cb(); },
+          },
+        },
+        tabs: { query: (q, cb) => cb && cb([]), sendMessage: () => {} },
+        debugger: { attach: () => {}, detach: () => {}, sendCommand: () => {}, onEvent: { addListener: () => {} } },
+      };
+
+      // A seed can be handed in through the query string so a test can start
+      // the panel from a remembered state instead of driving it there.
+      const seed = new URLSearchParams(location.search).get("seed");
+      if (seed) {
+        try { store.rkChatV2 = JSON.parse(decodeURIComponent(seed)); } catch (_) {}
+      }
+    </script>
+
+    <script>
+      // Load the panel's own files, cache-busted. Without this the browser
+      // happily serves a stale copy and a test "fails" against code that was
+      // fixed minutes ago — which costs more time than it saves.
+      (async () => {
+        const stamp = Date.now();
+        for (const f of ["icons.js", "render.js", "activity.js", "chat.js"]) {
+          await new Promise((resolve, reject) => {
+            const s = document.createElement("script");
+            s.src = `../../src/panel/${f}?t=${stamp}`;
+            s.onload = resolve;
+            s.onerror = () => reject(new Error("failed to load " + f));
+            document.body.appendChild(s);
+          });
+        }
+        window.RKChat.mount(document.getElementById("bed"));
+        window.RKChat.activate && window.RKChat.activate();
+        window.__test.mounted = true;
+      })().catch((err) => window.__test.errors.push(String(err.message)));
+    </script>
+  </body>
+</html>
