@@ -11,6 +11,7 @@
   const RECONNECT_MS = 1200;
   const R = window.RKRender;
   const ICON = window.RKIconHTML;
+  const HARNESS_ICON = window.RKHarnessHTML;
   const LIZARD = window.RKLizardHTML;
 
   // Lizard call-to-action phrases cycled in the running-status pill (in place of
@@ -60,6 +61,126 @@
     { id: "bypassPermissions", label: "Bypass permissions", short: "Bypass", hint: "Allows everything without asking. Use with care.", cls: "mode-bypass" },
   ];
 
+  // ---- harnesses --------------------------------------------------------------
+  // Which agent runs a chat. Picked once, in the empty state, from the chip next
+  // to the folder — after the first message the choice is settled, because
+  // changing it would mean a different session and a lost transcript.
+  //
+  // Every message the panel sends carries the chosen agent (see post), and the
+  // native-messaging router hands it to the matching host. A message with no
+  // agent goes to Claude, which is what every build before this one sent.
+  const HARNESSES = [
+    { id: "claude", label: "Claude Code" },
+    { id: "codex", label: "Codex" },
+  ];
+  const DEFAULT_HARNESS = "claude";
+  function harnessLabel(id) {
+    const h = HARNESSES.find((x) => x.id === id);
+    return h ? h.label : HARNESSES[0].label;
+  }
+  // Is each agent actually installed? Claude reports it in `ready`, everything
+  // else in `agentReady`. A missing one still shows in the list — hiding it
+  // would leave no way to find out it exists.
+  const harnessReady = { claude: false, codex: false };
+
+  // Codex has three permission profiles where Claude has five modes. These are
+  // the ids its host maps, so a remembered mode survives the round trip.
+  const CODEX_MODES = [
+    { id: "read-only", label: "Read only", short: "Read", hint: "Codex can look but not touch — no edits, no commands that write.", cls: "mode-plan" },
+    { id: "workspace", label: "Ask permissions", short: "Ask", hint: "Codex works inside the project folder and asks before anything riskier.", cls: "mode-default" },
+    { id: "full-access", label: "Full access", short: "Full", hint: "No sandbox, no questions. Use with care.", cls: "mode-bypass" },
+  ];
+  function modesFor(harness) {
+    return harness === "codex" ? CODEX_MODES : MODES;
+  }
+
+  // Codex publishes its own model list, so unlike the Claude side there is no
+  // fallback table to keep in step by hand — until its host reports one there
+  // is simply nothing to pick from.
+  let CODEX_MODELS = [];
+  let CODEX_DEFAULT_MODEL = "";
+  const CODEX_CONTEXT_LIMITS = {};
+
+  // ---- custom models --------------------------------------------------------
+  // Anything OpenAI-compatible the user points us at: a llama.cpp box, an
+  // OpenRouter key, a colleague's endpoint. Codex only ever lists its own
+  // catalog from model/list, so these are ours to carry — they ride along to
+  // the host, which declares the provider inline on thread/start. Nothing is
+  // written to ~/.codex/config.toml, so picking one here cannot break the
+  // user's Codex outside the panel.
+  const CUSTOM_MODELS_KEY = "rkCustomModels";
+  let CUSTOM_MODELS = [];
+
+  /** Provider ids reach Codex as TOML table keys, so keep them boring. */
+  function providerId(label) {
+    const slug = String(label || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 32);
+    return "custom-" + (slug || "model");
+  }
+
+  /**
+   * The context ring reads its denominator out of CODEX_CONTEXT_LIMITS, keyed by
+   * the id the picker uses. Codex reports a window under its *own* model name
+   * ("local"), which never matches our provider id — so seed it from settings
+   * or the ring falls back to the shared 200k default and reads wrong.
+   */
+  function seedCustomContextLimits() {
+    for (const m of CUSTOM_MODELS) if (m.contextWindow) CODEX_CONTEXT_LIMITS[m.id] = m.contextWindow;
+  }
+
+  function loadCustomModels(done) {
+    try {
+      chrome.storage.local.get([CUSTOM_MODELS_KEY], (r) => {
+        const raw = r && r[CUSTOM_MODELS_KEY];
+        CUSTOM_MODELS = Array.isArray(raw) ? raw.filter((m) => m && m.id && m.baseUrl) : [];
+        seedCustomContextLimits();
+        done && done();
+      });
+    } catch (_) {
+      done && done();
+    }
+  }
+
+  function saveCustomModels() {
+    seedCustomContextLimits();
+    try {
+      chrome.storage.local.set({ [CUSTOM_MODELS_KEY]: CUSTOM_MODELS });
+    } catch (_) {}
+  }
+
+  const customModel = (id) => CUSTOM_MODELS.find((m) => m.id === id) || null;
+
+  /**
+   * What the host needs to declare this model's provider on thread/start.
+   * Null for a stock model, which is what keeps the normal path untouched.
+   */
+  function providerFor(chat) {
+    const m = chat && chat.harness === "codex" ? customModel(chat.model) : null;
+    if (!m) return undefined;
+    return {
+      id: m.id,
+      model: m.model,
+      baseUrl: m.baseUrl,
+      apiKey: m.apiKey || "",
+      wireApi: m.wireApi || "responses",
+      contextWindow: m.contextWindow || null,
+    };
+  }
+
+  function modelsFor(harness) {
+    if (harness !== "codex") return MODELS;
+    const custom = CUSTOM_MODELS.map((m) => ({ id: m.id, label: m.label, custom: true }));
+    if (CODEX_MODELS.length) return CODEX_MODELS.concat(custom);
+    return custom.length ? custom : [{ id: "", label: "Default" }];
+  }
+  function defaultModelFor(harness) {
+    if (harness !== "codex") return DEFAULT_MODEL;
+    return CODEX_DEFAULT_MODEL || (CODEX_MODELS[0] && CODEX_MODELS[0].id) || "";
+  }
+
   // Listed least- to most-capable — Haiku is fastest/smallest, then Sonnet,
   // Opus, and Fable 5 as the top tier (above Opus).
   //
@@ -101,6 +222,35 @@
   ];
   const DEFAULT_EFFORT = "medium";
 
+  // Codex's ladder is not one ladder. It publishes a list per model, and they
+  // differ: gpt-5.6-terra runs all the way to ultra, gpt-5.6-luna stops at max,
+  // gpt-5.5 stops at xhigh. Showing six rungs for a model that has four means
+  // the slider reads Max while the turn quietly runs something lower — so the
+  // slider is built from whatever the chosen model actually offers.
+  const EFFORT_LABELS = {
+    low: "Low", medium: "Medium", high: "High", xhigh: "Extra",
+    max: "Max", ultra: "Ultra", ultracode: "Ultracode",
+  };
+  function effortsFor(chat) {
+    if (!chat || chat.harness !== "codex") return EFFORTS;
+    const row = CODEX_MODELS.find((m) => m.id === chat.model);
+    const ids = row && row.efforts;
+    if (!ids || !ids.length) return EFFORTS;
+    return ids.map((id) => ({ id, label: EFFORT_LABELS[id] || id }));
+  }
+  function activeEfforts() {
+    return effortsFor(chats.get(activeId));
+  }
+  // Keep a chat on a rung its model actually has — switching agent or model can
+  // leave it holding one that no longer exists.
+  function clampEffort(chat) {
+    if (!chat) return;
+    const list = effortsFor(chat);
+    if (list.some((e) => e.id === chat.effort)) return;
+    const fallback = list.find((e) => e.id === DEFAULT_EFFORT) || list[list.length - 1];
+    chat.effort = fallback.id;
+  }
+
   // Usable context window per model (tokens) — the denominator behind the
   // toolbar's context meter. These mirror what Claude Code's own `/context`
   // meter shows as the max (window minus the reserve it keeps for the reply +
@@ -122,7 +272,11 @@
   const DEFAULT_CONTEXT_LIMIT_FALLBACK = 200000;
   let DEFAULT_CONTEXT_LIMIT = DEFAULT_CONTEXT_LIMIT_FALLBACK;
   function contextLimit(chat) {
-    return (chat && CONTEXT_LIMITS[chat.model]) || DEFAULT_CONTEXT_LIMIT;
+    if (!chat) return DEFAULT_CONTEXT_LIMIT;
+    // Codex reports the window it is actually using, per model, once a turn has
+    // run. Until then there is nothing better than the shared default.
+    if (chat.harness === "codex") return CODEX_CONTEXT_LIMITS[chat.model] || DEFAULT_CONTEXT_LIMIT;
+    return CONTEXT_LIMITS[chat.model] || DEFAULT_CONTEXT_LIMIT;
   }
 
   // ---- model catalog (remote) ------------------------------------------------
@@ -242,6 +396,11 @@
   // with a content-matched backstop (usageEchoText) for a reply that arrives
   // after the gate is released.
   const usageState = { rows: [], at: 0, fetching: false };
+  // Codex hands its limits over the protocol rather than through a command, so
+  // there is nothing to probe and nothing to parse — the host just tells us.
+  // Kept apart from usageState because these are two different accounts: mixing
+  // their rows in one list would read as one plan with four windows.
+  const codexUsage = { rows: [], at: 0 };
   // Labels the last probe reported, persisted so the popover's skeleton rows
   // match the real set on a cold start. How many windows a plan has (and their
   // names) varies by account, so guessing a fixed list makes the menu jump in
@@ -323,12 +482,24 @@
   let activeId = null;
   let history = [];
   let menuFilter = "";
-  // Null, not DEFAULT_MODEL — this runs before the catalog loads, so pinning it
-  // here would freeze a fresh install on the built-in default and make
-  // models.json's defaultModel a dead field. makeChat resolves it at use time.
-  let lastModel = null;
-  let lastEffort = DEFAULT_EFFORT;
-  let lastMode = "auto";
+  // Last-used model / effort / mode, remembered per harness. One shared slot
+  // would mean switching to Codex and back left Claude holding a gpt-5.6 model
+  // id and a mode it doesn't have — so each agent keeps its own.
+  //
+  // Null model, not DEFAULT_MODEL: this runs before the catalog loads, so
+  // pinning it here would freeze a fresh install on the built-in default and
+  // make models.json's defaultModel a dead field. makeChat resolves it at use
+  // time.
+  const lastBy = {
+    claude: { model: null, effort: DEFAULT_EFFORT, mode: "auto" },
+    codex: { model: null, effort: DEFAULT_EFFORT, mode: "workspace" },
+  };
+  // Which agent a brand-new chat starts on — the choice made in the empty
+  // state's harness chip, carried over to the next new chat.
+  let lastHarness = DEFAULT_HARNESS;
+  function lastFor(harness) {
+    return lastBy[harness] || lastBy.claude;
+  }
   // Play a chime when a session fully finishes (Settings → General). Off by
   // default — sound is opt-in.
   let soundOnDone = false;
@@ -386,16 +557,29 @@
     try {
       chrome.storage.local.get(["rkChatV2"], (r) => {
         const p = (r && r.rkChatV2) || {};
-        if (p.lastModel) lastModel = canonicalModel(p.lastModel);
-        if (p.lastEffort) lastEffort = p.lastEffort;
-        if (p.lastMode) lastMode = p.lastMode;
+        // Flat keys are what every build before harnesses wrote. They are the
+        // Claude slot, and reading them first keeps an existing panel exactly
+        // where its owner left it.
+        if (p.lastModel) lastBy.claude.model = canonicalModel(p.lastModel);
+        if (p.lastEffort) lastBy.claude.effort = p.lastEffort;
+        if (p.lastMode) lastBy.claude.mode = p.lastMode;
+        if (p.lastBy && typeof p.lastBy === "object") {
+          for (const h of Object.keys(lastBy)) {
+            const saved = p.lastBy[h];
+            if (!saved) continue;
+            if (saved.model) lastBy[h].model = h === "claude" ? canonicalModel(saved.model) : saved.model;
+            if (saved.effort) lastBy[h].effort = saved.effort;
+            if (saved.mode) lastBy[h].mode = saved.mode;
+          }
+        }
+        if (p.lastHarness && HARNESSES.some((h) => h.id === p.lastHarness)) lastHarness = p.lastHarness;
         if (p.lastCwd) lastCwd = p.lastCwd;
         if (p.soundOnDone) soundOnDone = true;
         if (Array.isArray(p.history)) history = p.history;
         if (Array.isArray(p.usageLabels) && p.usageLabels.length) usageLabels = p.usageLabels;
         if (Array.isArray(p.tabs) && p.tabs.length) {
           for (const t of p.tabs) {
-            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt });
+            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt });
             chats.set(chat.id, chat);
             order.push(chat.id);
           }
@@ -411,9 +595,17 @@
     try {
       const tabs = order.map((id) => {
         const c = chats.get(id);
-        return { id: c.id, title: c.title, cwd: c.cwd, model: c.model, effort: c.effort, mode: c.mode, sessionId: c.sessionId, bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt };
+        return { id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: c.sessionId, bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt };
       });
-      chrome.storage.local.set({ rkChatV2: { tabs, activeId, history: history.slice(0, 40), lastModel, lastEffort, lastMode, lastCwd, soundOnDone, usageLabels } });
+      chrome.storage.local.set({
+        rkChatV2: {
+          tabs, activeId, history: history.slice(0, 40), lastCwd, soundOnDone, usageLabels,
+          lastBy, lastHarness,
+          // Mirrors of the Claude slot under the names older builds look for,
+          // so downgrading the extension doesn't lose the settings.
+          lastModel: lastBy.claude.model, lastEffort: lastBy.claude.effort, lastMode: lastBy.claude.mode,
+        },
+      });
     } catch (_) {}
   }
 
@@ -630,9 +822,10 @@
       id: opts.id || newId(),
       title: opts.title || DEFAULT_TITLE,
       cwd: opts.cwd || null,
-      model: opts.model || lastModel || DEFAULT_MODEL,
-      effort: opts.effort || lastEffort || DEFAULT_EFFORT,
-      mode: opts.mode || lastMode,
+      harness: opts.harness || lastHarness || DEFAULT_HARNESS,
+      model: opts.model || lastFor(opts.harness || lastHarness).model || defaultModelFor(opts.harness || lastHarness),
+      effort: opts.effort || lastFor(opts.harness || lastHarness).effort || DEFAULT_EFFORT,
+      mode: opts.mode || lastFor(opts.harness || lastHarness).mode,
       sessionId: opts.sessionId || null,
       slashCommands: [],
       skills: [],
@@ -676,6 +869,9 @@
       streamMsgId: null,
       streamBlocks: new Map(),
       streamedMsgIds: new Set(),
+      // msgId -> { node, text } for blocks this tab streamed, so a longer
+      // canonical copy can repaint the node instead of being dropped.
+      streamedText: new Map(),
       // Running-status pill metrics.
       turnStartedAt: 0,
       turnTokens: 0,
@@ -815,6 +1011,11 @@
     renderTabs();
     syncComposer();
     const chat = chats.get(id);
+    // The next new chat opens on whatever you were last working in. Recording
+    // it here rather than only in the harness chip means it follows the tab you
+    // were actually using, which is what "the same as last time" means to
+    // someone who has been switching between two of them.
+    if (chat.harness) lastHarness = chat.harness;
     // Lazily spin up the session the first time a tab is shown.
     if (connected && hostReady && !chat.started) startChatSession(chat);
     // Re-render a restored/re-opened conversation from its on-disk transcript.
@@ -839,7 +1040,7 @@
     // `ts` is when the conversation last moved, not when the tab was shut —
     // closing a chat shouldn't jump it to the top of the menu.
     if (!chat.empty || chat.sessionId) {
-      history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, model: chat.model, effort: chat.effort, mode: chat.mode, sessionId: chat.sessionId, ts: chat.lastActivityAt || Date.now() });
+      history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, harness: chat.harness, model: chat.model, effort: chat.effort, mode: chat.mode, sessionId: chat.sessionId, ts: chat.lastActivityAt || Date.now() });
       history = history.slice(0, 40);
     }
     if (chat.started) post({ type: "close", id });
@@ -1285,7 +1486,7 @@
     history = history.filter((h) => h !== item);
     // Keep the conversation's own place in the menu — reopening a tab isn't the
     // conversation moving.
-    createChat({ title: item.title, cwd: item.cwd, model: item.model, effort: item.effort, mode: item.mode, sessionId: item.sessionId, lastActivityAt: item.ts });
+    createChat({ title: item.title, cwd: item.cwd, harness: item.harness, model: item.model, effort: item.effort, mode: item.mode, sessionId: item.sessionId, lastActivityAt: item.ts });
     savePrefs();
   }
 
@@ -1458,6 +1659,7 @@
     }
     chat.streamBlocks.clear();
     chat.streamedMsgIds.clear();
+    chat.streamedText.clear();
     chat.streamMsgId = null;
     chat.toolGroup = null;
     chat.statusEl = null; // went with the removed rows (or is about to be stale)
@@ -2165,6 +2367,24 @@
     return label;
   }
 
+  // Codex reports a window as a duration in minutes and a reset as a unix time.
+  // Claude's own dump already arrives as prose, so these two only exist to make
+  // the Codex rows read the same way in the same list.
+  function describeWindow(mins) {
+    if (mins >= 40000) return "Monthly limit";
+    if (mins >= 8000) return "Weekly limit";
+    if (mins >= 240) return Math.round(mins / 60) + "-hour limit";
+    return mins + "-minute limit";
+  }
+
+  function describeReset(unixSeconds) {
+    const when = new Date(unixSeconds * 1000);
+    if (Number.isNaN(when.getTime())) return "";
+    const days = Math.round((when - Date.now()) / 86400000);
+    if (days > 1) return "in " + days + " days";
+    return when.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric" });
+  }
+
   // ---- silent /usage probe --------------------------------------------------
   // Runs a bare `/usage` in a live, idle session purely to refresh usageState.
   // The session's events for it are intercepted by handleUsageProbe (via the
@@ -2174,9 +2394,18 @@
     if (usageState.fetching) return;
     if (!connected || !hostReady) return;
     if (!force && Date.now() - usageState.at < USAGE_THROTTLE_MS) return;
-    // A session is probe-eligible only when it's live and fully idle — no turn
-    // running, no queued prompts waiting, and not already probing.
-    const idle = (c) => c && c.started && !c.turnRunning && !c.usageProbe && !(c.queue && c.queue.length);
+    // A session is probe-eligible only when it's live, fully idle — no turn
+    // running, no queued prompts waiting, not already probing — and running an
+    // agent that HAS a `/usage` command.
+    //
+    // This last part matters more than it looks. The probe is a real prompt.
+    // Send it to an agent that doesn't know the command and it doesn't fail
+    // quietly: it answers, in prose, in the user's chat, having spent their
+    // tokens to say it can't help. Codex reports its limits over the protocol
+    // instead (see planUsage), so it must never be picked here.
+    const idle = (c) =>
+      c && c.started && !c.turnRunning && !c.usageProbe && !(c.queue && c.queue.length)
+      && (c.harness || DEFAULT_HARNESS) === "claude";
     // Prefer the active tab; otherwise any started, idle session will do.
     let chat = chats.get(activeId);
     if (!idle(chat)) {
@@ -2499,6 +2728,12 @@
   // The block's wire buffer is complete — swap in the canonical one-shot
   // markdown render (drops the caret, fixes any tail-parse artifacts).
   function finalizeStreamBlock(chat, blk) {
+    if (blk.finalized) return; // the pacer and its safety timer can both land here
+    blk.finalized = true;
+    if (blk.guard) {
+      clearTimeout(blk.guard);
+      blk.guard = 0;
+    }
     if (blk.raf) {
       cancelAnimationFrame(blk.raf);
       blk.raf = 0;
@@ -2509,7 +2744,15 @@
         attachAssistantRow(chat, blk.body);
         blk.body.appendChild(blk.el);
       }
-      blk.el.replaceChildren(R.markdown(blk.buf));
+      // The canonical copy may already have repainted this node with a longer
+      // text while the typewriter was still running out its tail. Re-rendering
+      // the shorter buffer over it would put the truncation straight back.
+      const rec = blk.msgId ? chat.streamedText.get(blk.msgId) : null;
+      if (!rec || rec.node !== blk.el || rec.text.length <= blk.buf.length) {
+        blk.el.replaceChildren(R.markdown(blk.buf));
+        if (rec && rec.node === blk.el) rec.text = blk.buf;
+        else if (blk.msgId) chat.streamedText.set(blk.msgId, { node: blk.el, text: blk.buf });
+      }
       blk.el.classList.remove("streaming");
     }
     // else: ended up empty/whitespace-only — it was never put in the DOM,
@@ -2583,7 +2826,10 @@
           // block never opens a flex-gap gap for content nobody can see.
           const node = el("div", "assistant-stream streaming");
           chat.streamBlocks.set(ev.index, {
-            type: "text", el: node, body, buf: "", raf: 0, appended: false,
+            // Which message this block belongs to, captured now: the pacer can
+            // finalize a frame or two later, by which point chat.streamMsgId
+            // has already moved on to the next message.
+            type: "text", el: node, body, msgId: chat.streamMsgId, buf: "", raf: 0, appended: false,
             // typewriter state (see paceStreamBlock)
             shown: 0, done: false, lastT: 0, carry: 0,
             // incremental-render state (see renderStreamSlice/advanceStreamScan)
@@ -2610,11 +2856,24 @@
       case "content_block_stop": {
         const blk = chat.streamBlocks.get(ev.index);
         if (!blk) break;
+        // Registered here, synchronously, rather than in finalizeStreamBlock:
+        // when the typewriter is left to run out a short tail, that finalize
+        // happens a few frames later — after the canonical `assistant` copy has
+        // already been handled, which would find no record and render the text
+        // a second time.
+        if (blk.type === "text" && blk.msgId) chat.streamedText.set(blk.msgId, { node: blk.el, text: blk.buf });
         if (blk.type === "text" && blk.shown < blk.buf.length && !document.hidden && blk.buf.length - blk.shown <= 600) {
           // Let the typewriter run out the short remaining tail (its catch-up
           // term makes that take well under half a second), then finalize.
           blk.done = true;
           paceStreamBlock(chat, blk);
+          // Safety net. The block is dropped from streamBlocks just below, so
+          // the pacer's own closure is the only thing still holding it: if rAF
+          // stops before it catches up — the side panel loses visibility, the
+          // window goes to the background — the half-revealed tail is orphaned
+          // and the answer stays cut off mid-sentence for good. The timer only
+          // ever fires when that happened; a pacer that finishes clears it.
+          blk.guard = setTimeout(() => finalizeStreamBlock(chat, blk), 2000);
         } else if (blk.type === "text") {
           // Huge backlog or a hidden tab (rAF is throttled there) — cut
           // straight to the final render rather than type for seconds.
@@ -3933,6 +4192,28 @@
         const body = ensureAssistantBody(chat, msgId);
         const streamed = msgId && chat.streamedMsgIds.has(msgId);
         const content = (d.message && d.message.content) || [];
+
+        // The stream is not always the whole reply. Codex sends the text as
+        // `item/agentMessage/delta` notifications and the finished item
+        // separately, and the deltas can stop short of it — the answer then ends
+        // mid-sentence, because this canonical copy is skipped for anything
+        // streamed. So when the copy is longer than what the block actually
+        // shows, repaint that block from it.
+        //
+        // Only ever repaints an existing node, never renders a second one:
+        // Claude emits a per-block `assistant` the moment a block finishes,
+        // *before* content_block_stop, so there is legitimately no record yet
+        // and the right move is to leave it alone. Codex's copy arrives after,
+        // which is the case this exists for.
+        if (streamed) {
+          const rec = chat.streamedText.get(msgId);
+          const full = content.filter((b) => b.type === "text").map((b) => b.text || "").join("");
+          if (rec && rec.node && rec.node.isConnected && full.length > rec.text.length) {
+            rec.node.replaceChildren(R.markdown(full));
+            rec.node.classList.remove("streaming");
+            rec.text = full;
+          }
+        }
         for (const block of content) {
           if (block.type === "tool_use") {
             if (chat.emittedToolIds.has(block.id)) continue;
@@ -3990,7 +4271,7 @@
         }
         break;
       }
-      case "result":
+      case "result": {
         // The tail of a swallowed probe reply — not the running turn's result.
         if (chat.usageEcho && !chat.pendingUsageCard && isUsageEchoResult(d)) {
           chat.usageEcho = false;
@@ -3998,19 +4279,21 @@
           break;
         }
         chat.usageEcho = false;
+        // Auth death arrives as a failed result — the process is alive but its
+        // token is gone (see sessionLooksStale for how it gets that way). The
+        // CLI usually says so twice: once as a plain assistant line, then in
+        // the result. Grab that row before endTurn lets go of it so the sign-in
+        // card can replace it instead of piling up under it.
+        const authDead = d.is_error && isAuthRevokedError(String(d.result || ""));
+        const deadBody = authDead ? chat.currentAssistantBody : null;
         endTurn(chat, d);
-        // Auth death arrives as a failed result carrying the API's 401 text —
-        // the process is alive but its token is gone (see sessionLooksStale
-        // for how it gets that way). Reuse the /login flow instead of leaving
-        // the raw error as the last word, and re-send the prompt it killed.
-        if (d.is_error && isAuthRevokedError(String(d.result || ""))) {
+        if (authDead) {
+          dropAuthErrorRow(chat, deadBody);
           requeueLastPrompt(chat);
-          if (!chat.loginCard) {
-            systemNote(chat, "Your Claude sign-in expired — signing in again…", "warn");
-            startLogin(chat);
-          }
+          if (!chat.loginCard) startLogin(chat, { expired: true });
         }
         break;
+      }
       case "rate_limit_event":
         if (d.rate_limit_info && d.rate_limit_info.status !== "allowed") {
           const status = d.rate_limit_info.status;
@@ -4362,26 +4645,50 @@
 
   // The CLI's OAuth access token expires (or gets revoked by a concurrent
   // refresh from another tab/process) without using its refresh token, so a
-  // stale session dies with a 401 on stderr instead of prompting to sign in.
-  // Recognize that shape and drive the same `/login` flow automatically
-  // rather than leaving the user to notice and retype it.
+  // stale session dies instead of prompting to sign in. It dies in two shapes:
+  // a 401 from the API when the dead token is actually used, and the CLI's own
+  // "Failed to authenticate: OAuth session expired and could not be refreshed"
+  // on stderr when the refresh fails before any request goes out. Recognize
+  // both and drive the same `/login` flow automatically rather than leaving the
+  // user to notice and retype it.
   function isAuthRevokedError(text) {
-    return typeof text === "string" && /\b401\b/.test(text) && /oauth|authenticat|revoked|credentials/i.test(text);
+    if (typeof text !== "string") return false;
+    if (/\b401\b/.test(text) && /oauth|authenticat|revoked|credentials/i.test(text)) return true;
+    return /failed to authenticate|could not be refreshed|(oauth|session|token)[^.\n]{0,20}(expired|revoked)|run \/login/i.test(text);
+  }
+
+  // The CLI often narrates its own auth death as a plain assistant line
+  // ("Failed to authenticate: …") just before the failed result. It's a dead
+  // end for the reader — the sign-in card that replaces it says everything
+  // worth saying — so take the row back out. Only a row that is nothing but
+  // that complaint goes: a real answer that happens to mention a 401 stays.
+  function dropAuthErrorRow(chat, body) {
+    if (!body) return;
+    const row = body.parentElement;
+    if (!row || !row.parentNode) return;
+    if (row.querySelector(".tool-card, .tool-group")) return; // real work happened here
+    const text = (body.textContent || "").trim();
+    if (!text || text.length > 300 || !isAuthRevokedError(text)) return;
+    row.remove();
+    if (chat.currentAssistantBody === body) {
+      chat.currentAssistantBody = null;
+      chat.currentAssistantId = null;
+    }
   }
 
   // Puts the prompt that just died with the auth error back in the queue so it
   // re-sends itself once sign-in completes and the session respawns — the user
   // shouldn't have to retype what they can see on screen. Its original context
   // blocks were already delivered (and consumed) by the failed turn, so only
-  // the text and images come back.
+  // the text and images come back. It rides the queue silently: the bubble the
+  // user typed is still on screen a few rows up, and a second copy of it
+  // would only make the recovery look like a mess.
   function requeueLastPrompt(chat) {
     const p = chat.lastSentPrompt;
     chat.lastSentPrompt = null; // one retry per failure, never a loop
     if (!p || !p.text) return;
     if (!Array.isArray(chat.queue)) chat.queue = [];
-    const entry = { text: p.text, contexts: [], attachments: p.attachments || [] };
-    chat.queue.push(entry);
-    entry.el = renderQueuedBubble(chat, entry);
+    chat.queue.push({ text: p.text, contexts: [], attachments: p.attachments || [], silent: true });
   }
 
   // A claude process that has sat idle for hours holds its OAuth access token
@@ -4414,6 +4721,12 @@
     switch (msg.type) {
       case "ready":
         hostReady = true;
+        harnessReady.claude = msg.ok !== false;
+        // The chip is drawn before any host has spoken, so it starts out
+        // assuming nothing is installed. This is the moment that stops being
+        // true — repaint it, or it sits dimmed for a working agent.
+        syncComposer();
+        prewarmHarnesses();
         home = msg.home || home;
         hostUser = msg.user || hostUser;
         hostVersion = msg.version || 0;
@@ -4477,6 +4790,14 @@
           // come (failed respawn, or a stop of an idle session), so arm a
           // self-heal timer alongside the gate — it must never wedge the chat's
           // event stream shut permanently.
+          // Not every host restarts on stop. Codex interrupts the turn inside
+          // a session that stays alive, so there is no respawn and no second
+          // `system init` to lift the gate — arming it there would swallow the
+          // next turn's events until the self-heal timer fired.
+          if (msg.respawn === false) {
+            if (chat.turnRunning) endTurn(chat, null);
+            break;
+          }
           if (chat.suppressTimer) clearTimeout(chat.suppressTimer);
           chat.suppressEvents = true;
           chat.suppressTimer = setTimeout(() => {
@@ -4555,6 +4876,78 @@
       case "permissionCancel":
         if (chat) removePermCard(chat, msg.requestId);
         break;
+      // A non-Claude host announcing itself. Claude reports the same thing in
+      // `ready`; keeping them separate means the router never has to merge two
+      // handshakes into one message, and an older panel simply ignores this.
+      case "agentReady":
+        if (msg.agent) {
+          harnessReady[msg.agent] = !!msg.ok;
+          syncComposer();
+          updateSetup();
+          refreshSettingsIfOpen();
+        }
+        break;
+      case "agentExit":
+        if (msg.agent) {
+          harnessReady[msg.agent] = false;
+          for (const c of chats.values()) {
+            if (c.harness !== msg.agent) continue;
+            c.started = false;
+            clearPermCards(c);
+            if (c.turnRunning) {
+              systemNote(c, `${harnessLabel(msg.agent)} stopped.`, "warn");
+              endTurn(c, null);
+            }
+          }
+          updateSetup();
+        }
+        break;
+      // Codex publishes its own model list; this is where the picker learns it.
+      case "models":
+        if (msg.agent === "codex" && Array.isArray(msg.models) && msg.models.length) {
+          CODEX_MODELS = msg.models.map((m) => ({ id: m.id, label: m.label || m.id, efforts: m.efforts || [] }));
+          CODEX_DEFAULT_MODEL = msg.defaultModel || CODEX_MODELS[0].id;
+          for (const m of msg.models) if (m.contextWindow) CODEX_CONTEXT_LIMITS[m.id] = m.contextWindow;
+          // A chat started before the list arrived is holding a placeholder.
+          for (const c of chats.values()) {
+            if (c.harness !== "codex") continue;
+            if (!c.model) c.model = CODEX_DEFAULT_MODEL;
+            // The ladder is only known now, so a chat may be sitting on a rung
+            // its model doesn't have.
+            clampEffort(c);
+          }
+          syncComposer();
+          if (els.modelMenu && !els.modelMenu.classList.contains("hidden")) renderModelMenu();
+        }
+        break;
+      // Codex's plan limits, sent after every turn — no probe, no parsing.
+      case "planUsage":
+        if (msg.agent === "codex" && typeof msg.usedPercent === "number") {
+          const window = msg.windowMins ? describeWindow(msg.windowMins) : "Plan usage";
+          codexUsage.rows = [{
+            label: window,
+            pct: Math.max(0, Math.min(100, msg.usedPercent)),
+            resets: msg.resetsAt ? describeReset(msg.resetsAt) : "",
+          }];
+          codexUsage.at = Date.now();
+          refreshUsageUI();
+        }
+        break;
+      // The real context window, learned once a turn has actually run.
+      case "contextWindow":
+        if (msg.agent === "codex" && msg.model && msg.window) {
+          CODEX_CONTEXT_LIMITS[msg.model] = msg.window;
+          refreshUsageUI();
+        }
+        break;
+      // Only ever our own browser server — the host keeps the user's other MCP
+      // servers to itself. This one matters because losing it means the agent
+      // can no longer see the tab, which is the whole point of the panel.
+      case "mcpStatus":
+        if (chat && msg.status === "failed" && msg.server === "browser") {
+          systemNote(chat, "Lost the browser tools for this session — the agent can't see the tab.", "warn", { dismissible: true });
+        }
+        break;
       case "commands":
         if (chat && Array.isArray(msg.list)) {
           chat.slashCommands = withLocalCommands(msg.list);
@@ -4563,7 +4956,7 @@
           // If the user is mid-"/" in this tab, populate the menu now.
           if (chat.id === activeId && /^\/[^\s]*$/.test(els.input.value)) updateSlash();
           // Refresh the Skills list if it's the open settings view.
-          if (chat.id === activeId && settingsOpen() && settingsTab === "config" && cfgKey === "skills") renderSettings();
+          if (chat.id === activeId && settingsOpen() && settingsTab === "claude" && cfgKeyBy.claude === "skills") renderSettings();
         }
         break;
       case "exit":
@@ -4642,7 +5035,8 @@
         break;
       case "configRead":
         // Ignore replies for a (key, scope) we've since navigated away from.
-        if (settingsOpen() && cfgEdit && cfgEdit.key === msg.key && cfgEdit.scope === msg.scope) {
+        if (settingsOpen() && cfgEdit && cfgEdit.key === msg.key && cfgEdit.scope === msg.scope
+            && (msg.agent || "claude") === cfgEdit.agent) {
           cfgEdit.loading = false;
           if (msg.ok) {
             cfgEdit.content = msg.content || "";
@@ -4714,17 +5108,20 @@
       case "error":
         if (chat) {
           liftSuppress(chat); // a respawn error must not leave the event gate shut
-          if (isAuthRevokedError(msg.message) && !chat.loginCard) {
+          if (isAuthRevokedError(msg.message)) {
             // The exit event right behind this one would otherwise print a
             // generic "session ended" note under the login card — skip it.
             chat.suppressExitNote = true;
-            // The process is already dead by the time sign-in finishes, so
-            // `chat.started` (which the exit event below clears) can't tell
-            // loginDone() to restart it — track that separately.
-            chat.pendingAuthRestart = true;
-            requeueLastPrompt(chat);
-            systemNote(chat, "Your Claude sign-in expired — signing in again…", "warn");
-            startLogin(chat);
+            // A card is already up (the result carried the same news) — the raw
+            // CLI text adds nothing but noise, so it stops here.
+            if (!chat.loginCard) {
+              // The process is already dead by the time sign-in finishes, so
+              // `chat.started` (which the exit event below clears) can't tell
+              // loginDone() to restart it — track that separately.
+              chat.pendingAuthRestart = true;
+              requeueLastPrompt(chat);
+              startLogin(chat, { expired: true });
+            }
           } else {
             systemNote(chat, msg.message || "Host error", "warn");
           }
@@ -4734,6 +5131,18 @@
   }
 
   function post(obj) {
+    // The router picks a host by this field. Stamping it here rather than at
+    // three dozen call sites means a new message type can never forget it —
+    // and a chat that never chose an agent simply doesn't carry one, which the
+    // router reads as Claude.
+    if (obj && obj.id != null && obj.agent == null) {
+      const c = chats.get(obj.id);
+      // Always, not just when it differs from the default. The router also
+      // remembers which agent a chat id was started on, and leaving the field
+      // off let that memory win — so a chat switched back to Claude kept having
+      // its prompts delivered to Codex while the composer said Opus.
+      if (c && c.harness) obj.agent = c.harness;
+    }
     if (port) {
       try {
         port.postMessage(obj);
@@ -4756,8 +5165,10 @@
     chat.started = post({
       type: "start",
       id: chat.id,
+      agent: chat.harness || DEFAULT_HARNESS,
       cwd: chat.cwd,
       model: chat.model,
+      provider: providerFor(chat),
       effort: chat.effort,
       permissionMode: chat.mode,
       resume: resume || chat.sessionId || undefined,
@@ -5096,6 +5507,7 @@
     chat.turnStatusText = "";
     chat.streamBlocks.clear();
     chat.streamedMsgIds.clear();
+    chat.streamedText.clear();
     chat.streamMsgId = null;
     chat.agents.clear();
     chat.bgTasks.clear();
@@ -5364,10 +5776,11 @@
       renderContextChips();
       renderAttachmentThumbs();
     }
-    deliverPrompt(chat, entry.text);
+    deliverPrompt(chat, entry.text, { silent: !!entry.silent });
   }
 
-  async function deliverPrompt(chat, text) {
+  async function deliverPrompt(chat, text, opts) {
+    const silent = !!(opts && opts.silent); // a re-send whose bubble is already on screen
     // Long-idle process → its in-memory OAuth token may be rotated away (see
     // sessionLooksStale). Respawn it first so it re-reads the current keychain
     // credentials — resume keeps the conversation — and queue the prompt to go
@@ -5445,6 +5858,7 @@
         text,
         contexts: Array.isArray(chat.contexts) ? chat.contexts.slice() : [],
         attachments: attachments.slice(),
+        silent,
       };
       if (!Array.isArray(chat.queue)) chat.queue = [];
       chat.queue.unshift(entry); // it was next in line — keep it ahead of later queued prompts
@@ -5468,7 +5882,12 @@
     // never as an editable/rewind target: the host's rewind counter and the
     // replay path both refuse to count /usage, so marking it `real` here would
     // consume a turnIndex they don't, desyncing every later edit-rewind.
-    userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments, USAGE_CMD_RE.test(text) ? null : {
+    // A silent re-send draws no bubble but still burns a turn index: the failed
+    // attempt and this one are both written to the on-disk transcript, and the
+    // host counts turns from that file (see rewindSession) — skipping the
+    // increment would leave every later edit-rewind cutting one turn early.
+    if (silent) chat.turnIndexCounter++;
+    else userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments, USAGE_CMD_RE.test(text) ? null : {
       real: true,
       contexts: !isCommand && hasContext ? chat.contexts.slice() : null, // command turns don't consume chips
     });
@@ -5490,6 +5909,7 @@
     chat.curMsgTokens = 0;
     refreshStatusWord(chat);
     chat.streamedMsgIds.clear();
+    chat.streamedText.clear();
     chat.streamBlocks.clear();
     chat.streamMsgId = null;
     // First message becomes the tab title.
@@ -5527,7 +5947,11 @@
   // Kicks off the host's `claude auth login` flow and shows a card that walks
   // the user through the browser OAuth + code paste. The host replies with
   // `authUrl` (the sign-in link) and finally `authDone`.
-  function startLogin(chat) {
+  function startLogin(chat, opts) {
+    // Triggered by a dead token rather than a typed /login: the card carries the
+    // bad news itself instead of a warning note stacked above it, and it clears
+    // itself once the session is back (see loginDone).
+    const expired = !!(opts && opts.expired);
     if (chat.loginCard) { chat.loginCard.remove(); chat.loginCard = null; }
     const card = el("div", "login-card");
     const titleRow = el("div", "login-title-row");
@@ -5537,7 +5961,8 @@
     titleRow.appendChild(el("span", "login-title", "Sign in to Claude"));
     card.appendChild(titleRow);
     card._icon = icon;
-    const status = el("div", "login-status", "Starting sign-in…");
+    card._auto = expired;
+    const status = el("div", "login-status", expired ? "Your session expired — signing you back in…" : "Starting sign-in…");
     card.appendChild(status);
     card._status = status;
     chat.loginCard = card;
@@ -5552,7 +5977,11 @@
     const card = chat.loginCard;
     if (!card) return;
     card.classList.add("waiting");
-    card._status.textContent = "Click Authorize in the tab that just opened — you'll be signed in automatically.";
+    // The auto card is the only place the expired session is mentioned — don't
+    // let the sign-in instructions overwrite the reason it's here.
+    card._status.textContent = card._auto
+      ? "Your session expired — click Authorize in the tab that just opened and you're back in."
+      : "Click Authorize in the tab that just opened — you'll be signed in automatically.";
     // The CLI opens the URL itself (`open`/`xdg-open`) as soon as it prints it —
     // don't also open it here, that's what caused two sign-in tabs. This button
     // is a fallback for when the CLI's own open fails (e.g. no GUI, remote host).
@@ -5612,7 +6041,16 @@
       card.classList.add(ok ? "done" : "error");
       if (ok) {
         card._icon.innerHTML = ICON("check", 13);
-        card._status.textContent = "Signed in. You're all set.";
+        // A sign-in nobody asked for shouldn't outlive itself: say the session
+        // is back, then get out of the way — the answer streams in right below.
+        // A typed /login keeps its card, because it's the reply to a request.
+        card._status.textContent = card._auto ? "Signed back in — picking up where you left off." : "Signed in. You're all set.";
+        if (card._auto) {
+          setTimeout(() => {
+            card.classList.add("leaving");
+            setTimeout(() => card.remove(), 200);
+          }, 2200);
+        }
       } else {
         card._icon.remove();
         card._status.textContent = failText;
@@ -5750,15 +6188,16 @@
     chat.restartPending = false;
     // A failed post means the host never saw the change — mark the session
     // not-started so the next (re)start spawns with the values shown in the UI.
-    if (!post({ type: "restartSession", id: chat.id, model: chat.model, effort: chat.effort, permissionMode: chat.mode })) {
+    if (!post({ type: "restartSession", id: chat.id, model: chat.model, provider: providerFor(chat), effort: chat.effort, permissionMode: chat.mode })) {
       chat.started = false;
     }
   }
 
   function applyMode(chat, modeId) {
-    const m = MODES.find((x) => x.id === modeId) || MODES[0];
+    const list = modesFor(chat.harness);
+    const m = list.find((x) => x.id === modeId) || list[0];
     chat.mode = m.id;
-    lastMode = m.id;
+    lastFor(chat.harness).mode = m.id;
     savePrefs();
     syncComposer();
     scheduleSessionRestart(chat);
@@ -5769,8 +6208,9 @@
   function cycleMode() {
     const chat = chats.get(activeId);
     if (!chat) return;
-    const idx = MODES.findIndex((m) => m.id === chat.mode);
-    applyMode(chat, MODES[(idx + 1) % MODES.length].id);
+    const list = modesFor(chat.harness);
+    const idx = list.findIndex((m) => m.id === chat.mode);
+    applyMode(chat, list[(idx + 1) % list.length].id);
   }
 
   // Click opens a dropdown (upward) to pick a mode directly.
@@ -5783,7 +6223,7 @@
     const chat = chats.get(activeId);
     els.modeMenu.innerHTML = "";
     els.modeMenu.appendChild(el("div", "mode-head", "Permission mode"));
-    for (const m of MODES) {
+    for (const m of modesFor((chats.get(activeId) || {}).harness)) {
       const isCur = !!(chat && chat.mode === m.id);
       const row = el("div", "mode-item " + m.cls + (isCur ? " current" : ""));
       row.appendChild(el("span", "mode-dot"));
@@ -5807,9 +6247,13 @@
 
   // ---- model picker (custom dropdown, opens upward) -------------------------
   function applyModel(chat, modelId) {
-    const m = MODELS.find((x) => x.id === modelId) || MODELS[0];
+    const list = modelsFor(chat.harness);
+    const m = list.find((x) => x.id === modelId) || list[0];
     chat.model = m.id;
-    lastModel = m.id;
+    // Models don't share a ladder: moving from terra to gpt-5.5 drops two rungs
+    // off the top, and the chat can't stay on one of them.
+    clampEffort(chat);
+    lastFor(chat.harness).model = m.id;
     savePrefs();
     syncComposer();
     scheduleSessionRestart(chat);
@@ -5818,14 +6262,24 @@
 
   // Row builder for the model picker — each row carries the Claude logo, its
   // label, and a check on the active one. (Effort has its own slider panel.)
-  function renderPickerMenu(menu, title, items, currentId, onPick) {
+  function renderPickerMenu(menu, title, items, currentId, onPick, agent) {
     menu.innerHTML = "";
     menu.appendChild(el("div", "model-head", title));
     for (const it of items) {
       const isCur = it.id === currentId;
       const row = el("div", "model-item" + (isCur ? " current" : ""));
       const logo = el("span", "model-item-logo");
-      logo.innerHTML = window.RKClaudeHTML(15);
+      // Whose model this is. The Anthropic mark next to a GPT model was simply
+      // wrong — and OpenAI's own mark has no colour to speak of, so it takes
+      // the row's text colour, which is how it appears on any dark surface.
+      // A custom model belongs to neither of them: it is an endpoint the user
+      // typed in, so it gets the sparkle rather than borrowing OpenAI's knot.
+      const isCustom = agent === "codex" && !!customModel(it.id);
+      logo.innerHTML = isCustom
+        ? ICON("sparkle", 15)
+        : agent === "codex"
+          ? HARNESS_ICON("codex", 15)
+          : window.RKClaudeHTML(15);
       row.appendChild(logo);
       row.appendChild(el("span", "model-item-label", it.label));
       const ic = el("span", "model-item-ic");
@@ -5847,7 +6301,8 @@
   }
   function renderModelMenu() {
     const chat = chats.get(activeId);
-    renderPickerMenu(els.modelMenu, "Model", MODELS, chat && chat.model, applyModel);
+    const agent = (chat && chat.harness) || DEFAULT_HARNESS;
+    renderPickerMenu(els.modelMenu, "Model", modelsFor(agent), chat && chat.model, applyModel, agent);
   }
   function hideModelMenu() {
     closeMenu(els.modelMenu);
@@ -5860,15 +6315,17 @@
 
   // ---- effort picker (mirrors the model picker) ------------------------------
   function applyEffort(chat, effortId) {
-    const e = EFFORTS.find((x) => x.id === effortId) || EFFORTS.find((x) => x.id === DEFAULT_EFFORT);
+    const list = effortsFor(chat);
+    const e = list.find((x) => x.id === effortId) || list.find((x) => x.id === DEFAULT_EFFORT) || list[0];
     chat.effort = e.id;
-    lastEffort = e.id;
+    lastFor(chat.harness).effort = e.id;
     savePrefs();
     syncComposer();
     scheduleSessionRestart(chat);
   }
 
-  // The picker is a slider: one stop per EFFORTS entry, continuous while you
+  // The picker is a slider: one stop per rung the chosen model offers,
+  // continuous while you
   // drag, magnetised to the nearest stop and sprung onto it on release. The
   // last stop (Ultracode) paints the track with an animated pixel field in the
   // brand green.
@@ -5905,8 +6362,9 @@
   // it should already be there when the panel appears.
   function renderEffortMenu() {
     const chat = chats.get(activeId);
+    syncEffortLadder();
     const id = (chat && chat.effort) || DEFAULT_EFFORT;
-    const idx = Math.max(0, EFFORTS.findIndex((e) => e.id === id));
+    const idx = Math.max(0, activeEfforts().findIndex((e) => e.id === id));
     setEffortValue(idx, false);
   }
   function hideEffortMenu() {
@@ -5920,17 +6378,19 @@
   }
 
   function setEffortValue(next, animateLabel) {
-    const max = EFFORTS.length - 1;
+    const max = activeEfforts().length - 1;
     const value = effortClamp(Number.isFinite(next) ? next : 0, 0, max);
     const index = effortClamp(Math.round(value), 0, max);
     const prev = effortSlider.index;
     effortSlider.value = value;
     effortSlider.index = index;
     els.effortRange.value = String(value);
-    els.effortRange.setAttribute("aria-valuetext", EFFORTS[index].label);
+    const rungs = activeEfforts();
+    els.effortRange.setAttribute("aria-valuetext", (rungs[index] || {}).label || "");
     els.effortMenu.style.setProperty("--effort-progress", String(value / max));
-    if (index !== prev) swapEffortLabel(EFFORTS[index].label, index > prev, animateLabel);
-    else if (!els.effortLevel.textContent) els.effortLevel.textContent = EFFORTS[index].label;
+    const label = (rungs[index] || {}).label || "";
+    if (index !== prev) swapEffortLabel(label, index > prev, animateLabel);
+    else if (!els.effortLevel.textContent) els.effortLevel.textContent = label;
     setEffortUltra(index === max);
   }
 
@@ -5948,7 +6408,9 @@
   function commitEffort(index) {
     const chat = chats.get(activeId);
     if (!chat) return;
-    const id = EFFORTS[index].id;
+    const rung = activeEfforts()[index];
+    if (!rung) return;
+    const id = rung.id;
     if (chat.effort === id) return;
     applyEffort(chat, id);
   }
@@ -5981,7 +6443,7 @@
       const dt = Math.min((time - prevTime) / 1000, 0.032);
       prevTime = time;
       v += (-920 * (position - target) - 40 * v) * dt;
-      position = effortClamp(position + v * dt, 0, EFFORTS.length - 1);
+      position = effortClamp(position + v * dt, 0, activeEfforts().length - 1);
       setEffortValue(position, true);
       if (Math.abs(position - target) < 0.001 && Math.abs(v) < 0.01) {
         effortSlider.springFrame = 0;
@@ -6206,10 +6668,21 @@
     ctx.globalAlpha = 1;
   }
 
-  function bindEffortSlider() {
+  // The number of stops is not fixed: it comes from the model. Rebuild them
+  // whenever the picker opens, or a slider bound at mount keeps six stops for a
+  // model that has four — and the extra two look pickable.
+  function syncEffortLadder() {
     const ticks = els.effortMenu.querySelector(".effort-ticks");
-    for (let i = 0; i < EFFORTS.length; i += 1) ticks.appendChild(el("span", "effort-tick"));
-    els.effortRange.max = String(EFFORTS.length - 1);
+    const rungs = activeEfforts();
+    if (ticks.childElementCount !== rungs.length) {
+      ticks.innerHTML = "";
+      for (let i = 0; i < rungs.length; i += 1) ticks.appendChild(el("span", "effort-tick"));
+    }
+    els.effortRange.max = String(rungs.length - 1);
+  }
+
+  function bindEffortSlider() {
+    syncEffortLadder();
 
     els.effortRange.addEventListener("pointerdown", () => {
       cancelAnimationFrame(effortSlider.springFrame);
@@ -6245,11 +6718,11 @@
         PageDown: effortSlider.index - 1,
         PageUp: effortSlider.index + 1,
         Home: 0,
-        End: EFFORTS.length - 1,
+        End: activeEfforts().length - 1,
       };
       if (!(e.key in targets)) return;
       e.preventDefault();
-      const target = effortClamp(targets[e.key], 0, EFFORTS.length - 1);
+      const target = effortClamp(targets[e.key], 0, activeEfforts().length - 1);
       setEffortValue(target, true);
       commitEffort(target);
     });
@@ -6371,19 +6844,27 @@
     );
     menu.appendChild(ctxSec);
 
-    // Plan usage — account-wide, from the silent /usage probe.
+    // Plan usage — account-wide, and which account depends on which agent this
+    // chat is running. A custom endpoint has no account behind it and no quota
+    // to report, so the section is dropped rather than left as skeletons that
+    // shimmer forever waiting for numbers that are never coming.
+    if (chat && customModel(chat.model)) return;
+
+    const onCodex = chat && chat.harness === "codex";
+    const planRows = onCodex ? codexUsage.rows : usageState.rows;
     const planSec = el("div", "usage-menu-sec");
     planSec.appendChild(el("div", "usage-menu-head", "Plan usage"));
-    if (usageState.rows.length) {
-      for (const row of usageState.rows) {
+    if (planRows.length) {
+      for (const row of planRows) {
         planSec.appendChild(usageMenuRow(normalizeUsageLabel(row.label), row.pct, row.pct + "%", row.resets, false, true));
       }
     } else {
       // No data yet — skeletons that occupy the exact row geometry so nothing
       // shifts when values land. The label (real text) fixes the row height;
-      // only the reset note, %, and bar fill are masked. The set comes from the
-      // last probe, so the row count matches this account's plan.
-      for (const label of usageLabels) {
+      // only the reset note, %, and bar fill are masked. For Claude the set
+      // comes from the last probe, so the row count matches that account's
+      // plan; Codex reports a single window.
+      for (const label of onCodex ? ["Plan usage"] : usageLabels) {
         planSec.appendChild(usageSkeletonRow(label));
       }
     }
@@ -6415,15 +6896,24 @@
   // edits on-disk config through the host (the browser sandbox can't touch the
   // filesystem) — CLAUDE.md / Hooks / MCP / Plugins editors plus a read-only
   // Skills list — picked by an in-tab segmented control.
+  // One tab per agent, because the files under each belong to that agent and
+  // nothing else: CLAUDE.md means nothing to Codex, AGENTS.md means nothing to
+  // Claude. A single "Config" tab made them look interchangeable.
   const SETTINGS_TABS = [
     { id: "connection", label: "General" },
-    { id: "config", label: "Config" },
+    { id: "claude", label: "Claude" },
+    { id: "codex", label: "Codex" },
+    { id: "models", label: "Models" },
   ];
+  const isConfigTab = (id) => id === "claude" || id === "codex";
   // The files the Config tab can edit, in segmented-control order. `format`
   // picks the editor (raw text vs JSON); `label` is the segment caption;
   // `project`/`user` are the human-readable target paths. Keyed by the same id
   // the host's configResolve() understands.
-  const CONFIG_FILES = ["claudemd", "hooks", "mcp", "plugins", "skills"];
+  const CONFIG_FILES = {
+    claude: ["claudemd", "hooks", "mcp", "plugins", "skills"],
+    codex: ["agents", "hooks", "config"],
+  };
   const CONFIG_META = {
     claudemd: {
       title: "CLAUDE.md",
@@ -6470,9 +6960,44 @@
       blurb: "Skills available to Claude in this project, discovered from ~/.claude/skills, the project's .claude/skills, and installed plugins. Edit them at their source files.",
     },
   };
+
+  // Codex keeps its own set, in its own places. Same shape as CONFIG_META so
+  // the editor doesn't need to know which agent it is rendering.
+  const CODEX_CONFIG_META = {
+    agents: {
+      title: "AGENTS.md",
+      label: "AGENTS.md",
+      format: "text",
+      blurb: "Project memory Codex reads at the start of every session.",
+      project: "<project>/AGENTS.md",
+      user: "~/.codex/AGENTS.md",
+      placeholder: "# Notes\n\nGuidance Codex should always follow in this project…",
+    },
+    hooks: {
+      title: "Hooks",
+      label: "Hooks",
+      format: "json",
+      blurb: "Shell commands Codex runs on events. Unlike Claude's, this is the whole file rather than a section of one.",
+      project: "<project>/.codex/hooks.json",
+      user: "~/.codex/hooks.json",
+      placeholder: '{\n  "hooks": []\n}',
+    },
+    config: {
+      title: "config.toml",
+      label: "Config",
+      format: "text",
+      userOnly: true, // Codex reads one config.toml, in its own folder
+      blurb: "Everything else Codex reads — default model, sandbox, and the MCP servers it starts.",
+      user: "~/.codex/config.toml",
+      placeholder: 'model = "gpt-5.6-terra"\n\n[mcp_servers.playwright]\ncommand = "npx"\nargs = ["-y", "@playwright/mcp@latest"]\n',
+    },
+  };
+
+  const configMetaFor = (agent, key) => (agent === "codex" ? CODEX_CONFIG_META : CONFIG_META)[key];
   let settingsTab = "connection";
-  // Which file the Config tab is editing (its segmented control's selection).
-  let cfgKey = "claudemd";
+  // Which file each agent's tab is editing. Kept apart so switching tabs and
+  // back returns you to where you were rather than to the top of the list.
+  const cfgKeyBy = { claude: "claudemd", codex: "agents" };
   // Search box text for the read-only Skills list.
   let skillsFilter = "";
   // Live state of the open config editor (null when on a status tab). Survives
@@ -6486,7 +7011,10 @@
 
   function openSettings() {
     settingsTab = "connection";
-    cfgKey = "claudemd";
+    modelDraft = null;
+    modelRemoveId = null;
+    cfgKeyBy.claude = "claudemd";
+    cfgKeyBy.codex = "agents";
     skillsFilter = "";
     cfgEdit = null;
     renderSettings();
@@ -6501,7 +7029,7 @@
   // would drop the caret and any unsaved edit.
   function refreshSettingsIfOpen() {
     if (!settingsOpen()) return;
-    if (settingsTab === "config") return;
+    if (isConfigTab(settingsTab)) return;
     renderSettings();
   }
 
@@ -6512,14 +7040,211 @@
       btn.addEventListener("click", () => {
         if (settingsTab === t.id) return;
         settingsTab = t.id;
-        if (t.id !== "config") cfgEdit = null;
+        cfgEdit = null; // a different agent's file is a different editor
+        modelDraft = null; // and a half-typed model is not worth carrying across tabs
+        modelRemoveId = null;
         renderSettings();
       });
       els.settingsTabs.appendChild(btn);
     }
     els.settingsBody.innerHTML = "";
-    if (settingsTab === "config") renderSettingsConfig();
+    if (isConfigTab(settingsTab)) renderSettingsConfig(settingsTab);
+    else if (settingsTab === "models") renderSettingsModels();
     else renderSettingsConnection();
+  }
+
+  // ---- custom models tab ----------------------------------------------------
+  // Draft of the row being added or edited; null when just listing.
+  let modelDraft = null;
+  // Row whose Remove is armed and waiting on a second click. An endpoint holds
+  // an API key, so one stray click should not drop it.
+  let modelRemoveId = null;
+
+  function renderSettingsModels() {
+    const body = els.settingsBody;
+    const blurb = el("div", "set-blurb");
+    // Static copy, so innerHTML only to set the inline code span on the path.
+    blurb.innerHTML =
+      "Any OpenAI-compatible endpoint — a llama.cpp box, OpenRouter, your own gateway. " +
+      "They show up in the Codex model picker. The provider is declared per session, so nothing " +
+      'here touches <span class="set-code">~/.codex/config.toml</span>.';
+    body.appendChild(blurb);
+
+    // Editing is a focused view: the list steps aside so the form never floats
+    // below rows it has nothing to do with.
+    if (modelDraft && modelDraft.editing) {
+      body.appendChild(modelForm("Edit model"));
+      return;
+    }
+
+    if (CUSTOM_MODELS.length) {
+      const list = el("div", "custom-model-list");
+      for (const m of CUSTOM_MODELS) list.appendChild(modelRow(m));
+      body.appendChild(list);
+    }
+
+    if (modelDraft) {
+      body.appendChild(modelForm("New model"));
+      return;
+    }
+
+    // With no models the dashed button is the empty state — a "none yet" line
+    // above it would only say what the button already says.
+    const add = el("button", "custom-model-add" + (CUSTOM_MODELS.length ? "" : " solo"));
+    add.type = "button";
+    const ic = el("span", "custom-model-add-ic");
+    ic.innerHTML = ICON("plus", 14);
+    add.appendChild(ic);
+    add.appendChild(el("span", null, "Add a model"));
+    add.addEventListener("click", () => {
+      modelDraft = { label: "", model: "", baseUrl: "", apiKey: "", wireApi: "responses", contextWindow: "", editing: null };
+      modelRemoveId = null;
+      renderSettings();
+    });
+    body.appendChild(add);
+  }
+
+  function modelRow(m) {
+    const row = el("div", "custom-model-row");
+    const main = el("div", "custom-model-main");
+    main.appendChild(el("div", "custom-model-label", m.label));
+    // A long base URL is clipped to keep the row one line; the title carries it
+    // in full.
+    const url = el("div", "custom-model-url", `${m.model} · ${m.baseUrl}`);
+    url.title = m.baseUrl;
+    main.appendChild(url);
+    row.appendChild(main);
+
+    const acts = el("div", "custom-model-row-acts");
+    const edit = el("button", "custom-model-act", "Edit");
+    edit.type = "button";
+    edit.addEventListener("click", () => {
+      modelDraft = { ...m, editing: m.id };
+      modelRemoveId = null;
+      renderSettings();
+    });
+    const armed = modelRemoveId === m.id;
+    const del = el("button", "custom-model-act danger" + (armed ? " armed" : ""), armed ? "Confirm" : "Remove");
+    del.type = "button";
+    del.title = armed ? "Click again to remove" : "";
+    del.addEventListener("click", () => {
+      if (!armed) {
+        modelRemoveId = m.id;
+        renderSettings();
+        return;
+      }
+      CUSTOM_MODELS = CUSTOM_MODELS.filter((x) => x.id !== m.id);
+      modelRemoveId = null;
+      saveCustomModels();
+      // A tab parked on the model that just went away would otherwise send a
+      // provider the host cannot resolve.
+      for (const c of chats.values()) if (c.model === m.id) c.model = defaultModelFor(c.harness);
+      renderSettings();
+      syncComposer();
+    });
+    acts.appendChild(edit);
+    acts.appendChild(del);
+    row.appendChild(acts);
+    return row;
+  }
+
+  function modelForm(title) {
+    const form = el("div", "custom-model-form");
+    form.appendChild(el("div", "custom-model-form-title", title));
+
+    const field = (parent, key, label, placeholder, mono) => {
+      const wrap = el("div", "set-field");
+      wrap.appendChild(el("label", "set-field-label", label));
+      const input = el("input", "set-field-input" + (mono ? " mono" : ""));
+      input.type = key === "apiKey" ? "password" : "text";
+      input.value = modelDraft[key] || "";
+      input.placeholder = placeholder || "";
+      input.addEventListener("input", () => {
+        modelDraft[key] = input.value;
+      });
+      wrap.appendChild(input);
+      parent.appendChild(wrap);
+      return input;
+    };
+
+    // Identity first, then where it lives, then the details.
+    field(form, "label", "Name", "GPU box", false);
+    field(form, "baseUrl", "Base URL", "http://1.2.3.4:8080/v1", true);
+    field(form, "model", "Model id", "local", true);
+    field(form, "apiKey", "API key", "sent as a bearer token", true);
+
+    const pair = el("div", "set-field-pair");
+    field(pair, "contextWindow", "Context window", "262144", true);
+
+    // Two values, both short: a segmented control beats a native select, which
+    // drops the OS' own styling into the middle of the panel.
+    const wireWrap = el("div", "set-field");
+    wireWrap.appendChild(el("label", "set-field-label", "Wire API"));
+    const seg = el("div", "settings-scope");
+    for (const v of ["responses", "chat"]) {
+      const b = el("button", "settings-scope-btn" + (modelDraft.wireApi === v ? " active" : ""), v);
+      b.type = "button";
+      b.addEventListener("click", () => {
+        modelDraft.wireApi = v;
+        for (const other of seg.children) other.classList.toggle("active", other === b);
+      });
+      seg.appendChild(b);
+    }
+    wireWrap.appendChild(seg);
+    pair.appendChild(wireWrap);
+    form.appendChild(pair);
+
+    const err = el("div", "set-error");
+    form.appendChild(err);
+
+    const acts = el("div", "custom-model-acts");
+    const save = el("button", "settings-save-btn", "Save");
+    save.type = "button";
+    save.addEventListener("click", () => {
+      const label = (modelDraft.label || "").trim();
+      const model = (modelDraft.model || "").trim();
+      const baseUrl = (modelDraft.baseUrl || "").trim();
+      if (!label || !model || !baseUrl) {
+        err.textContent = "Name, model id and base URL are all required.";
+        return;
+      }
+      if (!/^https?:\/\//i.test(baseUrl)) {
+        err.textContent = "Base URL has to start with http:// or https://.";
+        return;
+      }
+      const id = modelDraft.editing || providerId(label);
+      if (!modelDraft.editing && CUSTOM_MODELS.some((m) => m.id === id)) {
+        err.textContent = "A model with that name already exists.";
+        return;
+      }
+      const ctx = parseInt(modelDraft.contextWindow, 10);
+      const row = {
+        id,
+        label,
+        model,
+        baseUrl: baseUrl.replace(/\/+$/, ""),
+        apiKey: modelDraft.apiKey || "",
+        wireApi: modelDraft.wireApi || "responses",
+        contextWindow: Number.isFinite(ctx) && ctx > 0 ? ctx : null,
+      };
+      const at = CUSTOM_MODELS.findIndex((m) => m.id === id);
+      if (at >= 0) CUSTOM_MODELS[at] = row;
+      else CUSTOM_MODELS.push(row);
+      saveCustomModels();
+      modelDraft = null;
+      renderSettings();
+      syncComposer();
+    });
+    const cancel = el("button", "custom-model-cancel", "Cancel");
+    cancel.type = "button";
+    cancel.addEventListener("click", () => {
+      modelDraft = null;
+      renderSettings();
+    });
+    acts.appendChild(save);
+    acts.appendChild(cancel);
+    form.appendChild(acts);
+    return form;
   }
 
   // ---- config editors (CLAUDE.md / Hooks / MCP) -----------------------------
@@ -6530,9 +7255,11 @@
 
   // Request a config file from the host; the reply lands in onHostMessage's
   // `configRead` case, which repaints. Starts in a loading state.
-  function loadConfig(key, scope) {
-    cfgEdit = { key, scope, loading: true, content: "", original: "", path: "", exists: false, error: "", status: "", statusKind: "", saving: false };
-    if (!post({ type: "configRead", id: activeId, key, scope, cwd: activeCwd() })) {
+  function loadConfig(agent, key, scope) {
+    cfgEdit = { agent, key, scope, loading: true, content: "", original: "", path: "", exists: false, error: "", status: "", statusKind: "", saving: false };
+    // The agent is named outright: which section of the modal you are looking
+    // at decides whose files these are, not which chat happens to be active.
+    if (!post({ type: "configRead", id: activeId, agent, key, scope, cwd: activeCwd() })) {
       cfgEdit.loading = false;
       cfgEdit.error = "Host disconnected — can't read the file.";
     }
@@ -6545,8 +7272,8 @@
     cfgEdit.error = "";
     cfgEdit.status = "Saving…";
     cfgEdit.statusKind = "dim";
-    const { key, scope, content } = cfgEdit;
-    if (!post({ type: "configWrite", id: activeId, key, scope, cwd: activeCwd(), content })) {
+    const { agent, key, scope, content } = cfgEdit;
+    if (!post({ type: "configWrite", id: activeId, agent, key, scope, cwd: activeCwd(), content })) {
       cfgEdit.saving = false;
       cfgEdit.status = "";
       cfgEdit.error = "Host disconnected — not saved.";
@@ -6554,23 +7281,25 @@
     renderSettings();
   }
 
-  function renderSettingsConfig() {
-    const meta = CONFIG_META[cfgKey];
+  function renderSettingsConfig(agent) {
+    const cfgKey = cfgKeyBy[agent];
+    const meta = configMetaFor(agent, cfgKey);
     const sec = el("div", "settings-section");
 
     // Segmented control choosing which file/view to show. Switching discards
     // the current file's unsaved edits (same as leaving the tab).
     const files = el("div", "settings-filepick");
-    for (const k of CONFIG_FILES) {
-      const b = el("button", "settings-filepick-btn" + (k === cfgKey ? " active" : ""), CONFIG_META[k].label);
+    for (const k of CONFIG_FILES[agent]) {
+      const km = configMetaFor(agent, k);
+      const b = el("button", "settings-filepick-btn" + (k === cfgKey ? " active" : ""), km.label);
       b.addEventListener("click", () => {
         if (k === cfgKey) return;
-        cfgKey = k;
-        if (CONFIG_META[k].readonly) {
+        cfgKeyBy[agent] = k;
+        if (km.readonly) {
           cfgEdit = null;
           renderSettings();
         } else {
-          loadConfig(k, (cfgEdit && cfgEdit.scope) || "project");
+          loadConfig(agent, k, km.userOnly ? "user" : (cfgEdit && cfgEdit.scope) || "project");
         }
       });
       files.appendChild(b);
@@ -6588,25 +7317,28 @@
     // First open (or a stale editor from another file): kick off a load;
     // loadConfig() re-renders (repainting this whole section) once the request
     // is in flight, so there's nothing to append here yet.
-    if (!cfgEdit || cfgEdit.key !== cfgKey) {
-      loadConfig(cfgKey, "project");
+    if (!cfgEdit || cfgEdit.key !== cfgKey || cfgEdit.agent !== agent) {
+      loadConfig(agent, cfgKey, meta.userOnly ? "user" : "project");
       return;
     }
 
     sec.appendChild(el("div", "settings-blurb", meta.blurb));
 
-    // Project / User scope toggle.
-    const toggle = el("div", "settings-scope");
-    for (const sc of ["project", "user"]) {
-      const b = el("button", "settings-scope-btn" + (cfgEdit.scope === sc ? " active" : ""), sc === "project" ? "Project" : "User");
-      b.addEventListener("click", () => {
-        if (cfgEdit.scope !== sc) loadConfig(cfgKey, sc);
-      });
-      toggle.appendChild(b);
+    // Project / User scope toggle — unless there is only one place this file
+    // can live, in which case offering the choice would be a lie.
+    if (!meta.userOnly) {
+      const toggle = el("div", "settings-scope");
+      for (const sc of ["project", "user"]) {
+        const b = el("button", "settings-scope-btn" + (cfgEdit.scope === sc ? " active" : ""), sc === "project" ? "Project" : "User");
+        b.addEventListener("click", () => {
+          if (cfgEdit.scope !== sc) loadConfig(agent, cfgKey, sc);
+        });
+        toggle.appendChild(b);
+      }
+      sec.appendChild(toggle);
     }
-    sec.appendChild(toggle);
     sec.appendChild(el("div", "settings-path", cfgEdit.scope === "project" ? meta.project : meta.user));
-    // These files are read by claude at session start, not mid-turn.
+    // These files are read at session start, not mid-turn.
     sec.appendChild(el("div", "settings-note", "Applies to new or restarted chats."));
 
     if (cfgEdit.loading) {
@@ -6868,7 +7600,8 @@
     if (!mounted) return;
     const chat = chats.get(activeId);
     if (!chat) return;
-    const mode = MODES.find((m) => m.id === chat.mode) || MODES[0];
+    const modeList = modesFor(chat.harness);
+    const mode = modeList.find((m) => m.id === chat.mode) || modeList[0];
     els.mode.textContent = mode.short || mode.label;
     els.mode.className = "mode-btn " + mode.cls;
     els.mode.title = mode.hint;
@@ -6876,10 +7609,13 @@
     els.folder.title = chat.cwd || "Choose a project folder to start";
     // Highlight the chip until a folder is picked — it's required to start.
     els.folder.classList.toggle("needs-folder", !chat.cwd);
-    const model = MODELS.find((m) => m.id === chat.model) || MODELS[0];
+    syncHarness(chat);
+    const modelList = modelsFor(chat.harness);
+    const model = modelList.find((m) => m.id === chat.model) || modelList[0];
     els.modelBtn.querySelector(".model-label").textContent = model.label;
-    const effort = EFFORTS.find((e) => e.id === chat.effort) || EFFORTS.find((e) => e.id === DEFAULT_EFFORT);
-    if (els.effortBtn) els.effortBtn.querySelector(".effort-label").textContent = effort.label;
+    const efforts = effortsFor(chat);
+    const effort = efforts.find((e) => e.id === chat.effort) || efforts.find((e) => e.id === DEFAULT_EFFORT) || efforts[0];
+    if (els.effortBtn) els.effortBtn.querySelector(".effort-label").textContent = (effort && effort.label) || "";
     // Ultracode is the one effort that reads in the brand green, on the pill too.
     if (els.effortPicker) els.effortPicker.classList.toggle("is-ultra", effort.id === "ultracode");
     refreshUsageUI();
@@ -7727,6 +8463,104 @@
     if (chat && chat.cwd) post({ type: "gitDiff", id: chat.id, cwd: chat.cwd });
   }
 
+  // ---- harness chip ----------------------------------------------------------
+  // Codex only publishes its model list once its server is up, and that costs
+  // seconds. If the panel is reopening onto Codex — the remembered choice, or a
+  // restored tab — ask for it now so the picker is filled by the time anyone
+  // looks at it, and a session opens instantly when they type.
+  function prewarmHarnesses() {
+    const wanted = new Set();
+    if (lastHarness && lastHarness !== DEFAULT_HARNESS) wanted.add(lastHarness);
+    for (const c of chats.values()) if (c.harness && c.harness !== DEFAULT_HARNESS) wanted.add(c.harness);
+    for (const agent of wanted) {
+      const chat = [...chats.values()].find((c) => c.harness === agent && c.cwd);
+      post({ type: "prewarm", agent, cwd: (chat && chat.cwd) || lastCwd || undefined });
+    }
+  }
+
+  function activeHarness() {
+    const chat = chats.get(activeId);
+    return (chat && chat.harness) || lastHarness || DEFAULT_HARNESS;
+  }
+
+  function toggleHarnessMenu() {
+    if (!els.harnessMenu) return;
+    if (menuIsOpen(els.harnessMenu)) {
+      closeMenu(els.harnessMenu);
+      return;
+    }
+    renderHarnessMenu();
+    openMenu(els.harnessMenu);
+  }
+
+  function renderHarnessMenu() {
+    const chat = chats.get(activeId);
+    const current = activeHarness();
+    els.harnessMenu.innerHTML = "";
+    els.harnessMenu.appendChild(el("div", "branch-head", "Harness"));
+    for (const h of HARNESSES) {
+      const isCur = h.id === current;
+      const row = el("div", "branch-item" + (isCur ? " current" : ""));
+      const ic = el("span", "branch-item-ic");
+      ic.innerHTML = HARNESS_ICON(h.id, 13);
+      row.appendChild(ic);
+      row.appendChild(el("span", "branch-item-name", h.label));
+      // A harness that isn't installed still shows — with the one word that
+      // says why picking it won't work yet.
+      if (!harnessReady[h.id]) row.appendChild(el("span", "branch-item-note", "Install"));
+      const chk = el("span", "branch-item-check");
+      if (isCur) chk.innerHTML = ICON("check", 13);
+      row.appendChild(chk);
+      row.addEventListener("click", () => {
+        closeMenu(els.harnessMenu);
+        if (!isCur && chat) chooseHarness(chat, h.id);
+      });
+      els.harnessMenu.appendChild(row);
+    }
+  }
+
+  // Switching agent on an empty chat is a clean slate: nothing has been said,
+  // so there is no session to kill and nothing to lose. The model, effort and
+  // mode swap to whatever this agent was last left on.
+  function chooseHarness(chat, id) {
+    if (!chat || chat.harness === id) return;
+    const hadSession = chat.started || chat.sessionId;
+    // Tell the agent we are leaving to let go of this chat, while the message
+    // still routes to it. Otherwise its session lives on, holding a thread
+    // nobody will ever speak to again.
+    if (hadSession) post({ type: "close", id: chat.id, agent: chat.harness });
+    chat.harness = id;
+    lastHarness = id;
+    const last = lastFor(id);
+    chat.model = last.model || defaultModelFor(id);
+    chat.effort = last.effort || DEFAULT_EFFORT;
+    chat.mode = last.mode || modesFor(id)[0].id;
+    clampEffort(chat);
+    savePrefs();
+    syncComposer();
+    updateSetup();
+    // A session belongs to the agent that opened it. The chat may already have
+    // one — it starts as soon as a folder is picked, before anything is typed —
+    // and that session's id means nothing to the agent we just switched to.
+    // Start over on the new one rather than talking to the old engine under a
+    // new name.
+    if (hadSession) resetChatSession(chat);
+    // Codex takes seconds to open a session. Asking for one now, while the user
+    // is still typing, is the difference between instant and stuck.
+    if (id !== DEFAULT_HARNESS) post({ type: "prewarm", agent: id, cwd: chat.cwd || undefined });
+  }
+
+  function syncHarness(chat) {
+    if (!els.harness) return;
+    const id = (chat && chat.harness) || DEFAULT_HARNESS;
+    els.harness.querySelector(".harness-label").textContent = harnessLabel(id);
+    els.harness.classList.toggle("not-installed", !harnessReady[id]);
+    els.harness.title = harnessReady[id]
+      ? `${harnessLabel(id)} runs this chat`
+      : `${harnessLabel(id)} isn't installed yet`;
+    if (els.harnessIc) els.harnessIc.innerHTML = HARNESS_ICON(id, 13);
+  }
+
   function toggleBranchMenu() {
     if (!els.branchMenu) return;
     if (menuIsOpen(els.branchMenu)) {
@@ -8079,6 +8913,9 @@
     els.folder = root.querySelector("#folder-btn");
     els.branch = root.querySelector("#branch-btn");
     els.branchMenu = root.querySelector("#branch-menu");
+    els.harness = root.querySelector("#harness-btn");
+    els.harnessMenu = root.querySelector("#harness-menu");
+    els.harnessIc = root.querySelector("#harness-ic");
     els.modelBtn = root.querySelector("#model-btn");
     els.modelMenu = root.querySelector("#model-menu");
     els.effortBtn = root.querySelector("#effort-btn");
@@ -8278,6 +9115,10 @@
       e.stopPropagation();
       toggleBranchMenu();
     });
+    els.harness.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleHarnessMenu();
+    });
     els.mode.addEventListener("click", (e) => {
       e.stopPropagation();
       toggleModeMenu();
@@ -8302,6 +9143,7 @@
     // them here is also what makes them exclusive — opening one closes the rest.
     const dropdownPairs = [
       [els.branchMenu, els.branch],
+      [els.harnessMenu, els.harness],
       [els.modeMenu, els.mode],
       [els.modelMenu, els.modelBtn],
       [els.effortMenu, els.effortBtn, effortMenuClosing],
@@ -8446,6 +9288,9 @@
     // Pull the model catalog before restoring tabs, so a tab saved on a model
     // that only exists in the remote list still resolves to its real label.
     loadModelCatalog(() => {
+      // Custom models are part of the catalog for label-resolution purposes, so
+      // they have to land before tabs are restored too.
+      loadCustomModels(() => {
       // Restore tabs (or open a first one), then render.
       loadPrefs(() => {
         if (!order.length) {
@@ -8457,6 +9302,7 @@
         for (const id of order) els.stack.appendChild(chats.get(id).messagesEl);
         renderTabs();
         setActive(activeId);
+      });
       });
     });
   }
@@ -8558,6 +9404,14 @@
           <span class="branch-label">main</span>
         </button>
         <div id="branch-menu" class="branch-menu hidden"></div>
+        <!-- Which agent runs this chat. Only reachable while the chat is empty:
+             once it has spoken, switching would mean a different session and a
+             lost transcript, and this whole row is hidden by then anyway. -->
+        <button id="harness-btn" class="harness-btn" title="Which agent runs this chat">
+          <span id="harness-ic" class="harness-ic" aria-hidden="true"></span>
+          <span class="harness-label">Claude Code</span>
+        </button>
+        <div id="harness-menu" class="harness-menu branch-menu hidden"></div>
       </div>
       <!-- Uncommitted-changes tab: a strokeless flap the same width as the
            composer box, rounded to match its top corners, tucked flush against
@@ -8601,7 +9455,7 @@
             <button id="effort-btn" class="model-btn effort-btn" title="Effort">
               <span class="effort-label">Medium</span>
             </button>
-            <!-- Effort slider: Low → Ultracode, one stop per EFFORTS entry.
+            <!-- Effort slider: one stop per rung the chosen model offers.
                  The range is continuous (step 0.001) so dragging feels smooth;
                  it magnets to the nearest stop and springs onto it on release. -->
             <div id="effort-menu" class="effort-menu pop hidden">

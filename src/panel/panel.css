@@ -482,7 +482,8 @@ button:active > .copy-swap {
 }
 
 .folder-btn,
-.branch-btn {
+.branch-btn,
+.harness-btn {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -502,7 +503,8 @@ button:active > .copy-swap {
   transition: background 0.15s, color 0.15s;
 }
 .folder-btn:hover,
-.branch-btn:hover { background: rgba(255, 255, 255, 0.09); color: var(--text-primary); }
+.branch-btn:hover,
+.harness-btn:hover { background: rgba(255, 255, 255, 0.09); color: var(--text-primary); }
 /* No folder chosen yet — the chip is the call to action before a chat can start. */
 .folder-btn.needs-folder {
   background: rgba(120, 170, 255, 0.14);
@@ -511,15 +513,36 @@ button:active > .copy-swap {
 }
 .folder-btn.needs-folder .folder-ic { color: var(--text-primary); }
 .folder-ic,
-.branch-ic { display: inline-flex; color: var(--text-secondary); transition: color 0.15s; }
+.branch-ic,
+.harness-ic { display: inline-flex; color: var(--text-secondary); transition: color 0.15s; }
 .folder-btn:hover .folder-ic,
-.branch-btn:hover .branch-ic { color: var(--text-primary); }
+.branch-btn:hover .branch-ic,
+.harness-btn:hover .harness-ic { color: var(--text-primary); }
 .folder-label,
-.branch-label {
+.branch-label,
+.harness-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Harness chip: same shape as the folder and branch chips, so the pre-chat row
+   reads as one set of controls rather than a control plus a setting. An agent
+   that isn't installed yet is dimmed, not hidden — hiding it would leave no way
+   to discover it exists. */
+.harness-btn.not-installed { color: var(--text-tertiary); }
+.harness-btn.not-installed .harness-ic { opacity: 0.6; }
+/* The list opens above its own chip, not the row's left edge. */
+.harness-menu { left: auto; right: 2px; min-width: 190px; }
+.branch-item-note {
+  margin-left: auto;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+}
+.branch-item-note + .branch-item-check { margin-left: 8px; }
 
 /* branch picker dropdown (opens upward above the chips) */
 .branch-menu {
@@ -554,6 +577,10 @@ button:active > .copy-swap {
   cursor: pointer;
   transition: background 0.12s;
 }
+/* Rows are stacked flush, so two highlights sitting next to each other read
+   as one taller block. A few pixels between them is enough to keep each
+   selection its own shape. Same rule in every picker below. */
+.branch-item + .branch-item { margin-top: 3px; }
 .branch-item:hover { background: rgba(255, 255, 255, 0.06); }
 .branch-item.current { background: rgba(255, 255, 255, 0.08); }
 .branch-item-ic { display: inline-flex; color: var(--text-tertiary); flex: 0 0 auto; }
@@ -652,10 +679,13 @@ button:active > .copy-swap {
   cursor: pointer;
   transition: background 0.12s;
 }
+.model-item + .model-item { margin-top: 3px; }
 .model-item:hover { background: rgba(255, 255, 255, 0.06); }
 .model-item.current { background: rgba(255, 255, 255, 0.08); }
 .model-item-logo { display: inline-flex; flex: 0 0 auto; }
-.model-item-logo .claude-mark { display: block; }
+.model-item-logo .claude-mark,
+.model-item-logo .harness-mark,
+.model-item-logo .ph { display: block; }
 .model-item-ic { display: inline-flex; width: 13px; flex: 0 0 auto; margin-left: auto; color: var(--text-primary); }
 .model-item-label { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
 
@@ -711,6 +741,7 @@ button:active > .copy-swap {
   cursor: pointer;
   transition: background 0.12s;
 }
+.mode-item + .mode-item { margin-top: 3px; }
 .mode-item:hover { background: rgba(255, 255, 255, 0.06); }
 .mode-item.current { background: rgba(255, 255, 255, 0.04); }
 .mode-dot {
@@ -2146,6 +2177,11 @@ code.inline.path:focus-visible {
   border-radius: 12px;
   padding: 14px 16px 16px;
   max-width: 90%;
+}
+/* An automatic re-sign-in clears its own card once the session is back. */
+.login-card.leaving {
+  opacity: 0;
+  transition: opacity 0.18s ease;
 }
 .login-title-row {
   display: flex;
@@ -4272,3 +4308,156 @@ code.inline.path:focus-visible {
 .settings-msg.ok { color: var(--control-primary); }
 .settings-msg.bad { color: var(--other-red); }
 .settings-msg.dim { color: var(--text-tertiary); }
+
+/* ---------- Settings › Models ---------- */
+/* Custom OpenAI-compatible endpoints. Rows sit in the same bordered list the
+   Plugins tab uses, so the tab reads as part of the modal rather than a page of
+   its own; the row actions stay quiet so the name and the URL lead. */
+.set-blurb { font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; line-height: 1.5; }
+.set-code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+.custom-model-list {
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.custom-model-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-secondary);
+  transition: background 0.12s;
+}
+.custom-model-row:first-child { border-top: none; }
+.custom-model-row:hover { background: rgba(255, 255, 255, 0.03); }
+.custom-model-main { min-width: 0; flex: 1 1 auto; }
+.custom-model-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.custom-model-url {
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Row actions: mini secondary buttons, borderless until hovered. */
+.custom-model-row-acts { display: flex; gap: 2px; flex: 0 0 auto; }
+.custom-model-act {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: var(--font-family);
+  font-size: 12px;
+  font-weight: 600;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.custom-model-act:hover { background: var(--control-secondary); color: var(--text-primary); }
+.custom-model-act:active { transform: scale(0.96); }
+/* Remove arms on the first click and only bites on the second. */
+.custom-model-act.danger:hover { background: rgba(239, 68, 68, 0.14); color: #f87171; }
+.custom-model-act.danger.armed { background: rgba(239, 68, 68, 0.14); color: #f87171; }
+
+/* Add row: a dashed slot under the list, taller when it stands alone as the
+   empty state. */
+.custom-model-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  margin-top: 10px;
+  padding: 9px 12px;
+  appearance: none;
+  background: transparent;
+  border: 1px dashed var(--border-primary);
+  border-radius: 10px;
+  color: var(--text-secondary);
+  font-family: var(--font-family);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.custom-model-add.solo { margin-top: 0; padding: 20px 12px; }
+.custom-model-add:hover {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: var(--control-secondary-hover);
+  color: var(--text-primary);
+}
+.custom-model-add:active { transform: scale(0.99); }
+.custom-model-add-ic { display: inline-flex; }
+
+/* Add / edit form: one card, so it reads as a single thing being filled in. */
+.custom-model-form {
+  margin-top: 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.custom-model-form-title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.set-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.set-field-label { font-size: 12px; color: var(--text-secondary); }
+.set-field-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.set-field-input {
+  width: 100%;
+  height: 32px;
+  box-sizing: border-box;
+  font-family: var(--font-family);
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  padding: 0 10px;
+  outline: none;
+  transition: border-color 0.12s;
+}
+.set-field-input.mono { font-family: var(--font-mono); }
+.set-field-input::placeholder { color: var(--text-tertiary); font-family: var(--font-family); }
+.set-field-input:focus { border-color: var(--control-secondary-hover); }
+/* The segmented Wire API control lines up with the input beside it. */
+.set-field .settings-scope { margin: 0; height: 32px; align-items: center; align-self: start; }
+.set-error { font-size: 12px; color: var(--other-red); }
+.set-error:empty { display: none; }
+.custom-model-acts { display: flex; align-items: center; gap: 8px; }
+.custom-model-cancel {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-family);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.custom-model-cancel:hover { background: var(--control-secondary); color: var(--text-primary); }
+.custom-model-cancel:active { transform: scale(0.97); }
