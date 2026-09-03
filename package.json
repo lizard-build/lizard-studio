@@ -1,7 +1,7 @@
 {
   "name": "@lizard-build/lizard-studio-host",
   "version": "1.0.25",
-  "description": "Native-messaging host installer that lets the Lizard Studio browser extension drive the local Claude Code CLI.",
+  "description": "Native-messaging host installer that lets the Lizard Studio browser extension drive the local Claude Code and Codex CLIs.",
   "type": "module",
   "author": "Dragon Labs LLC",
   "bin": {
@@ -9,6 +9,9 @@
   },
   "files": [
     "src/host/install.mjs",
+    "src/host/router.mjs",
+    "src/host/hostkit.mjs",
+    "src/host/codex-host.mjs",
     "src/host/claude-host.mjs",
     "src/host/mcp-browser.mjs",
     "src/host/skills/lizard/SKILL.md",
@@ -17,7 +20,9 @@
   ],
   "scripts": {
     "install-host": "node src/host/install.mjs install",
-    "uninstall-host": "node src/host/install.mjs uninstall"
+    "uninstall-host": "node src/host/install.mjs uninstall",
+    "test:e2e": "node test/e2e/run.mjs",
+    "test:e2e:cheap": "node test/e2e/run.mjs --cheap"
   },
   "engines": {
     "node": ">=18"

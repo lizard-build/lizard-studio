@@ -329,6 +329,11 @@ refreshBundledSkill();
 const HOST_PKG = "@lizard-build/lizard-studio-host";
 const HOST_REGISTRY = "https://registry.npmjs.org";
 const HOST_FILES = ["claude-host.mjs", "mcp-browser.mjs"];
+// Files that ship alongside us but only in newer releases: the router Chrome
+// launches, its shared plumbing, and the Codex host. They are refreshed when the
+// tarball has them and skipped when it doesn't — demanding them would turn every
+// self-update into a failure the moment this host is newer than the registry.
+const HOST_FILES_OPTIONAL = ["router.mjs", "hostkit.mjs", "codex-host.mjs"];
 
 // Minimal gzip+tar reader — pulls specific files out of an npm tarball without
 // pulling in a dependency. npm entries are regular files rooted at "package/"
@@ -372,13 +377,15 @@ async function selfUpdate(id) {
       throw new Error(`tarball integrity mismatch (${algo}) — refusing to swap`);
     }
     const wanted = HOST_FILES.map((n) => `package/src/host/${n}`);
-    const files = extractFromTarball(tgz, wanted);
-    // Every file must be present, or we'd swap in a half a runtime.
+    const optional = HOST_FILES_OPTIONAL.map((n) => `package/src/host/${n}`);
+    const files = extractFromTarball(tgz, [...wanted, ...optional]);
+    // Every required file must be present, or we'd swap in half a runtime.
     for (const w of wanted) {
       if (typeof files[w] !== "string") throw new Error("missing " + w + " in tarball");
     }
     let changed = false;
-    for (const name of HOST_FILES) {
+    const present = [...HOST_FILES, ...HOST_FILES_OPTIONAL.filter((n) => typeof files[`package/src/host/${n}`] === "string")];
+    for (const name of present) {
       const text = files[`package/src/host/${name}`];
       const dest = join(HERE, name);
       if (existsSync(dest) && readFileSync(dest, "utf8") === text) continue;

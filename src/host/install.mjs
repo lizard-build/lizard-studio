@@ -152,6 +152,8 @@ function install() {
   // time (Chrome starts the host with a minimal PATH).
   const NODE_BIN = process.execPath;
   const CLAUDE_BIN = whichBin("claude");
+  // Optional: the panel works fine with only one agent installed.
+  const CODEX_BIN = whichBin("codex");
 
   if (parseInt(process.versions.node, 10) < 18) {
     fail(`Node 18+ required (found ${process.version}). Upgrade node and re-run.`);
@@ -176,11 +178,15 @@ function install() {
   //    run so re-running the installer picks up host changes. Staged as ".tmp"
   //    first and swapped in only once ALL files are in hand — an interrupted
   //    install must not leave a mismatched claude-host/mcp-browser pair behind.
-  //    Files: the host, the browser MCP relay it hands to claude, and a bundled
-  //    fallback copy of the lizard-build/skill bootstrap skill (the host
-  //    refreshes it from upstream itself afterwards — see claude-host.mjs).
+  //    Files: the router Chrome actually launches, the two agent hosts behind
+  //    it, their shared plumbing, the browser MCP relay handed to the agent,
+  //    and a bundled fallback copy of the lizard-build/skill bootstrap skill
+  //    (the host refreshes that from upstream itself — see claude-host.mjs).
   const HOST_FILES = [
+    "router.mjs",
+    "hostkit.mjs",
     "claude-host.mjs",
+    "codex-host.mjs",
     "mcp-browser.mjs",
     "skills/lizard/SKILL.md",
     "skills/lizard/README.md",
@@ -199,7 +205,7 @@ function install() {
   //    invalid JSON (which would silently degrade the host to discovery).
   writeFileSync(
     runtime("host-config.json"),
-    JSON.stringify({ nodePath: NODE_BIN, claudePath: CLAUDE_BIN || "claude", home: homedir() }, null, 2) + "\n",
+    JSON.stringify({ nodePath: NODE_BIN, claudePath: CLAUDE_BIN || "claude", codexPath: CODEX_BIN || "", home: homedir() }, null, 2) + "\n",
   );
 
   // 2) launcher: a tiny wrapper so the manifest points at a stable executable
@@ -209,10 +215,10 @@ function install() {
   let launcherPath;
   if (IS_WIN) {
     launcherPath = runtime("launch.bat");
-    writeFileSync(launcherPath, `@echo off\r\n"${NODE_BIN}" "${runtime("claude-host.mjs")}" %*\r\n`);
+    writeFileSync(launcherPath, `@echo off\r\n"${NODE_BIN}" "${runtime("router.mjs")}" %*\r\n`);
   } else {
     launcherPath = runtime("launch.sh");
-    writeFileSync(launcherPath, `#!/bin/sh\nexec "${NODE_BIN}" "${runtime("claude-host.mjs")}" "$@"\n`);
+    writeFileSync(launcherPath, `#!/bin/sh\nexec "${NODE_BIN}" "${runtime("router.mjs")}" "$@"\n`);
     chmodSync(launcherPath, 0o755);
   }
 
@@ -256,6 +262,7 @@ function install() {
   console.log();
   console.log(`  node    : ${NODE_BIN}`);
   console.log(`  claude  : ${CLAUDE_BIN || "(not found — install @anthropic-ai/claude-code)"}`);
+  console.log(`  codex   : ${CODEX_BIN || "(not found — optional)"}`);
   console.log(`  ext ids : ${EXT_IDS.join(", ")}`);
   console.log(`  runtime : ${RUNTIME_DIR}  (log: ${join(RUNTIME_DIR, "host.log")})`);
   console.log();
