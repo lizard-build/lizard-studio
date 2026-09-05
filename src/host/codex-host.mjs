@@ -323,6 +323,19 @@ function providerConfig(p) {
   return cfg;
 }
 
+/**
+ * The `config` block both thread/start and thread/resume want: the browser MCP
+ * server, plus the provider table when the chat runs a custom model. Shared, so
+ * the two calls cannot drift apart — a resume that forgets the provider sends
+ * the custom model's name to Codex's default endpoint, and a ChatGPT account
+ * answers 400 for a name it has never heard of.
+ */
+function threadConfig(provider) {
+  const mcp = browserMcpConfig();
+  if (!mcp && !provider) return undefined;
+  return { ...(mcp ? { mcp_servers: mcp } : {}), ...providerConfig(provider) };
+}
+
 /** Returns true when a running app-server has to be replaced to see the key. */
 function ensureProviderKey(p) {
   if (!p) return false;
@@ -1328,11 +1341,11 @@ async function startSession(msg) {
   try {
     let thread;
     if (msg.resume) {
-      const mcp = browserMcpConfig();
       try {
         thread = await rpc("thread/resume", {
           threadId: msg.resume, ...profile, cwd, model: s.model || undefined,
-          config: mcp ? { mcp_servers: mcp } : undefined,
+          ...providerArgs(s.provider),
+          config: threadConfig(s.provider),
         });
       } catch (err) {
         // The id may be from another agent entirely (a tab whose harness was
@@ -1351,14 +1364,13 @@ async function startSession(msg) {
         thread = { thread: { id: spare } };
         log("used a prewarmed thread for", cwd);
       } else {
-        const mcp = browserMcpConfig();
         thread = await rpc("thread/start", {
           cwd,
           model: s.model || undefined,
           ...providerArgs(s.provider),
           ...profile,
           developerInstructions: BROWSER_HINT,
-          config: mcp || s.provider ? { ...(mcp ? { mcp_servers: mcp } : {}), ...providerConfig(s.provider) } : undefined,
+          config: threadConfig(s.provider),
         });
       }
     }

@@ -180,10 +180,12 @@ group("Codex — session, translation, controls");
 function grabFn(src, name) {
   const i = src.indexOf(`function ${name}(`);
   ok(i >= 0, `${name} is gone from the host`);
+  // Keep an `async` prefix: without it the body's `await` is a syntax error.
+  const from = src.startsWith("async ", i - 6) ? i - 6 : i;
   let depth = 0;
   for (let k = src.indexOf("{", i); k < src.length; k++) {
     if (src[k] === "{") depth++;
-    else if (src[k] === "}" && --depth === 0) return src.slice(i, k + 1);
+    else if (src[k] === "}" && --depth === 0) return src.slice(from, k + 1);
   }
   throw new Error("unbalanced " + name);
 }
@@ -270,6 +272,56 @@ await test("a reply whose item starts twice is still one message", async () => {
   const canonical = out.filter((d) => d.type === "assistant");
   equal(canonical.length, 1, `${canonical.length} canonical copies`);
   equal(canonical[0].message.id, item.id, "the canonical copy changed id — the panel dedupes on it");
+});
+
+await test("a resumed chat still knows where its custom model lives", async () => {
+  // The panel sends `provider` and `resume` together on every reconnect. A
+  // resume that dropped the provider handed Codex the custom model's name with
+  // nowhere to send it, so the turn went to the ChatGPT account instead and came
+  // back 400: "The 'local' model is not supported when using Codex with a
+  // ChatGPT account." Both calls have to carry the endpoint.
+  const src = readFileSync(join(REPO, "src", "host", "codex-host.mjs"), "utf8");
+  const calls = [];
+  const nothing = () => {};
+  const startSession = new Function(
+    "rpc", "browserMcpConfig", "existsSync", "sessions", "byThread", "openedCwds", "app",
+    "MODELS", "DEFAULT_MODEL", "BROWSER_HINT", "makeSession", "closeSession", "threadProfile",
+    "takePrewarmed", "ensureProviderKey", "restartAppServer", "startAppServer", "send", "emit",
+    "endTurnWith", "sendPrompt", "loadSkills", "schedulePrewarm", "log",
+    [
+      grabFn(src, "providerEnvKey"),
+      grabFn(src, "providerConfig"),
+      grabFn(src, "providerArgs"),
+      grabFn(src, "threadConfig"),
+      grabFn(src, "startSession"),
+      "return startSession;",
+    ].join("\n"),
+  )(
+    (method, params) => { calls.push({ method, params }); return Promise.resolve({ thread: { id: "th_new" } }); },
+    () => null,                       // no browser bridge in this harness
+    () => true,                       // every cwd exists
+    new Map(), new Map(), new Set(), { proc: { pid: 1 } },
+    [{ id: "gpt-5.6-terra" }], "gpt-5.6-terra", "",
+    (id, cwd) => ({ id, cwd, pending: [] }),
+    nothing, () => ({}), () => null, () => false,
+    async () => {}, async () => {},
+    nothing, nothing, nothing, nothing, nothing, nothing, nothing,
+  );
+
+  const provider = { id: "custom-heretic", model: "local", baseUrl: "http://127.0.0.1:8080/v1", apiKey: "k", wireApi: "responses" };
+  const msg = { type: "start", id: "c1", cwd: REPO, provider, permissionMode: "default" };
+  await startSession(msg);                          // a fresh chat
+  await startSession({ ...msg, resume: "th_old" }); // the same chat, reopened
+
+  for (const method of ["thread/start", "thread/resume"]) {
+    const call = calls.find((c) => c.method === method);
+    ok(call, `no ${method} went out`);
+    equal(call.params.model, provider.model, `${method} sent the wrong model`);
+    equal(call.params.modelProvider, provider.id, `${method} lost the provider`);
+    const table = (call.params.config || {}).model_providers || {};
+    ok(table[provider.id], `${method} carried no provider table`);
+    equal(table[provider.id].base_url, provider.baseUrl, `${method} pointed at the wrong endpoint`);
+  }
 });
 
 await test("the model catalog arrives once anything asks for Codex", async () => {
