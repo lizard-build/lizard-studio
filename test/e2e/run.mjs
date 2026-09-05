@@ -175,6 +175,19 @@ await test("a message far over Chrome's 1 MB cap is shrunk, not dropped", async 
 // ---------------------------------------------------------------------------
 group("Codex — session, translation, controls");
 
+// Lift a top-level function straight out of the host source, so the checks below
+// run against the shipped text rather than a copy of it that can drift.
+function grabFn(src, name) {
+  const i = src.indexOf(`function ${name}(`);
+  ok(i >= 0, `${name} is gone from the host`);
+  let depth = 0;
+  for (let k = src.indexOf("{", i); k < src.length; k++) {
+    if (src[k] === "{") depth++;
+    else if (src[k] === "}" && --depth === 0) return src.slice(i, k + 1);
+  }
+  throw new Error("unbalanced " + name);
+}
+
 await test("every rung the slider offers is one the model accepts", async () => {
   // Codex publishes a different ladder per model — terra runs to ultra, luna
   // stops at max, gpt-5.5 at xhigh — and the host has to send the rung the user
@@ -184,16 +197,7 @@ await test("every rung the slider offers is one the model accepts", async () => 
   // The two mapping functions are pulled out of the host source and run here,
   // so the check is against the shipped text rather than a copy of it.
   const src = readFileSync(join(REPO, "src", "host", "codex-host.mjs"), "utf8");
-  const grab = (name) => {
-    const i = src.indexOf(`function ${name}(`);
-    ok(i >= 0, `${name} is gone from the host`);
-    let depth = 0;
-    for (let k = src.indexOf("{", i); k < src.length; k++) {
-      if (src[k] === "{") depth++;
-      else if (src[k] === "}" && --depth === 0) return src.slice(i, k + 1);
-    }
-    throw new Error("unbalanced " + name);
-  };
+  const grab = (name) => grabFn(src, name);
   const MODELS = [
     { id: "gpt-5.6-terra", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
     { id: "gpt-5.6-luna", efforts: ["low", "medium", "high", "xhigh", "max"] },
@@ -217,6 +221,55 @@ await test("every rung the slider offers is one the model accepts", async () => 
   for (const m of MODELS) {
     for (const e of m.efforts) equal(map(m.id, e), e, `${m.id} lost its own rung ${e}`);
   }
+});
+
+await test("a reply whose item starts twice is still one message", async () => {
+  // Codex announces an agentMessage item when it opens and, on a custom
+  // provider, a second time when it closes — same id, now carrying the whole
+  // text, because `output_item.added` only reaches the responses wire together
+  // with `.done`. Taking that for a second message closed the block the panel
+  // was typing into and opened an empty one, which `item/completed` then filled
+  // with the entire reply: the answer printed twice, once typed and once whole.
+  //
+  // The three functions that decide this are pulled out of the host source and
+  // driven here with the notification order a real turn produced.
+  const src = readFileSync(join(REPO, "src", "host", "codex-host.mjs"), "utf8");
+  const out = [];
+  const emit = (_s, data) => out.push(data);
+  const nothing = () => {};
+  const host = new Function(
+    "emit", "nextMsgId", "usageBlock", "toolUse", "toolResult", "commandTool", "fileChangeTool", "DEFAULT_MODEL",
+    [
+      grabFn(src, "closeStream"),
+      grabFn(src, "onItemStarted"),
+      grabFn(src, "onItemCompleted"),
+      "return { onItemStarted, onItemCompleted };",
+    ].join("\n"),
+  )(emit, () => "generated", () => ({}), nothing, nothing, nothing, nothing, "codex");
+
+  const TEXT = "Привет! Чем помочь?";
+  const s = { id: "t1", streamMsgId: null, streamText: "", seq: 0, model: "custom", execOut: new Map() };
+  const item = { type: "agentMessage", id: "msg_1" };
+
+  host.onItemStarted(s, { item });
+  for (const piece of ["Привет!", " Чем", " помочь?"]) {
+    // What handleNotification does on item/agentMessage/delta.
+    s.streamText += piece;
+    emit(s, { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: piece } } });
+  }
+  host.onItemStarted(s, { item: { ...item, text: TEXT } }); // the duplicate start
+  host.onItemCompleted(s, { item: { ...item, text: TEXT } });
+
+  const starts = out.filter((d) => d.type === "stream_event" && d.event.type === "message_start");
+  equal(starts.length, 1, `one reply opened ${starts.length} messages`);
+  const streamed = out
+    .filter((d) => d.type === "stream_event" && d.event.type === "content_block_delta")
+    .map((d) => d.event.delta.text)
+    .join("");
+  equal(streamed, TEXT, "the streamed text is not the reply exactly once");
+  const canonical = out.filter((d) => d.type === "assistant");
+  equal(canonical.length, 1, `${canonical.length} canonical copies`);
+  equal(canonical[0].message.id, item.id, "the canonical copy changed id — the panel dedupes on it");
 });
 
 await test("the model catalog arrives once anything asks for Codex", async () => {

@@ -931,6 +931,16 @@ function onItemStarted(s, params) {
       // moment the user hit send — rendering it again would double it.
       break;
     case "agentMessage": {
+      // The same item can start twice, and the second start is not a second
+      // message. A custom provider on the responses wire sends
+      // `output_item.added` only once the message is finished, so the
+      // app-server announces the item at the first delta and again — fully
+      // formed — just before `item/completed`. Opening a block for that second
+      // start would close the streamed one and leave an empty replacement,
+      // which `item/completed` then fills with the whole reply through
+      // `closeStream`: the answer printed twice, once typed out and once at a
+      // stroke. Staying on the block we already have is the whole fix.
+      if (item.id && s.streamMsgId === item.id) break;
       // A message still open here never got its own completion. Close it before
       // opening the next one: the panel drops the blocks of the message it is
       // streaming the moment a new one starts, so an orphan would keep its last
