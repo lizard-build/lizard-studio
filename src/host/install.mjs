@@ -187,6 +187,7 @@ function install() {
     "hostkit.mjs",
     "claude-host.mjs",
     "codex-host.mjs",
+    "codex-spawn.mjs",
     "mcp-browser.mjs",
     "skills/lizard/SKILL.md",
     "skills/lizard/README.md",

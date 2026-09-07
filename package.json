@@ -12,6 +12,7 @@
     "src/host/router.mjs",
     "src/host/hostkit.mjs",
     "src/host/codex-host.mjs",
+    "src/host/codex-spawn.mjs",
     "src/host/claude-host.mjs",
     "src/host/mcp-browser.mjs",
     "src/host/skills/lizard/SKILL.md",

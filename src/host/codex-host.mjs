@@ -32,7 +32,7 @@
 // Nothing here is shared with claude-host.mjs beyond hostkit.mjs. That is
 // deliberate: the Claude path works, and this file is not allowed to change it.
 
-import { spawn } from "node:child_process";
+import { createCodexSpawner } from "./codex-spawn.mjs";
 import { randomBytes } from "node:crypto";
 import net from "node:net";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, renameSync } from "node:fs";
@@ -44,10 +44,11 @@ import {
 
 const log = makeLog("codex");
 const CONFIG = loadConfig();
+const codexSpawner = createCodexSpawner({ hostDir: HOST_DIR, nodePath: process.execPath, redact });
 
 // Bumped on every change the panel needs to know about. Reported in
 // `agentReady`. Claude's own HOST_VERSION is separate and untouched.
-const CODEX_HOST_VERSION = 2;
+const CODEX_HOST_VERSION = 3;
 
 // The browser bridge numbers its requests from here so the router can tell our
 // `browserResult` replies from claude's by value alone, and never has to parse
@@ -370,7 +371,7 @@ function startAppServer() {
   app.starting = new Promise((resolve, reject) => {
     let proc;
     try {
-      proc = spawn(CODEX, ["app-server"], { cwd: homedir(), env: CHILD_ENV, stdio: ["pipe", "pipe", "pipe"] });
+      proc = codexSpawner.spawn(CODEX, ["app-server"], { cwd: homedir(), env: CHILD_ENV, stdio: ["pipe", "pipe", "pipe"] });
     } catch (err) {
       app.starting = null;
       return reject(err);
@@ -2024,6 +2025,7 @@ async function cancelLogin(id) {
 // ---- lifecycle -------------------------------------------------------------------
 
 function shutdown(code) {
+  codexSpawner.close();
   try { if (app.proc) app.proc.kill("SIGTERM"); } catch { /* ignore */ }
   setTimeout(() => process.exit(code), 120).unref();
 }

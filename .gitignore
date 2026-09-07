@@ -17,3 +17,7 @@ src/host/.mcp-config-*.json
 dist/
 # Local npm pack artifact of the host
 *.tgz
+
+# Codex launchd relay and per-process tokens.
+src/host/codex-spawn-shim.mjs
+src/host/.codex-spawn-token-*
