@@ -99,6 +99,10 @@
   // is simply nothing to pick from.
   let CODEX_MODELS = [];
   let CODEX_DEFAULT_MODEL = "";
+  // `model_reasoning_effort` from the user's config.toml, if they set one. It
+  // is where the Codex CLI itself opens, so the first Codex chat opens there
+  // too. Null means each model's own default.
+  let CODEX_DEFAULT_EFFORT = null;
   const CODEX_CONTEXT_LIMITS = {};
 
   // ---- custom models --------------------------------------------------------
@@ -231,15 +235,45 @@
     low: "Low", medium: "Medium", high: "High", xhigh: "Extra",
     max: "Max", ultra: "Ultra", ultracode: "Ultracode",
   };
+  // What the tooltip says. Claude's line is ours; Codex's comes from the
+  // catalog, one sentence per rung, so the panel describes its rungs in the
+  // words Codex itself uses.
+  const CLAUDE_EFFORT_TIP = "Higher effort buys more thinking before Claude answers. Ultracode runs Extra plus multi-agent workflows.";
+  const CODEX_EFFORT_TIP = "Higher effort buys more reasoning before Codex answers. Ultra adds automatic task delegation.";
+  // The rungs that paint the slider green: Claude's Ultracode and Codex's Ultra
+  // are the same idea — top reasoning plus multi-agent work.
+  const isUltraEffort = (id) => id === "ultracode" || id === "ultra";
+  function codexRow(chat) {
+    return chat && chat.harness === "codex" ? CODEX_MODELS.find((m) => m.id === chat.model) : null;
+  }
   function effortsFor(chat) {
     if (!chat || chat.harness !== "codex") return EFFORTS;
-    const row = CODEX_MODELS.find((m) => m.id === chat.model);
+    const row = codexRow(chat);
     const ids = row && row.efforts;
     if (!ids || !ids.length) return EFFORTS;
-    return ids.map((id) => ({ id, label: EFFORT_LABELS[id] || id }));
+    return ids.map((id) => ({ id, label: EFFORT_LABELS[id] || id, hint: (row.effortInfo && row.effortInfo[id]) || "" }));
   }
   function activeEfforts() {
     return effortsFor(chats.get(activeId));
+  }
+  // The rung a chat opens on when nothing picked one. Codex has one per model
+  // (gpt-5.6-sol opens on low, codex-spark on high), and the CLI's own start
+  // honours `model_reasoning_effort` from config.toml over that — so a fresh
+  // chat does the same. Claude has one rung for every model.
+  function defaultEffortFor(chat, opts) {
+    if (!chat || chat.harness !== "codex") return DEFAULT_EFFORT;
+    const list = effortsFor(chat);
+    const has = (id) => id && list.some((e) => e.id === id);
+    const row = codexRow(chat);
+    if (opts && opts.fromConfig && has(CODEX_DEFAULT_EFFORT)) return CODEX_DEFAULT_EFFORT;
+    if (row && has(row.defaultEffort)) return row.defaultEffort;
+    if (has(DEFAULT_EFFORT)) return DEFAULT_EFFORT;
+    return list[list.length - 1].id;
+  }
+  function effortTipFor(chat, effortId) {
+    if (!chat || chat.harness !== "codex") return CLAUDE_EFFORT_TIP;
+    const rung = effortsFor(chat).find((e) => e.id === effortId);
+    return (rung && rung.hint) || CODEX_EFFORT_TIP;
   }
   // Keep a chat on a rung its model actually has — switching agent or model can
   // leave it holding one that no longer exists.
@@ -247,8 +281,7 @@
     if (!chat) return;
     const list = effortsFor(chat);
     if (list.some((e) => e.id === chat.effort)) return;
-    const fallback = list.find((e) => e.id === DEFAULT_EFFORT) || list[list.length - 1];
-    chat.effort = fallback.id;
+    chat.effort = defaultEffortFor(chat, { fromConfig: !chat.effort });
   }
 
   // Usable context window per model (tokens) — the denominator behind the
@@ -490,9 +523,12 @@
   // pinning it here would freeze a fresh install on the built-in default and
   // make models.json's defaultModel a dead field. makeChat resolves it at use
   // time.
+  // Null effort on the Codex slot for the same reason: its default depends on
+  // the model and on the user's config.toml, neither known until the catalog
+  // lands. clampEffort resolves it then.
   const lastBy = {
     claude: { model: null, effort: DEFAULT_EFFORT, mode: "auto" },
-    codex: { model: null, effort: DEFAULT_EFFORT, mode: "workspace" },
+    codex: { model: null, effort: null, mode: "workspace" },
   };
   // Which agent a brand-new chat starts on — the choice made in the empty
   // state's harness chip, carried over to the next new chat.
@@ -824,7 +860,8 @@
       cwd: opts.cwd || null,
       harness: opts.harness || lastHarness || DEFAULT_HARNESS,
       model: opts.model || lastFor(opts.harness || lastHarness).model || defaultModelFor(opts.harness || lastHarness),
-      effort: opts.effort || lastFor(opts.harness || lastHarness).effort || DEFAULT_EFFORT,
+      // May stay null on a Codex chat until the catalog arrives — see lastBy.
+      effort: opts.effort || lastFor(opts.harness || lastHarness).effort || ((opts.harness || lastHarness) === "codex" ? null : DEFAULT_EFFORT),
       mode: opts.mode || lastFor(opts.harness || lastHarness).mode,
       sessionId: opts.sessionId || null,
       slashCommands: [],
@@ -982,6 +1019,10 @@
 
   function createChat(opts, { activate = true } = {}) {
     const chat = makeChat(opts);
+    // A Codex chat may arrive with no rung (see lastBy). If the catalog is
+    // already here, settle it now so the pill and the turn agree; if not, the
+    // `models` handler does it on arrival.
+    if (chat.harness === "codex" && !chat.effort && CODEX_MODELS.length) clampEffort(chat);
     chats.set(chat.id, chat);
     order.push(chat.id);
     els.stack.appendChild(chat.messagesEl);
@@ -4905,16 +4946,28 @@
       // Codex publishes its own model list; this is where the picker learns it.
       case "models":
         if (msg.agent === "codex" && Array.isArray(msg.models) && msg.models.length) {
-          CODEX_MODELS = msg.models.map((m) => ({ id: m.id, label: m.label || m.id, efforts: m.efforts || [] }));
+          CODEX_MODELS = msg.models.map((m) => ({
+            id: m.id,
+            label: m.label || m.id,
+            efforts: m.efforts || [],
+            effortInfo: m.effortInfo || {},
+            defaultEffort: m.defaultEffort || null,
+            upgrade: m.upgrade || null,
+          }));
           CODEX_DEFAULT_MODEL = msg.defaultModel || CODEX_MODELS[0].id;
+          CODEX_DEFAULT_EFFORT = msg.defaultEffort || null;
           for (const m of msg.models) if (m.contextWindow) CODEX_CONTEXT_LIMITS[m.id] = m.contextWindow;
           // A chat started before the list arrived is holding a placeholder.
           for (const c of chats.values()) {
             if (c.harness !== "codex") continue;
             if (!c.model) c.model = CODEX_DEFAULT_MODEL;
             // The ladder is only known now, so a chat may be sitting on a rung
-            // its model doesn't have.
+            // its model doesn't have — or on none at all.
             clampEffort(c);
+          }
+          if (!lastBy.codex.effort) {
+            const active = chats.get(activeId);
+            if (active && active.harness === "codex") lastBy.codex.effort = active.effort;
           }
           syncComposer();
           if (els.modelMenu && !els.modelMenu.classList.contains("hidden")) renderModelMenu();
@@ -6249,7 +6302,16 @@
   function applyModel(chat, modelId) {
     const list = modelsFor(chat.harness);
     const m = list.find((x) => x.id === modelId) || list[0];
+    const switched = chat.model !== m.id;
     chat.model = m.id;
+    if (chat.harness === "codex" && switched && codexRow(chat)) {
+      // Codex moves the effort with the model: pick a new one and you land on
+      // its default rung, the way the CLI's /model picker does. Sol opens on
+      // low, codex-spark on high — carrying medium across would run Sol above
+      // where Codex runs it.
+      chat.effort = defaultEffortFor(chat);
+      lastFor(chat.harness).effort = chat.effort;
+    }
     // Models don't share a ladder: moving from terra to gpt-5.5 drops two rungs
     // off the top, and the chat can't stay on one of them.
     clampEffort(chat);
@@ -6282,6 +6344,9 @@
           : window.RKClaudeHTML(15);
       row.appendChild(logo);
       row.appendChild(el("span", "model-item-label", it.label));
+      // Codex flags a model on its way out and names the one to move to. Its
+      // own note goes on hover — the row still works until the date passes.
+      if (it.upgrade && it.upgrade.note) row.title = it.upgrade.note.trim();
       const ic = el("span", "model-item-ic");
       if (isCur) ic.innerHTML = ICON("check", 13);
       row.appendChild(ic);
@@ -6316,7 +6381,7 @@
   // ---- effort picker (mirrors the model picker) ------------------------------
   function applyEffort(chat, effortId) {
     const list = effortsFor(chat);
-    const e = list.find((x) => x.id === effortId) || list.find((x) => x.id === DEFAULT_EFFORT) || list[0];
+    const e = list.find((x) => x.id === effortId) || list.find((x) => x.id === defaultEffortFor(chat)) || list[0];
     chat.effort = e.id;
     lastFor(chat.harness).effort = e.id;
     savePrefs();
@@ -6363,7 +6428,7 @@
   function renderEffortMenu() {
     const chat = chats.get(activeId);
     syncEffortLadder();
-    const id = (chat && chat.effort) || DEFAULT_EFFORT;
+    const id = (chat && chat.effort) || defaultEffortFor(chat);
     const idx = Math.max(0, activeEfforts().findIndex((e) => e.id === id));
     setEffortValue(idx, false);
   }
@@ -6388,10 +6453,15 @@
     const rungs = activeEfforts();
     els.effortRange.setAttribute("aria-valuetext", (rungs[index] || {}).label || "");
     els.effortMenu.style.setProperty("--effort-progress", String(value / max));
-    const label = (rungs[index] || {}).label || "";
+    const rung = rungs[index] || {};
+    const label = rung.label || "";
     if (index !== prev) swapEffortLabel(label, index > prev, animateLabel);
     else if (!els.effortLevel.textContent) els.effortLevel.textContent = label;
-    setEffortUltra(index === max);
+    // The tooltip follows the handle: on Codex it is that rung's own sentence.
+    if (els.effortTip) els.effortTip.textContent = effortTipFor(chats.get(activeId), rung.id);
+    // Green is for the multi-agent rung, not for whichever rung comes last —
+    // gpt-5.5's ladder ends at Extra, and Extra is not Ultra.
+    setEffortUltra(isUltraEffort(rung.id));
   }
 
   // Pulls the handle toward the nearest stop while dragging, so it settles on a
@@ -7614,10 +7684,11 @@
     const model = modelList.find((m) => m.id === chat.model) || modelList[0];
     els.modelBtn.querySelector(".model-label").textContent = model.label;
     const efforts = effortsFor(chat);
-    const effort = efforts.find((e) => e.id === chat.effort) || efforts.find((e) => e.id === DEFAULT_EFFORT) || efforts[0];
+    const effort = efforts.find((e) => e.id === chat.effort) || efforts.find((e) => e.id === defaultEffortFor(chat)) || efforts[0];
     if (els.effortBtn) els.effortBtn.querySelector(".effort-label").textContent = (effort && effort.label) || "";
-    // Ultracode is the one effort that reads in the brand green, on the pill too.
-    if (els.effortPicker) els.effortPicker.classList.toggle("is-ultra", effort.id === "ultracode");
+    // The multi-agent rung reads in the brand green, on the pill too — Claude's
+    // Ultracode, Codex's Ultra.
+    if (els.effortPicker) els.effortPicker.classList.toggle("is-ultra", isUltraEffort(effort.id));
     refreshUsageUI();
     setRunningUI(chat.turnRunning);
     syncBashMode(chat);
@@ -8533,7 +8604,8 @@
     lastHarness = id;
     const last = lastFor(id);
     chat.model = last.model || defaultModelFor(id);
-    chat.effort = last.effort || DEFAULT_EFFORT;
+    // Null on Codex: clampEffort lands it on the model's own rung.
+    chat.effort = last.effort || (id === "codex" ? null : DEFAULT_EFFORT);
     chat.mode = last.mode || modesFor(id)[0].id;
     clampEffort(chat);
     savePrefs();
@@ -8927,6 +8999,7 @@
     els.effortLevel = els.effortMenu.querySelector(".effort-level");
     els.effortLevelOut = els.effortMenu.querySelector(".effort-level-out");
     els.effortHelp = els.effortMenu.querySelector(".effort-help");
+    els.effortTip = els.effortMenu.querySelector(".effort-tip");
     els.usageBtn = root.querySelector("#usage-btn");
     els.usageMenu = root.querySelector("#usage-menu");
     els.mode = root.querySelector("#mode-btn");

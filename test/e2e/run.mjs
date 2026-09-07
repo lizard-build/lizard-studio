@@ -389,8 +389,33 @@ await test("the model catalog arrives once anything asks for Codex", async () =>
   const cat = await p.wait((m) => m.type === "models" && m.agent === "codex", 60000, "model catalog");
   ok(Array.isArray(cat.models) && cat.models.length, "empty catalog");
   ok(cat.defaultModel, "no default model");
+  ok(cat.models.some((m) => m.id === cat.defaultModel), "the default model is not in the catalog");
   ok(cat.models.every((m) => m.id && m.label), "a catalog row is missing id or label");
+  // Each model opens on its own rung, and Codex says which. The panel's slider
+  // starts there, not on a rung of ours.
+  for (const m of cat.models) {
+    ok(m.defaultEffort && m.efforts.includes(m.defaultEffort), `${m.id} has no default effort among its rungs`);
+    ok(m.effortInfo && m.efforts.every((e) => typeof m.effortInfo[e] === "string"), `${m.id} is missing a sentence for a rung`);
+  }
+  // config.toml's `model_reasoning_effort` rides along when the user set one;
+  // otherwise null, meaning "the model's own".
+  ok(cat.defaultEffort === null || typeof cat.defaultEffort === "string", "defaultEffort has the wrong shape");
   p.kill();
+});
+
+await test("the default model follows config.toml, then Codex's flag, then the top of the list", async () => {
+  const src = readFileSync(join(REPO, "src", "host", "codex-host.mjs"), "utf8");
+  const pick = new Function(`${grabFn(src, "pickDefaultModel")}\nreturn pickDefaultModel;`)();
+  const rows = [
+    { id: "gpt-6-astra", isDefault: true },
+    { id: "gpt-5.6-sol", isDefault: false },
+    { id: "gpt-5.5", isDefault: false },
+  ];
+  equal(pick(rows, "gpt-5.5"), "gpt-5.5", "config.toml's model should win");
+  equal(pick(rows, "gpt-4o"), "gpt-6-astra", "a config model the catalog lacks falls to Codex's flag");
+  equal(pick(rows, null), "gpt-6-astra", "no config model falls to Codex's flag");
+  equal(pick(rows.map((r) => ({ ...r, isDefault: false })), null), "gpt-6-astra", "no flag falls to the top of the list");
+  equal(pick([], null), "", "an empty catalog has no default");
 });
 
 await test("someone else's MCP servers stay out of the conversation", async () => {

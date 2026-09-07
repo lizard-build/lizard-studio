@@ -488,10 +488,41 @@ async function shipBundledSkills() {
 
 let MODELS = [];
 let DEFAULT_MODEL = "";
+// The rung Codex itself would start on: `model_reasoning_effort` from the
+// user's config.toml, when they set one. Null means "the model's own default".
+let DEFAULT_EFFORT = null;
+
+/**
+ * What the user's config.toml says about model and effort. Codex reads it on
+ * every start — the CLI and the desktop app both open on `model` and
+ * `model_reasoning_effort` from there — so the panel should open on the same.
+ */
+async function readConfigDefaults() {
+  try {
+    const res = await rpc("config/read", {}, 15000);
+    const cfg = (res && res.config) || {};
+    return { model: cfg.model || null, effort: cfg.model_reasoning_effort || null };
+  } catch (err) {
+    log("config/read failed:", err && err.message);
+    return { model: null, effort: null };
+  }
+}
+
+/**
+ * The model a Codex session opens on when nobody picks one. config.toml's
+ * `model` first — that is what the CLI does — then the row Codex flags as its
+ * default, then the top of the list.
+ */
+function pickDefaultModel(rows, configModel) {
+  if (configModel && rows.some((m) => m.id === configModel)) return configModel;
+  const flagged = rows.find((m) => m.isDefault);
+  if (flagged) return flagged.id;
+  return rows.length ? rows[0].id : "";
+}
 
 async function loadModels() {
   try {
-    const res = await rpc("model/list", {}, 30000);
+    const [res, cfg] = await Promise.all([rpc("model/list", {}, 30000), readConfigDefaults()]);
     const rows = (res && res.data) || [];
     MODELS = rows
       .filter((m) => m && m.id && !m.hidden)
@@ -499,11 +530,27 @@ async function loadModels() {
         id: m.id,
         label: m.displayName || m.id,
         description: m.description || "",
+        isDefault: !!m.isDefault,
+        // Each rung, in Codex's order, with the sentence Codex itself uses for
+        // it — the panel shows that rather than a description of its own.
         efforts: (m.supportedReasoningEfforts || []).map((e) => e.reasoningEffort).filter(Boolean),
+        effortInfo: Object.fromEntries(
+          (m.supportedReasoningEfforts || [])
+            .filter((e) => e && e.reasoningEffort)
+            .map((e) => [e.reasoningEffort, e.description || ""]),
+        ),
+        // Not one default for the catalog: gpt-5.6-sol opens on low, codex-spark
+        // on high, most of the rest on medium.
+        defaultEffort: m.defaultReasoningEffort || null,
+        // A model on its way out, and what Codex wants used instead.
+        upgrade: m.upgradeInfo
+          ? { model: m.upgradeInfo.model || m.upgrade || null, note: m.upgradeInfo.migrationMarkdown || "", retirementAt: m.upgradeInfo.retirementAt || null }
+          : null,
       }));
-    if (!DEFAULT_MODEL && MODELS.length) DEFAULT_MODEL = MODELS[0].id;
-    if (MODELS.length) send({ type: "models", agent: "codex", models: MODELS, defaultModel: DEFAULT_MODEL });
-    log("model catalog:", MODELS.length, "models, default", DEFAULT_MODEL);
+    if (!DEFAULT_MODEL) DEFAULT_MODEL = pickDefaultModel(MODELS, cfg.model);
+    DEFAULT_EFFORT = cfg.effort;
+    if (MODELS.length) send({ type: "models", agent: "codex", models: MODELS, defaultModel: DEFAULT_MODEL, defaultEffort: DEFAULT_EFFORT });
+    log("model catalog:", MODELS.length, "models, default", DEFAULT_MODEL, "effort", DEFAULT_EFFORT || "(model's own)");
   } catch (err) {
     log("model/list failed:", err && err.message);
   }
