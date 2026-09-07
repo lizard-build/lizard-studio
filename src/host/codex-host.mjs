@@ -58,11 +58,8 @@ const CODEX_BID_BASE = 1_000_000_000;
 // changed their mind and let it go.
 const PREWARM_TTL_MS = 10 * 60 * 1000;
 
-// A running turn normally says something — a token, a command, a plan step — at
-// least every few seconds. If one goes completely silent for this long, nothing
-// is coming: the panel would spin on a turn that is never going to end. Any
-// notification for the thread resets the clock, so a long tool call or a slow
-// model is never cut short; only true silence trips it.
+// A quiet turn can still be doing work. Warn after this interval; only a
+// completion, an acknowledged interrupt or process exit can end the turn.
 const TURN_SILENCE_MS = 5 * 60 * 1000;
 
 // ---- panel I/O ---------------------------------------------------------------
@@ -208,6 +205,8 @@ bridgeServer.listen(0, "127.0.0.1", () => {
 });
 
 function browserRequest(op, args, session) {
+  const owner = [...sessions.values()].find((s) => s.browserSession === session);
+  if (!owner) return Promise.resolve({ ok: false, error: "This browser session is no longer open." });
   return new Promise((resolve) => {
     const bid = nextBid++;
     const timer = setTimeout(() => {
@@ -217,7 +216,7 @@ function browserRequest(op, args, session) {
     }, 30000);
     timer.unref?.();
     browserPending.set(bid, { resolve, timer });
-    send({ type: "browser", bid, op, args, session });
+    send({ type: "browser", bid, op, args, session: owner.id });
   });
 }
 
@@ -230,13 +229,13 @@ function resolveBrowser(msg) {
 }
 
 /** The MCP registration handed to every thread, when the relay is available. */
-function browserMcpConfig() {
+function browserMcpConfig(session) {
   if (!bridgePort || !existsSync(MCP_RELAY)) return null;
   return {
     browser: {
       command: process.execPath,
       args: [MCP_RELAY],
-      env: { RK_BRIDGE_PORT: String(bridgePort), RK_BRIDGE_TOKEN: BRIDGE_TOKEN, RK_BRIDGE_SESSION: "codex" },
+      env: { RK_BRIDGE_PORT: String(bridgePort), RK_BRIDGE_TOKEN: BRIDGE_TOKEN, RK_BRIDGE_SESSION: session },
     },
   };
 }
@@ -331,8 +330,8 @@ function providerConfig(p) {
  * the custom model's name to Codex's default endpoint, and a ChatGPT account
  * answers 400 for a name it has never heard of.
  */
-function threadConfig(provider) {
-  const mcp = browserMcpConfig();
+function threadConfig(provider, session) {
+  const mcp = browserMcpConfig(session);
   if (!mcp && !provider) return undefined;
   return { ...(mcp ? { mcp_servers: mcp } : {}), ...providerConfig(provider) };
 }
@@ -342,6 +341,7 @@ function ensureProviderKey(p) {
   if (!p) return false;
   const name = providerEnvKey(p.id);
   if (CHILD_ENV[name] === (p.apiKey || "")) return false;
+  if (app.proc && anyTurnRunning()) throw new Error("Wait for the running Codex turns to finish before changing a provider key.");
   CHILD_ENV[name] = p.apiKey || "";
   return !!app.proc;
 }
@@ -404,6 +404,7 @@ function startAppServer() {
 
     proc.on("exit", (code, signal) => {
       log("app-server exited code=", code, "signal=", signal);
+      if (app.proc !== proc) return;
       app.ready = false;
       app.proc = null;
       app.starting = null;
@@ -413,12 +414,14 @@ function startAppServer() {
       }
       app.pending.clear();
       prewarmed.clear();
-      // Every live chat just lost its engine. Tell each one so the panel stops
-      // spinning; the next prompt starts a fresh server.
+      // Keep the panel's saved thread id. Mark each session stopped so the next
+      // prompt resumes that history through a new server.
       for (const s of sessions.values()) {
         if (s.running) endTurnWith(s, true, "Codex stopped unexpectedly.");
+        if (s.threadId) byThread.delete(s.threadId);
         s.threadId = null;
         s.started = false;
+        send({ type: "exit", agent: "codex", id: s.id, code: code ?? 1 });
       }
     });
 
@@ -629,7 +632,7 @@ function effortForModel(modelId, effort) {
 
 const sessions = new Map(); // panel chat id -> session
 const byThread = new Map(); // codex thread id -> panel chat id
-const prewarmed = new Map(); // cwd -> { threadId, at }
+const prewarmed = new Map(); // cwd -> { threadId, browserSession, at }
 
 function makeSession(id, cwd) {
   return {
@@ -640,6 +643,7 @@ function makeSession(id, cwd) {
     effort: null,
     mode: "default",
     threadId: null,
+    browserSession: "codex-" + randomBytes(16).toString("hex"),
     turnId: null,
     started: false,
     running: false,
@@ -663,10 +667,8 @@ function makeSession(id, cwd) {
   };
 }
 
-// Temporary: writes the item ids Codex uses and the stream envelope we build
-// from them into host.log, so a turn that renders wrong can be read back rather
-// than guessed at. Remove once the custom-provider tail is settled.
-const TRACE = true;
+// Enable only while debugging locally: stream tracing includes reply text.
+const TRACE = false;
 
 /** Chrome-side event: one Claude-shaped stream-json object for this chat. */
 function emit(s, data) {
@@ -690,15 +692,17 @@ function nextMsgId(s) {
   return `codex_msg_${s.threadId || s.id}_${s.seq}`;
 }
 
-// The usage block the panel reads to size its context ring. Codex reports the
-// thread total; Claude reports the input side of the latest call, which is the
-// same number for our purposes — what the model is carrying right now.
+// Convert the latest Codex usage to the input fields the panel expects.
 function usageBlock(s) {
   const u = s.usage || {};
+  // Codex includes cache hits in inputTokens; Claude's input_tokens excludes
+  // them. The panel adds the three input fields, so subtract cache hits here.
+  const input = Math.max(0, u.inputTokens || 0);
+  const cached = Math.min(input, Math.max(0, u.cachedInputTokens || 0));
   return {
-    input_tokens: u.inputTokens || 0,
+    input_tokens: input - cached,
     output_tokens: u.outputTokens || 0,
-    cache_read_input_tokens: u.cachedInputTokens || 0,
+    cache_read_input_tokens: cached,
     cache_creation_input_tokens: 0,
   };
 }
@@ -889,14 +893,17 @@ function handleNotification(method, params) {
       break;
     }
     case "turn/completed": {
-      if (!s) break;
-      endTurnWith(s, false);
+      if (!s || !s.running) break;
+      const turn = params.turn || {};
+      if (s.turnId && turn.id && s.turnId !== turn.id) break;
+      const error = turn.error || {};
+      endTurnWith(s, turn.status === "failed", error.message || (turn.status === "interrupted" ? "Stopped." : ""));
       break;
     }
     case "thread/status/changed": {
       if (!s) break;
-      // The only thing the panel needs from this is "still working".
-      if (params.status && params.status.type === "idle" && s.running) endTurnWith(s, false);
+      // Only turn/completed carries the outcome. An idle status can precede
+      // it; ending here would turn a failed turn into a successful one.
       break;
     }
 
@@ -951,31 +958,20 @@ function handleNotification(method, params) {
       // climbs to "94% full" after a handful of exchanges on a fresh session.
       // Claude's usage block is per-message, and `last` is its counterpart —
       // which also makes the two harnesses read the same.
-      s.usage = tu.last || tu.total || null;
+      s.usage = tu.last || null;
       // The window the model is actually running with. Nothing else knows it —
       // the model catalog doesn't carry one — so the panel's context ring has
       // no real denominator until this arrives.
-      if (tu.modelContextWindow && tu.modelContextWindow !== s.contextWindow) {
-        s.contextWindow = tu.modelContextWindow;
-        if (s.model) send({ type: "contextWindow", agent: "codex", model: s.model, window: s.contextWindow });
-      }
+      s.contextWindow = Number.isFinite(tu.modelContextWindow) && tu.modelContextWindow > 0 ? tu.modelContextWindow : null;
+      // Usage often arrives after the final assistant item. Send it directly
+      // instead of waiting for another message to carry the new count.
+      send({ type: "contextUsage", agent: "codex", id: s.id, window: s.contextWindow, usage: s.usage ? usageBlock(s) : null });
+      // Keep older panels working, with the chat id for clients that scope it.
+      if (s.model && s.contextWindow) send({ type: "contextWindow", agent: "codex", id: s.id, model: s.model, window: s.contextWindow });
       break;
     }
     case "account/rateLimits/updated": {
-      const rl = params.rateLimits || {};
-      const primary = rl.primary || {};
-      // At the cap the server can send a snapshot with no window in it. A
-      // meter reading "null%, resets 1 Jan 1970" is worse than no meter.
-      if (typeof primary.usedPercent !== "number") break;
-      send({
-        type: "planUsage",
-        agent: "codex",
-        usedPercent: typeof primary.usedPercent === "number" ? primary.usedPercent : null,
-        resetsAt: primary.resetsAt || null,
-        windowMins: primary.windowDurationMins || null,
-        planType: rl.planType || null,
-        reached: rl.rateLimitReachedType || null,
-      });
+      publishPlanUsage(params);
       break;
     }
 
@@ -1004,6 +1000,8 @@ function handleNotification(method, params) {
       break;
     }
     case "account/login/completed": {
+      rateLimits.clear();
+      send({ type: "planUsage", agent: "codex", limits: [] });
       loginId = null;
       // No chat owns a sign-in, so it lands on whichever one asked — or on all
       // of them, which is the same thing when only one card is open.
@@ -1176,9 +1174,9 @@ function touchTurn(s) {
   if (s.asks.size) return;
   s.silenceTimer = setTimeout(() => {
     if (!s.running) return;
-    log("turn went silent for", TURN_SILENCE_MS, "ms — ending it");
-    send({ type: "error", id: s.id, message: "Codex stopped responding. The turn was ended." });
-    endTurnWith(s, true, "Codex stopped responding.");
+    s.silenceTimer = null;
+    log("turn went silent for", TURN_SILENCE_MS, "ms — still awaiting completion");
+    send({ type: "error", id: s.id, message: "Codex hasn't sent an update for five minutes. The turn is still running." });
   }, TURN_SILENCE_MS);
   s.silenceTimer.unref?.();
 }
@@ -1187,6 +1185,11 @@ function endTurnWith(s, isError, message) {
   if (s.silenceTimer) { clearTimeout(s.silenceTimer); s.silenceTimer = null; }
   if (!s.running && !isError) return;
   s.running = false;
+  for (const reqId of s.asks.keys()) {
+    send({ type: "permissionCancel", id: s.id, requestId: reqId });
+    rpcReplyError(reqId, "turn ended");
+  }
+  s.asks.clear();
   // Close anything still showing a spinner — an interrupted turn leaves tool
   // cards open, and a card that pulses forever reads as a hung session.
   for (const id of [...s.openTools]) {
@@ -1294,6 +1297,8 @@ function handleServerRequest(reqId, method, params) {
       rpcReplyError(reqId, "unsupported request: " + method);
       break;
   }
+  // Once an ask is registered, stop the silence timer until the user replies.
+  touchTurn(s);
 }
 
 function answerPermission(msg) {
@@ -1331,7 +1336,7 @@ function answerPermission(msg) {
       for (const q of ask.params.questions || []) {
         const picked = given[q.question];
         if (picked == null) continue;
-        answers[q.id] = { answers: String(picked).split(", ").filter(Boolean) };
+        answers[q.id] = { answers: Array.isArray(picked) ? picked.map(String) : [String(picked)] };
       }
       rpcReply(msg.requestId, { answers });
       break;
@@ -1429,9 +1434,14 @@ async function startSession(msg) {
   try {
     if (ensureProviderKey(s.provider)) await restartAppServer();
     await startAppServer();
+    if (sessions.get(id) !== s) return;
   } catch (err) {
     log("app-server start failed:", err && err.message);
+    s.opening = false;
+    s.pending.length = 0;
     send({ type: "error", id, message: `Couldn't start Codex: ${err && err.message}` });
+    endTurnWith(s, true, "Couldn't start Codex.");
+    send({ type: "exit", agent: "codex", id, code: 1, quiet: true });
     return;
   }
 
@@ -1443,14 +1453,12 @@ async function startSession(msg) {
         thread = await rpc("thread/resume", {
           threadId: msg.resume, ...profile, cwd, model: s.model || undefined,
           ...providerArgs(s.provider),
-          config: threadConfig(s.provider),
+          config: threadConfig(s.provider, s.browserSession),
         });
       } catch (err) {
-        // The id may be from another agent entirely (a tab whose harness was
-        // switched), or a thread the user has since deleted. Neither is worth
-        // stranding the tab over — open a fresh one and carry on.
-        log("resume failed for", msg.resume, "—", err && err.message, "— starting fresh");
-        thread = null;
+        // A failed resume must not silently discard the conversation. Keep
+        // the saved thread id so a later retry can restore the same history.
+        throw new Error(`Couldn't resume this chat: ${err && err.message}`);
       }
     }
     if (!thread) {
@@ -1459,7 +1467,8 @@ async function startSession(msg) {
       // wrong endpoint.
       const spare = msg.resume || s.provider ? null : takePrewarmed(cwd);
       if (spare) {
-        thread = { thread: { id: spare } };
+        thread = { thread: { id: spare.threadId } };
+        s.browserSession = spare.browserSession;
         log("used a prewarmed thread for", cwd);
       } else {
         thread = await rpc("thread/start", {
@@ -1468,12 +1477,16 @@ async function startSession(msg) {
           ...providerArgs(s.provider),
           ...profile,
           developerInstructions: BROWSER_HINT,
-          config: threadConfig(s.provider),
+          config: threadConfig(s.provider, s.browserSession),
         });
       }
     }
     s.threadId = (thread && thread.thread && thread.thread.id) || null;
     if (!s.threadId) throw new Error("Codex didn't return a thread id");
+    if (sessions.get(id) !== s) {
+      rpc("thread/unsubscribe", { threadId: s.threadId }, 8000).catch(() => {});
+      return;
+    }
     byThread.set(s.threadId, id);
     s.started = true;
     s.opening = false;
@@ -1481,12 +1494,9 @@ async function startSession(msg) {
     log("thread start failed:", err && err.message);
     s.opening = false;
     send({ type: "error", id, message: `Couldn't open a Codex session: ${err && err.message}` });
-    // Anything the user typed while we were opening has nowhere to go. Say so
-    // once and close the turn, rather than leaving a spinner running.
-    if (s.pending.length) {
-      s.pending.length = 0;
-      endTurnWith(s, true, "The session couldn't be opened.");
-    }
+    s.pending.length = 0;
+    endTurnWith(s, true, "The session couldn't be opened.");
+    send({ type: "exit", agent: "codex", id, code: 1, quiet: true });
     return;
   }
 
@@ -1564,7 +1574,7 @@ function takePrewarmed(cwd) {
   prewarmed.delete(cwd);
   if (Date.now() - spare.at > PREWARM_TTL_MS) return null;
   if (byThread.has(spare.threadId)) return null;
-  return spare.threadId;
+  return spare;
 }
 
 let prewarmTimer = null;
@@ -1590,7 +1600,8 @@ async function runPrewarm(cwd) {
   if (!CODEX || prewarmed.has(cwd) || anyTurnRunning()) return;
   try {
     await startAppServer();
-    const mcp = browserMcpConfig();
+    const browserSession = "codex-" + randomBytes(16).toString("hex");
+    const mcp = browserMcpConfig(browserSession);
     const res = await rpc("thread/start", {
       cwd,
       ...threadProfile("default"),
@@ -1600,7 +1611,7 @@ async function runPrewarm(cwd) {
     }, 90000);
     const threadId = res && res.thread && res.thread.id;
     if (threadId) {
-      prewarmed.set(cwd, { threadId, at: Date.now() });
+      prewarmed.set(cwd, { threadId, browserSession, at: Date.now() });
       log("prewarmed a thread for", cwd);
     }
   } catch (err) {
@@ -1645,7 +1656,11 @@ async function sendPrompt(msg) {
       await rpc("turn/steer", { threadId: s.threadId, expectedTurnId: s.turnId, input });
       return;
     } catch (err) {
-      log("steer failed, falling back to a new turn:", err && err.message);
+      log("steer failed:", err && err.message);
+      if (s.running) {
+        send({ type: "error", id: s.id, message: `Couldn't send this correction: ${err && err.message}` });
+        return;
+      }
     }
   }
 
@@ -1672,8 +1687,8 @@ async function interrupt(msg) {
   if (!s || !s.threadId) return;
   // `respawn: false`: the thread survives an interrupt, so the panel must not
   // gate events waiting for a restart that will never happen.
-  send({ type: "interrupted", id: s.id, respawn: false });
   if (!s.turnId) {
+    send({ type: "interrupted", id: s.id, respawn: false });
     endTurnWith(s, false, "Stopped.");
     return;
   }
@@ -1681,13 +1696,17 @@ async function interrupt(msg) {
     await rpc("turn/interrupt", { threadId: s.threadId, turnId: s.turnId }, 15000);
   } catch (err) {
     log("interrupt failed:", err && err.message);
+    send({ type: "error", id: s.id, message: "Couldn't confirm that Codex stopped. The turn may still be running." });
+    return;
   }
+  send({ type: "interrupted", id: s.id, respawn: false });
   endTurnWith(s, false, "Stopped.");
 }
 
 function closeSession(id, opts) {
   const s = sessions.get(id);
   if (!s) return;
+  if (s.silenceTimer) clearTimeout(s.silenceTimer);
   for (const reqId of s.asks.keys()) {
     send({ type: "permissionCancel", id, requestId: reqId });
     rpcReplyError(reqId, "session closed");
@@ -1832,24 +1851,36 @@ function handle(msg) {
   }
 }
 
+const rateLimits = new Map();
+
+function publishPlanUsage(payload, replace = false) {
+  if (replace) rateLimits.clear();
+  const buckets = payload.rateLimitsByLimitId;
+  if (buckets && typeof buckets === "object") {
+    for (const [id, value] of Object.entries(buckets)) if (value) rateLimits.set(id, { ...value, limitId: value.limitId || id });
+  } else if (payload.rateLimits) {
+    const value = payload.rateLimits;
+    rateLimits.set(value.limitId || "codex", value);
+  }
+  const limits = [...rateLimits.values()];
+  const legacy = rateLimits.get("codex") || limits[0] || {};
+  const primary = legacy.primary || {};
+  send({
+    type: "planUsage", agent: "codex", limits,
+    usedPercent: Number.isFinite(primary.usedPercent) ? primary.usedPercent : null,
+    resetsAt: primary.resetsAt || null, windowMins: primary.windowDurationMins || null,
+    planType: legacy.planType || null, reached: legacy.rateLimitReachedType || null,
+  });
+}
+
 async function refreshPlanUsage() {
   try {
     await startAppServer();
     const res = await rpc("account/rateLimits/read", {}, 20000);
-    const rl = (res && res.rateLimits) || {};
-    const primary = rl.primary || {};
-    if (typeof primary.usedPercent !== "number") return;
-    send({
-      type: "planUsage",
-      agent: "codex",
-      usedPercent: typeof primary.usedPercent === "number" ? primary.usedPercent : null,
-      resetsAt: primary.resetsAt || null,
-      windowMins: primary.windowDurationMins || null,
-      planType: rl.planType || null,
-      reached: rl.rateLimitReachedType || null,
-    });
+    publishPlanUsage(res || {}, true);
   } catch (err) {
     log("rateLimits/read failed:", err && err.message);
+    send({ type: "planUsage", agent: "codex", error: "Couldn't refresh usage." });
   }
 }
 

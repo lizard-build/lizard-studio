@@ -1,5 +1,15 @@
 # End-to-end tests
 
+## Codex regression checks
+
+Run `npm test` for the host protocol and inline renderer checks. These replace
+OS boundaries and do not touch a live account, browser, or user files.
+
+With the local server below running, open
+`http://127.0.0.1:8791/test/e2e/panel.html?regressions=codex` for the panel checks.
+Read `window.__test.codexResult` for the result and `window.__test.errors`
+for failures. File clicks go to the test recorder.
+
 Two harnesses, because the panel and the hosts fail in different ways.
 
 ## Protocol tests — `run.mjs`

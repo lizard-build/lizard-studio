@@ -150,6 +150,11 @@
       if (seed) {
         try { store.rkChatV2 = JSON.parse(decodeURIComponent(seed)); } catch (_) {}
       }
+      const codexRegression = new URLSearchParams(location.search).get("regressions") === "codex";
+      if (codexRegression) store.rkChatV2 = {
+        activeId: "audit-a", lastHarness: "codex",
+        tabs: ["audit-a", "audit-b"].map((id) => ({ id, title: id === "audit-a" ? "Codex audit" : "Second chat", harness: "codex", model: "test-model", cwd: "/test/project", mode: "workspace" })),
+      };
     </script>
 
     <script>
@@ -170,6 +175,15 @@
         window.RKChat.mount(document.getElementById("bed"));
         window.RKChat.activate && window.RKChat.activate();
         window.__test.mounted = true;
+        if (codexRegression) {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement("script");
+            script.src = "codex-panel.js?t=" + stamp;
+            script.onload = resolve; script.onerror = reject;
+            document.body.appendChild(script);
+          });
+          window.__test.codexResult = await window.runCodexPanelTests();
+        }
       })().catch((err) => window.__test.errors.push(String(err.message)));
     </script>
   </body>

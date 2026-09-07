@@ -169,10 +169,6 @@
     if (/[&<>|*?`$;()\n]/.test(s) || /\s-/.test(s)) return "";
     // A URL is a link already — the pass below turns it into one.
     if (/^[a-z][a-z\d+.-]*:\/\//i.test(s)) return "";
-    // The emphasis pass below rewrites the whole string, so a name the italic
-    // rule would bite (/tmp/_draft_.md) can't be trusted to survive into the
-    // attribute intact.
-    if (/\b_[^_\n]+_\b/.test(s)) return "";
     // Rooted paths are unmistakable, so they may carry spaces (~/Desktop/My notes.md).
     // A bare root ("/", "~/", "./") names nothing worth opening.
     if (/^(~[\\/]|\.{1,2}[\\/]|\/|[A-Za-z]:[\\/])/.test(s)) return /[^~./\\]/.test(s) ? s : "";
@@ -182,36 +178,58 @@
 
   // ---- inline markdown ------------------------------------------------------
   // `code`, **bold**, *italic*, [text](url). Input is raw; output is escaped+safe.
-  function inlineMarkdown(text) {
-    let html = escapeHtml(text);
-    html = html.replace(/`([^`]+)`/g, (_, c) => {
-      // `c` is already escaped, and filePath() rejects anything holding an
-      // entity — so the path is safe to put in an attribute as-is.
-      const path = pathLinks ? filePath(c) : "";
-      return path
-        ? `<code class="inline path" data-path="${path}" role="link" tabindex="0" title="Open ${path}">${c}</code>`
-        : `<code class="inline">${c}</code>`;
-    });
-    html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    html = html.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-    html = html.replace(/\b_([^_\n]+)_\b/g, "<em>$1</em>");
-    // Links: only absolute http(s) URLs are linkified — relative and any other
-    // scheme (javascript:, data:, …) are left as inert escaped text.
-    html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, t, u) => {
-      return `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`;
-    });
-    // Bare URLs the model didn't wrap in [text](url) syntax. Walk the string
-    // matching either a full tag or a bare URL; tags (including hrefs already
-    // built above) pass through untouched so we never double-wrap.
-    html = html.replace(/(<[^>]+>)|(https?:\/\/[^\s<]+)/g, (m, tag, url) => {
-      if (tag) return tag;
-      // Trailing sentence punctuation isn't part of the URL — peel it off.
-      const trail = url.match(/[).,!?;:]+$/);
-      const clean = trail ? url.slice(0, -trail[0].length) : url;
-      const rest = trail ? trail[0] : "";
-      return `<a href="${clean}" target="_blank" rel="noopener noreferrer">${clean}</a>${rest}`;
-    });
-    return html;
+  function emphasis(text) {
+    return escapeHtml(text)
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+      .replace(/\b_([^_\n]+)_\b/g, "<em>$1</em>");
+  }
+
+  function markdownPath(destination) {
+    let path = destination.trim().replace(/^<([\s\S]*)>$/, "$1");
+    try { path = decodeURI(path); } catch { return ""; }
+    path = path.replace(/(?:#L\d+(?:C\d+)?(?:-L?\d+)?|:\d+(?::\d+)?)$/, "");
+    // Explicit file links may contain spaces and parentheses. Schemes and
+    // network paths stay inert; the native host receives only a local path.
+    if (!path || /[\x00-\x1f\x7f]/.test(path) || /^(?:\/\/|\\\\)/.test(path)) return "";
+    if (/^[a-z][a-z\d+.-]*:/i.test(path) && !/^[a-z]:[\\/]/i.test(path)) return "";
+    return /[\\/]/.test(path) || /^[^\s]+\.[a-z\d]+$/i.test(path) ? path : "";
+  }
+
+  function inlineMarkdown(text, links = true) {
+    const source = String(text == null ? "" : text);
+    // Render each token once. Later emphasis/URL passes must never rewrite
+    // code contents, file paths, href attributes, or an existing link label.
+    const tokens = /`([^`]+)`|\[([^\]\n]+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))*)\)|(https?:\/\/[^\s<>`]+)/g;
+    let html = "";
+    let cursor = 0;
+    for (const match of source.matchAll(tokens)) {
+      html += emphasis(source.slice(cursor, match.index));
+      const [raw, code, label, destination, url] = match;
+      if (code !== undefined) {
+        const path = links && pathLinks ? filePath(code) : "";
+        html += path
+          ? `<code class="inline path" data-path="${escapeHtml(path)}" role="link" tabindex="0" title="Open ${escapeHtml(path)}">${escapeHtml(code)}</code>`
+          : `<code class="inline">${escapeHtml(code)}</code>`;
+      } else if (label !== undefined && links) {
+        const target = destination.trim().replace(/^<([\s\S]*)>$/, "$1");
+        const title = inlineMarkdown(label, false);
+        if (/^https?:\/\/[^\s]+$/i.test(target)) {
+          html += `<a href="${escapeHtml(target)}" target="_blank" rel="noopener noreferrer">${title}</a>`;
+        } else {
+          const path = pathLinks ? markdownPath(target) : "";
+          html += path
+            ? `<a class="path" data-path="${escapeHtml(path)}" role="link" tabindex="0" title="Open ${escapeHtml(path)}">${title}</a>`
+            : escapeHtml(raw);
+        }
+      } else if (url && links) {
+        let clean = url.replace(/[.,!?;:]+$/, "");
+        while (clean.endsWith(")") && (clean.match(/\)/g) || []).length > (clean.match(/\(/g) || []).length) clean = clean.slice(0, -1);
+        html += `<a href="${escapeHtml(clean)}" target="_blank" rel="noopener noreferrer">${escapeHtml(clean)}</a>${escapeHtml(url.slice(clean.length))}`;
+      } else html += emphasis(raw);
+      cursor = match.index + raw.length;
+    }
+    return html + emphasis(source.slice(cursor));
   }
 
   // ---- block markdown -> element -------------------------------------------
