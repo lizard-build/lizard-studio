@@ -114,7 +114,13 @@ await test("killing the Codex host leaves Claude untouched", async () => {
   await p.wait((m) => m.type === "ready", 20000, "ready");
   await p.wait((m) => m.type === "agentReady" && m.agent === "codex", 20000, "codex ready");
 
-  execSync("pkill -f 'codex-host.mjs' || true");
+  // Only the host under this test's own router. This used to be
+  // `pkill -f codex-host.mjs`, which took every Codex host on the machine —
+  // including the one behind the user's live panel, whose chat then died
+  // mid-turn with "This Codex session isn't running."
+  const hostPid = execSync(`pgrep -P ${p.proc.pid} -f codex-host.mjs`).toString().trim().split("\n")[0];
+  ok(hostPid, "no codex host running under this router");
+  process.kill(Number(hostPid), "SIGTERM");
   const gone = await p.wait((m) => m.type === "agentExit" && m.agent === "codex", 15000, "agentExit");
   ok(gone, "no agentExit after the codex host died");
   equal(p.exited, null, "the router died with its secondary host");
