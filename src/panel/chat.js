@@ -468,7 +468,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 24;
+  const EXPECTED_HOST_VERSION = 25;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -4774,13 +4774,13 @@
     const chat = msg.id ? chats.get(msg.id) : null;
     switch (msg.type) {
       case "ready":
-        hostReady = true;
+        hostReady = (msg.version || 0) >= EXPECTED_HOST_VERSION;
         harnessReady.claude = msg.ok !== false;
         // The chip is drawn before any host has spoken, so it starts out
         // assuming nothing is installed. This is the moment that stops being
         // true — repaint it, or it sits dimmed for a working agent.
         syncComposer();
-        prewarmHarnesses();
+        if (hostReady) prewarmHarnesses();
         home = msg.home || home;
         hostUser = msg.user || hostUser;
         hostVersion = msg.version || 0;
@@ -4811,6 +4811,7 @@
             hostUpdatePending = false; // gave up — let the recheck resume
             hostUpdateManual();
           }, HOST_UPDATE_GRACE_MS);
+          break;
         }
         // Host is linked but the `claude` CLI isn't installed — surface the real
         // "Install Claude Code" onboarding step (platform-aware) and keep polling.
@@ -5242,6 +5243,7 @@
 
   // ---- session control ------------------------------------------------------
   function startChatSession(chat, resume) {
+    if (!hostReady) return;
     // Never spawn a session in an unspecified directory — wait for an explicit
     // folder pick. The empty-state setup chips stay visible so the user knows.
     if (!chat.cwd) {

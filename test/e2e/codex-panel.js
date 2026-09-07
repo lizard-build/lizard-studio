@@ -9,7 +9,10 @@ window.runCodexPanelTests = async function () {
   const emit = (msg) => t.emit(msg);
   const event = (data) => emit({ type: "event", id: "audit-a", data });
   emit({ type: "ready", ok: true, version: 24, home: "/test", user: "Test" });
-  emit({ type: "agentReady", agent: "codex", ok: true, version: 1 });
+  check("an older host enters the update flow", t.posted("selfUpdate").length === 1);
+  check("an older host cannot start a chat", t.posted("start").length === 0);
+  emit({ type: "ready", ok: true, version: 25, home: "/test", user: "Test" });
+  emit({ type: "agentReady", agent: "codex", ok: true, version: 2 });
   emit({ type: "models", agent: "codex", defaultModel: "test-model", models: [{ id: "test-model", label: "Test model", contextWindow: 258400, efforts: ["high"], defaultEffort: "high" }] });
   for (const id of ["audit-a", "audit-b"]) emit({ type: "event", id, data: { type: "system", subtype: "init", agent: "codex", session_id: id, model: "test-model", cwd: "/test/project" } });
   t.click("#usage-btn");

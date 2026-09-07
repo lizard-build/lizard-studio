@@ -47,7 +47,7 @@ const CONFIG = loadConfig();
 
 // Bumped on every change the panel needs to know about. Reported in
 // `agentReady`. Claude's own HOST_VERSION is separate and untouched.
-const CODEX_HOST_VERSION = 1;
+const CODEX_HOST_VERSION = 2;
 
 // The browser bridge numbers its requests from here so the router can tell our
 // `browserResult` replies from claude's by value alone, and never has to parse

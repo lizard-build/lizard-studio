@@ -53,9 +53,9 @@ its 86.1k numerator; that needs the original usage event.
 
 - `npm test`: 15 tests passed. They load the shipped host and replace only OS
   boundaries, so they do not start a CLI, touch account files or spend tokens.
-- `test/e2e/panel.html?regressions=codex`: 14 checks passed in a browser,
+- `test/e2e/panel.html?regressions=codex`: 16 checks passed in a browser,
   using the real panel and renderer. Checks cover links, keyboard use, counts,
-  two-chat isolation, quotas, old host messages, and duplicate streamed text.
+  two-chat isolation, quotas, old host messages, host updates, and duplicate streamed text.
 - The installed **Codex CLI 0.153.4** generated its app-server schema. The
   thread sandbox names and the usage/request fields match that schema.
 - A live, read-only app-server check returned **7 models, 2 quota buckets and
@@ -81,14 +81,15 @@ These are code findings, not claims that the screenshots hit them:
 | P2 | MCP elicitation is declined; unsupported server request types return an error. | Add explicit UI flows for supported forms and tool requests. Keep unsupported requests visible. |
 | P2 | Image and other non-text MCP results are omitted from tool output. Rich Codex artifacts have no full renderer. | Add output types one at a time, with local file and image checks. |
 | P2 | Model reroutes, verification requests and several newer item types have no panel UI. | Compare the installed schema with a supported-event list in CI. |
-| P2 | New panel code and host code ship separately. Existing host-version checks do not require this new usage protocol. | Set a protocol requirement when scheduling the release; verify an old installed host updates before relying on the new counters. |
 
 ## Release
 
 The host and extension both need an update. A push to `main` touching
 `src/host/**` or `package.json` triggers `.github/workflows/publish-host.yml`
 and publishes to npm. The extension needs its own package and release.
-Keep this change on a review branch until release approval.
+Release approved on 7 September 2026. Extension 1.0.8 requires host protocol 25
+(bundled Codex protocol 2), so an older installed host enters the existing
+update flow before the panel starts a session.
 
 The required `~/.claude/lizard-naming.md` file was absent, and a search found
 no copy. This change keeps the existing product name and adds no brand claims.
