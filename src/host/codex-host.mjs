@@ -1616,8 +1616,13 @@ async function restartSession(msg) {
     model: msg.model || s.model,
     // `provider` has to be forwarded explicitly: the restart rebuilds the
     // session from scratch, and without it a custom model would quietly fall
-    // back to the default endpoint.
-    provider: msg.provider || s.provider || undefined,
+    // back to the default endpoint. But a restart that names a model is the
+    // panel's whole current choice, provider included — it sends the two
+    // together, and leaves `provider` out when the model is one of Codex's own.
+    // Falling back to the session's old provider there kept a chat on its
+    // custom endpoint after the user had switched to a catalog model: the
+    // picker said GPT-6-Astra, the thread still ran on the custom server.
+    provider: msg.provider || (msg.model ? undefined : s.provider) || undefined,
     effort: msg.effort || s.effort,
     permissionMode: msg.permissionMode || s.mode,
     resume,

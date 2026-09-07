@@ -324,6 +324,62 @@ await test("a resumed chat still knows where its custom model lives", async () =
   }
 });
 
+await test("switching from a custom model to a catalog one leaves the custom endpoint", async () => {
+  // The panel sends its whole current choice on a restart: the model, and the
+  // provider only when that model is a custom one. restartSession used to fall
+  // back to the session's old provider whenever the message carried none, so a
+  // chat moved from Heretic to GPT-6-Astra kept starting threads on the Heretic
+  // server — the picker said one thing, the rollout said `custom-heretic`.
+  const src = readFileSync(join(REPO, "src", "host", "codex-host.mjs"), "utf8");
+  const calls = [];
+  const nothing = () => {};
+  const sessions = new Map();
+  const restartSession = new Function(
+    "rpc", "browserMcpConfig", "existsSync", "sessions", "byThread", "openedCwds", "app",
+    "MODELS", "DEFAULT_MODEL", "BROWSER_HINT", "makeSession", "closeSession", "threadProfile",
+    "takePrewarmed", "ensureProviderKey", "restartAppServer", "startAppServer", "send", "emit",
+    "endTurnWith", "sendPrompt", "loadSkills", "schedulePrewarm", "log",
+    [
+      grabFn(src, "providerEnvKey"),
+      grabFn(src, "providerConfig"),
+      grabFn(src, "providerArgs"),
+      grabFn(src, "threadConfig"),
+      grabFn(src, "startSession"),
+      grabFn(src, "restartSession"),
+      "return restartSession;",
+    ].join("\n"),
+  )(
+    (method, params) => { calls.push({ method, params }); return Promise.resolve({ thread: { id: "th_" + calls.length } }); },
+    () => null, () => true,
+    sessions, new Map(), new Set(), { proc: { pid: 1 } },
+    [{ id: "gpt-6-astra" }, { id: "gpt-5.6-terra" }], "gpt-5.6-terra", "",
+    (id, cwd) => ({ id, cwd, pending: [] }),
+    nothing, () => ({}), () => null, () => false,
+    async () => {}, async () => {},
+    nothing, nothing, nothing, nothing, nothing, nothing, nothing,
+  );
+
+  // A live session on the custom model, as startSession leaves it.
+  const provider = { id: "custom-heretic", model: "local", baseUrl: "http://127.0.0.1:8080/v1", apiKey: "k", wireApi: "responses" };
+  sessions.set("c1", { id: "c1", cwd: REPO, threadId: "th_old", model: "local", provider, effort: "max", mode: "default", pending: [] });
+
+  // The user picks GPT-6-Astra: the panel names the model and sends no provider.
+  await restartSession({ type: "restartSession", id: "c1", model: "gpt-6-astra", effort: "max", permissionMode: "default" });
+
+  const call = calls.find((c) => c.method === "thread/resume" || c.method === "thread/start");
+  ok(call, "no thread call went out");
+  equal(call.params.model, "gpt-6-astra", "the restart kept the custom model's name");
+  equal(call.params.modelProvider, undefined, "the restart kept the custom provider");
+  ok(!((call.params.config || {}).model_providers), "the restart still carried the custom provider table");
+
+  // The other way round still works: naming the custom model brings its provider.
+  calls.length = 0;
+  await restartSession({ type: "restartSession", id: "c1", model: "custom-heretic", provider, effort: "max", permissionMode: "default" });
+  const back = calls.find((c) => c.method === "thread/resume" || c.method === "thread/start");
+  ok(back, "no thread call went out on the way back");
+  equal(back.params.modelProvider, provider.id, "switching back to the custom model lost its provider");
+});
+
 await test("the model catalog arrives once anything asks for Codex", async () => {
   const p = panel();
   await p.wait((m) => m.type === "agentReady" && m.agent === "codex", 20000, "codex ready");
