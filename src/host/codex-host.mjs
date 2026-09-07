@@ -251,6 +251,7 @@ const app = {
   ready: false,
   nextId: 1,
   pending: new Map(), // jsonrpc id -> { resolve, reject, timer }
+  codexHome: null, // where this Codex keeps its files, from the handshake
 };
 
 function appSend(obj) {
@@ -433,7 +434,8 @@ function startAppServer() {
       appSend({ method: "initialized", params: {} });
       app.ready = true;
       app.starting = null;
-      log("app-server ready, codexHome=", info && info.codexHome);
+      app.codexHome = (info && info.codexHome) || null;
+      log("app-server ready, codexHome=", app.codexHome);
       loadModels();
       shipBundledSkills();
       resolve();
@@ -501,11 +503,57 @@ async function readConfigDefaults() {
   try {
     const res = await rpc("config/read", {}, 15000);
     const cfg = (res && res.config) || {};
-    return { model: cfg.model || null, effort: cfg.model_reasoning_effort || null };
+    return {
+      model: cfg.model || null,
+      effort: cfg.model_reasoning_effort || null,
+      // `model_context_window`: the one way to run a model above its stock
+      // window. Codex caps it at the model's max.
+      contextWindow: Number.isFinite(cfg.model_context_window) && cfg.model_context_window > 0 ? cfg.model_context_window : null,
+    };
   } catch (err) {
     log("config/read failed:", err && err.message);
-    return { model: null, effort: null };
+    return { model: null, effort: null, contextWindow: null };
   }
+}
+
+/**
+ * The window sizes Codex keeps for each model, from the catalog it caches on
+ * disk next to its config. model/list doesn't carry them, yet the panel's
+ * context ring needs a denominator before the first turn reports one.
+ * Returns slug -> { window, max, percent }; empty when the file isn't there.
+ */
+function readModelWindows(codexHome) {
+  try {
+    const raw = JSON.parse(readFileSync(join(codexHome || CODEX_HOME, "models_cache.json"), "utf8"));
+    const rows = Array.isArray(raw) ? raw : (raw && raw.models) || [];
+    const out = {};
+    for (const m of rows) {
+      if (!m || !m.slug || !m.context_window) continue;
+      out[m.slug] = {
+        window: m.context_window,
+        max: m.max_context_window || m.context_window,
+        percent: Number.isFinite(m.effective_context_window_percent) ? m.effective_context_window_percent : 100,
+      };
+    }
+    return out;
+  } catch (err) {
+    log("models_cache.json unreadable:", err && err.message);
+    return {};
+  }
+}
+
+/**
+ * The window Codex will actually report for a model, before it reports one.
+ * Codex takes config.toml's `model_context_window` when set, never above the
+ * model's max, and then keeps only its effective share: gpt-6-astra reads
+ * 258,400 stock (272k × 95%), and 828,400 with any override at or past its
+ * 872k ceiling. The API's raw 1M+ window never appears — Codex leaves the
+ * rest for the reply.
+ */
+function modelWindow(sizes, override) {
+  if (!sizes || !sizes.window) return null;
+  const base = override ? Math.min(override, sizes.max || sizes.window) : sizes.window;
+  return Math.floor((base * sizes.percent) / 100);
 }
 
 /**
@@ -524,6 +572,7 @@ async function loadModels() {
   try {
     const [res, cfg] = await Promise.all([rpc("model/list", {}, 30000), readConfigDefaults()]);
     const rows = (res && res.data) || [];
+    const windows = readModelWindows(app.codexHome);
     MODELS = rows
       .filter((m) => m && m.id && !m.hidden)
       .map((m) => ({
@@ -531,6 +580,8 @@ async function loadModels() {
         label: m.displayName || m.id,
         description: m.description || "",
         isDefault: !!m.isDefault,
+        // The ring's denominator until the first turn reports the live one.
+        contextWindow: modelWindow(windows[m.model || m.id], cfg.contextWindow),
         // Each rung, in Codex's order, with the sentence Codex itself uses for
         // it — the panel shows that rather than a description of its own.
         efforts: (m.supportedReasoningEfforts || []).map((e) => e.reasoningEffort).filter(Boolean),

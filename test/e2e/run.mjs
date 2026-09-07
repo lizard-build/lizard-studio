@@ -400,7 +400,23 @@ await test("the model catalog arrives once anything asks for Codex", async () =>
   // config.toml's `model_reasoning_effort` rides along when the user set one;
   // otherwise null, meaning "the model's own".
   ok(cat.defaultEffort === null || typeof cat.defaultEffort === "string", "defaultEffort has the wrong shape");
+  // The ring needs a denominator before the first turn, and it has to be
+  // Codex's — read from the catalog Codex caches on disk, not a number of ours.
+  for (const m of cat.models) ok(m.contextWindow > 100000, `${m.id} has no usable context window before a turn (${m.contextWindow})`);
   p.kill();
+});
+
+await test("the pre-turn context window is the one Codex will report", async () => {
+  // Two readings taken from a live gpt-6-astra turn: 258,400 with nothing in
+  // config.toml, 828,400 with model_context_window set past the model's max.
+  const src = readFileSync(join(REPO, "src", "host", "codex-host.mjs"), "utf8");
+  const win = new Function(`${grabFn(src, "modelWindow")}\nreturn modelWindow;`)();
+  const astra = { window: 272000, max: 872000, percent: 95 };
+  equal(win(astra, null), 258400, "stock window");
+  equal(win(astra, 1050000), 828400, "an override past the cap lands on the cap");
+  equal(win(astra, 500000), 475000, "an override under the cap is honoured");
+  equal(win({ window: 128000, max: 128000, percent: 95 }, 1050000), 121600, "codex-spark cannot grow");
+  equal(win(undefined, null), null, "a model the cache lacks has no number");
 });
 
 await test("the default model follows config.toml, then Codex's flag, then the top of the list", async () => {

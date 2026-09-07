@@ -306,8 +306,10 @@
   let DEFAULT_CONTEXT_LIMIT = DEFAULT_CONTEXT_LIMIT_FALLBACK;
   function contextLimit(chat) {
     if (!chat) return DEFAULT_CONTEXT_LIMIT;
-    // Codex reports the window it is actually using, per model, once a turn has
-    // run. Until then there is nothing better than the shared default.
+    // Codex's own number per model: the catalog seeds it from the sizes Codex
+    // keeps on disk (Astra 258,400 stock — 272k less the share Codex reserves;
+    // more when config.toml raises model_context_window, never past its 872k
+    // cap), and the first turn's report replaces it with the live one.
     if (chat.harness === "codex") return CODEX_CONTEXT_LIMITS[chat.model] || DEFAULT_CONTEXT_LIMIT;
     return CONTEXT_LIMITS[chat.model] || DEFAULT_CONTEXT_LIMIT;
   }
