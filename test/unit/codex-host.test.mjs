@@ -19,7 +19,7 @@ async function host() {
   const noop = () => {};
   const fs = { existsSync: () => true, readFileSync: () => "{}", writeFileSync: noop, mkdirSync: noop, copyFileSync: noop, renameSync: noop };
   const imports = {
-    "node:child_process": { spawn: () => { throw new Error("spawn blocked in test"); } },
+    "./codex-spawn.mjs": { createCodexSpawner: () => ({ spawn: () => { throw new Error("spawn blocked in test"); }, close: noop }) },
     "node:crypto": crypto, "node:path": path, "node:fs": fs,
     "node:net": { default: { createServer: () => server } },
     "node:os": { homedir: () => "/test/home" },

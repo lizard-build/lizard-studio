@@ -335,7 +335,7 @@ const HOST_FILES = ["claude-host.mjs", "mcp-browser.mjs"];
 // launches, its shared plumbing, and the Codex host. They are refreshed when the
 // tarball has them and skipped when it doesn't — demanding them would turn every
 // self-update into a failure the moment this host is newer than the registry.
-const HOST_FILES_OPTIONAL = ["router.mjs", "hostkit.mjs", "codex-host.mjs"];
+const HOST_FILES_OPTIONAL = ["router.mjs", "hostkit.mjs", "codex-host.mjs", "codex-spawn.mjs"];
 
 // Minimal gzip+tar reader — pulls specific files out of an npm tarball without
 // pulling in a dependency. npm entries are regular files rooted at "package/"
