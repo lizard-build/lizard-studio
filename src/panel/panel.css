@@ -2077,6 +2077,8 @@ body.chat-menu-open .la-layer {
 .md-list li { margin: 2px 0; }
 .md a { color: var(--other-blue); text-decoration: none; }
 .md a:hover { text-decoration: underline; }
+.md a.path { cursor: pointer; overflow-wrap: anywhere; }
+.md a.path:focus-visible { outline: 1px solid currentColor; outline-offset: 3px; }
 
 /* GFM tables */
 .md-table {

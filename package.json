@@ -19,6 +19,7 @@
     "src/host/skills/lizard/skills.sh.json"
   ],
   "scripts": {
+    "test": "node --experimental-vm-modules --test test/unit/*.test.mjs",
     "install-host": "node src/host/install.mjs install",
     "uninstall-host": "node src/host/install.mjs uninstall",
     "test:e2e": "node test/e2e/run.mjs",

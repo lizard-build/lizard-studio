@@ -310,7 +310,7 @@
     // keeps on disk (Astra 258,400 stock — 272k less the share Codex reserves;
     // more when config.toml raises model_context_window, never past its 872k
     // cap), and the first turn's report replaces it with the live one.
-    if (chat.harness === "codex") return CODEX_CONTEXT_LIMITS[chat.model] || DEFAULT_CONTEXT_LIMIT;
+    if (chat.harness === "codex") return (chat.codexContextModel === chat.model && chat.codexContextWindow) || CODEX_CONTEXT_LIMITS[chat.model] || null;
     return CONTEXT_LIMITS[chat.model] || DEFAULT_CONTEXT_LIMIT;
   }
 
@@ -435,7 +435,7 @@
   // there is nothing to probe and nothing to parse — the host just tells us.
   // Kept apart from usageState because these are two different accounts: mixing
   // their rows in one list would read as one plan with four windows.
-  const codexUsage = { rows: [], at: 0 };
+  const codexUsage = { rows: [], at: 0, fetching: false, error: "" };
   // Labels the last probe reported, persisted so the popover's skeleton rows
   // match the real set on a cold start. How many windows a plan has (and their
   // names) varies by account, so guessing a fixed list makes the menu jump in
@@ -468,7 +468,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 24;
+  const EXPECTED_HOST_VERSION = 25;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -919,6 +919,9 @@
       // latest main-chain API call; ctxTokens adds its output streamed so far.
       ctxBase: 0,
       ctxTokens: 0,
+      codexContextModel: null,
+      codexContextWindow: null,
+      codexContextKnown: false,
       statusWord: "",
       statusWordAt: 0,
       // Composer "!" bash mode — a local shell escape hatch (see runBash). When
@@ -2434,6 +2437,13 @@
   // chat.usageProbe gate) so nothing lands in the transcript and the turn UI
   // never flips. `force` bypasses the throttle (used when the popover opens).
   function refreshUsage(force) {
+    const active = chats.get(activeId);
+    if (active && active.harness === "codex") {
+      if (!connected || codexUsage.fetching || customModel(active.model)) return;
+      if (!force && Date.now() - codexUsage.at < USAGE_THROTTLE_MS) return;
+      codexUsage.fetching = post({ type: "planUsage", agent: "codex", id: active.id });
+      return;
+    }
     if (usageState.fetching) return;
     if (!connected || !hostReady) return;
     if (!force && Date.now() - usageState.at < USAGE_THROTTLE_MS) return;
@@ -4660,6 +4670,7 @@
       port = null;
       connected = false;
       hostReady = false;
+      codexUsage.fetching = false;
       for (const c of chats.values()) {
         c.started = false;
         if (c.turnRunning) {
@@ -4763,13 +4774,13 @@
     const chat = msg.id ? chats.get(msg.id) : null;
     switch (msg.type) {
       case "ready":
-        hostReady = true;
+        hostReady = (msg.version || 0) >= EXPECTED_HOST_VERSION;
         harnessReady.claude = msg.ok !== false;
         // The chip is drawn before any host has spoken, so it starts out
         // assuming nothing is installed. This is the moment that stops being
         // true — repaint it, or it sits dimmed for a working agent.
         syncComposer();
-        prewarmHarnesses();
+        if (hostReady) prewarmHarnesses();
         home = msg.home || home;
         hostUser = msg.user || hostUser;
         hostVersion = msg.version || 0;
@@ -4800,6 +4811,7 @@
             hostUpdatePending = false; // gave up — let the recheck resume
             hostUpdateManual();
           }, HOST_UPDATE_GRACE_MS);
+          break;
         }
         // Host is linked but the `claude` CLI isn't installed — surface the real
         // "Install Claude Code" onboarding step (platform-aware) and keep polling.
@@ -4977,21 +4989,43 @@
         break;
       // Codex's plan limits, sent after every turn — no probe, no parsing.
       case "planUsage":
-        if (msg.agent === "codex" && typeof msg.usedPercent === "number") {
-          const window = msg.windowMins ? describeWindow(msg.windowMins) : "Plan usage";
-          codexUsage.rows = [{
-            label: window,
-            pct: Math.max(0, Math.min(100, msg.usedPercent)),
-            resets: msg.resetsAt ? describeReset(msg.resetsAt) : "",
+        if (msg.agent === "codex") {
+          codexUsage.fetching = false;
+          codexUsage.error = msg.error || "";
+          if (msg.error) { refreshUsageUI(); break; }
+          const limits = Array.isArray(msg.limits) ? msg.limits : [{
+            primary: { usedPercent: msg.usedPercent, windowDurationMins: msg.windowMins, resetsAt: msg.resetsAt },
           }];
+          codexUsage.rows = limits.flatMap((limit) => [limit.primary, limit.secondary]
+            .filter((window) => window && Number.isFinite(window.usedPercent))
+            .map((window) => ({
+              label: (window.windowDurationMins ? describeWindow(window.windowDurationMins) : "Plan usage")
+                + (limit.limitName || (limit.limitId && limit.limitId !== "codex") ? " · " + (limit.limitName || limit.limitId) : ""),
+              pct: Math.max(0, Math.min(100, window.usedPercent)),
+              resetsAt: window.resetsAt,
+            })));
           codexUsage.at = Date.now();
+          refreshUsageUI();
+        }
+        break;
+      case "contextUsage":
+        if (chat && msg.agent === "codex" && chat.harness === "codex") {
+          chat.codexContextModel = chat.model;
+          chat.codexContextWindow = Number.isFinite(msg.window) && msg.window > 0 ? msg.window : null;
+          chat.codexContextKnown = !!msg.usage;
+          chat.ctxBase = 0;
+          chat.ctxTokens = 0;
+          noteCtxUsage(chat, msg.usage);
           refreshUsageUI();
         }
         break;
       // The real context window, learned once a turn has actually run.
       case "contextWindow":
         if (msg.agent === "codex" && msg.model && msg.window) {
-          CODEX_CONTEXT_LIMITS[msg.model] = msg.window;
+          if (chat && chat.harness === "codex") {
+            chat.codexContextModel = chat.model;
+            chat.codexContextWindow = msg.window;
+          } else if (!msg.id) CODEX_CONTEXT_LIMITS[msg.model] = msg.window;
           refreshUsageUI();
         }
         break;
@@ -5020,10 +5054,10 @@
           clearPermCards(chat);
           liftSuppress(chat); // no respawn coming — don't leave the event gate shut
           if (chat.turnRunning) endTurn(chat, null);
-          if (chat.suppressExitNote) {
+          if (chat.suppressExitNote || msg.quiet) {
             chat.suppressExitNote = false;
           } else {
-            systemNote(chat, `Claude session ended (code ${msg.code}).`, "warn");
+            systemNote(chat, `${harnessLabel(chat.harness || DEFAULT_HARNESS)} session ended (code ${msg.code}).`, "warn");
           }
         }
         break;
@@ -5209,6 +5243,7 @@
 
   // ---- session control ------------------------------------------------------
   function startChatSession(chat, resume) {
+    if (!hostReady) return;
     // Never spawn a session in an unspecified directory — wait for an explicit
     // folder pick. The empty-state setup chips stay visible so the user knows.
     if (!chat.cwd) {
@@ -5576,6 +5611,9 @@
     chat.transcriptAgentId = null;
     chat.ctxBase = 0;
     chat.ctxTokens = 0;
+    chat.codexContextKnown = false;
+    chat.codexContextWindow = null;
+    chat.codexContextModel = null;
     // Local shell runs go with the wiped conversation — stop any in-flight ones
     // and drop the persisted history (their cards were just removed above).
     for (const execId of chat.bashRuns.keys()) post({ type: "bashKill", id: chat.id, execId });
@@ -6306,6 +6344,7 @@
     const m = list.find((x) => x.id === modelId) || list[0];
     const switched = chat.model !== m.id;
     chat.model = m.id;
+    if (chat.harness === "codex" && switched) chat.codexContextKnown = false;
     if (chat.harness === "codex" && switched && codexRow(chat)) {
       // Codex moves the effort with the model: pick a new one and you land on
       // its default rung, the way the CLI's /model picker does. Sol opens on
@@ -6376,8 +6415,11 @@
   }
 
   function reflectModel(chat, modelId) {
-    const known = MODELS.find((m) => m.id === modelId);
-    if (known) chat.model = known.id;
+    const known = modelsFor(chat.harness).find((m) => m.id === modelId);
+    if (known && known.id !== chat.model) {
+      chat.model = known.id;
+      if (chat.harness === "codex") chat.codexContextKnown = false;
+    }
   }
 
   // ---- effort picker (mirrors the model picker) ------------------------------
@@ -6835,9 +6877,10 @@
   function refreshUsageRing() {
     if (!els.usageBtn) return;
     const chat = chats.get(activeId);
-    const pct = chat ? Math.round(((chat.ctxTokens || 0) / contextLimit(chat)) * 100) : 0;
+    const known = chat && contextLimit(chat) && (chat.harness !== "codex" || chat.codexContextKnown);
+    const pct = known ? Math.round(((chat.ctxTokens || 0) / contextLimit(chat)) * 100) : 0;
     els.usageBtn.innerHTML = usageRingSVG(pct);
-    els.usageBtn.title = "Usage · context " + Math.max(0, Math.min(100, pct)) + "%";
+    els.usageBtn.title = known ? "Usage · context " + Math.max(0, Math.min(100, pct)) + "%" : "Usage · context unavailable";
     els.usageBtn.classList.toggle("high", pct >= 90);
   }
   // Update the ring and, if the popover is open, its live context row too.
@@ -6903,7 +6946,8 @@
     // Context window — always live from the active chat.
     const used = chat ? chat.ctxTokens || 0 : 0;
     const limit = chat ? contextLimit(chat) : DEFAULT_CONTEXT_LIMIT;
-    const ctxPct = Math.round((used / limit) * 100);
+    const known = limit && (!chat || chat.harness !== "codex" || chat.codexContextKnown);
+    const ctxPct = known ? Math.round((used / limit) * 100) : 0;
     // "113.6k" / "1.0M" — mirrors the app: one decimal, M above a million.
     const kOneDec = (n) => (n >= 1000000 ? (n / 1000000).toFixed(1) + "M" : (n / 1000).toFixed(1) + "k");
     const ctxSec = el("div", "usage-menu-sec");
@@ -6911,7 +6955,7 @@
       usageMenuRow(
         "Context window",
         ctxPct,
-        kOneDec(used) + " / " + kOneDec(limit) + " (" + Math.max(0, Math.min(100, ctxPct)) + "%)"
+        known ? kOneDec(used) + " / " + kOneDec(limit) + " (" + Math.max(0, Math.min(100, ctxPct)) + "%)" : "Awaiting usage"
       )
     );
     menu.appendChild(ctxSec);
@@ -6928,8 +6972,10 @@
     planSec.appendChild(el("div", "usage-menu-head", "Plan usage"));
     if (planRows.length) {
       for (const row of planRows) {
-        planSec.appendChild(usageMenuRow(normalizeUsageLabel(row.label), row.pct, row.pct + "%", row.resets, false, true));
+        planSec.appendChild(usageMenuRow(onCodex ? row.label : normalizeUsageLabel(row.label), row.pct, row.pct + "%", onCodex ? (row.resetsAt ? describeReset(row.resetsAt) : "") : row.resets, false, true));
       }
+    } else if (onCodex && (codexUsage.at || codexUsage.error)) {
+      planSec.appendChild(el("div", "usage-menu-head", codexUsage.error || "Usage unavailable"));
     } else {
       // No data yet — skeletons that occupy the exact row geometry so nothing
       // shifts when values land. The label (real text) fixes the row height;
@@ -6940,6 +6986,7 @@
         planSec.appendChild(usageSkeletonRow(label));
       }
     }
+    if (onCodex && codexUsage.error && planRows.length) planSec.appendChild(el("div", "usage-menu-head", codexUsage.error));
     menu.appendChild(planSec);
   }
 
@@ -6954,7 +7001,9 @@
   function toggleUsageMenu() {
     if (menuIsOpen(els.usageMenu)) return hideUsageMenu();
     // Refresh stale plan numbers when opening (forced past the throttle).
-    if (Date.now() - usageState.at > USAGE_STALE_MS) refreshUsage(true);
+    const chat = chats.get(activeId);
+    const state = chat && chat.harness === "codex" ? codexUsage : usageState;
+    if (Date.now() - state.at > USAGE_STALE_MS) refreshUsage(true);
     renderUsageMenu();
     openMenu(els.usageMenu);
   }
@@ -9251,7 +9300,7 @@
     // one delegated listener covers every message, live or replayed. Alt-click
     // shows the file in Finder/Explorer instead of opening it.
     document.addEventListener("click", (e) => {
-      const link = e.target && e.target.closest && e.target.closest("code.path[data-path]");
+      const link = e.target && e.target.closest && e.target.closest(".path[data-path]");
       if (!link) return;
       // Dragging across a path to copy it ends in a click too — selecting text
       // must not fling a file open.
@@ -9262,7 +9311,7 @@
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Enter" && e.key !== " ") return;
       const link = document.activeElement;
-      if (!link || !link.matches || !link.matches("code.path[data-path]")) return;
+      if (!link || !link.matches || !link.matches(".path[data-path]")) return;
       e.preventDefault();
       openClickedPath(link.dataset.path, e.altKey);
     });

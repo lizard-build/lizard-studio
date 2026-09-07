@@ -219,7 +219,9 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 //      images. That dir is on every session's --add-dir list.
 // v24: openPath — file paths in the transcript are clickable; the click asks the
 //      host to hand the path to the platform opener.
-const HOST_VERSION = 24;
+// v25: the bundled Codex host reports chat-scoped context usage and all quota
+//      windows. The panel requires this version before using those counters.
+const HOST_VERSION = 25;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
