@@ -1,6 +1,6 @@
 {
   "name": "@lizard-build/lizard-studio-host",
-  "version": "1.0.33",
+  "version": "1.0.34",
   "description": "Local host installer for Claude Code and ChatGPT in the Lizard Studio browser extension.",
   "type": "module",
   "author": "Dragon Labs LLC",
