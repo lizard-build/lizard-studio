@@ -11,14 +11,14 @@ window.runCodexPanelTests = async function () {
   emit({ type: "ready", ok: true, version: 24, home: "/test", user: "Test" });
   check("an older host enters the update flow", t.posted("selfUpdate").length === 1);
   check("an older host cannot start a chat", t.posted("start").length === 0);
-  emit({ type: "ready", ok: true, version: 25, home: "/test", user: "Test" });
+  emit({ type: "ready", ok: true, version: 26, home: "/test", user: "Test" });
   emit({ type: "agentReady", agent: "codex", ok: true, version: 2 });
   emit({ type: "models", agent: "codex", defaultModel: "test-model", models: [{ id: "test-model", label: "Test model", contextWindow: 258400, efforts: ["high"], defaultEffort: "high" }] });
   for (const id of ["audit-a", "audit-b"]) emit({ type: "event", id, data: { type: "system", subtype: "init", agent: "codex", session_id: id, model: "test-model", cwd: "/test/project" } });
   t.click("#usage-btn");
   check("missing context usage is shown as unknown", t.text("#usage-menu").includes("Awaiting usage"));
-  check("opening Codex usage requests its account limits", t.posted("planUsage").some((m) => m.agent === "codex"));
-  check("Codex usage never sends a Claude usage prompt", !t.posted("prompt").some((m) => m.text === "/usage"));
+  check("opening ChatGPT usage requests its account limits", t.posted("planUsage").some((m) => m.agent === "codex"));
+  check("ChatGPT usage never sends a Claude usage prompt", !t.posted("prompt").some((m) => m.text === "/usage"));
 
   emit({ type: "contextUsage", id: "audit-a", agent: "codex", window: 258400, usage: { input_tokens: 10000, cache_read_input_tokens: 40000, output_tokens: 1000 } });
   check("cache hits count once in the visible context meter", t.text("#usage-menu").includes("51.0k / 258.4k (20%)"));
@@ -32,7 +32,7 @@ window.runCodexPanelTests = async function () {
   ] });
   const usage = t.text("#usage-menu");
   check("all reported quota windows appear", ["5-hour limit", "12%", "Weekly limit", "42%", "Weekly limit · Other models", "8%"].every((s) => usage.includes(s)));
-  check("Codex quota scope is not rewritten as all models", !usage.includes("all models"));
+  check("ChatGPT quota scope is not rewritten as all models", !usage.includes("all models"));
   emit({ type: "planUsage", agent: "codex", error: "Couldn't refresh usage." });
   check("refresh failures are visible beside the last reading", t.text("#usage-menu").includes("Couldn't refresh usage.") && t.text("#usage-menu").includes("42%"));
 

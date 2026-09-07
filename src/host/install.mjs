@@ -263,7 +263,7 @@ function install() {
   console.log();
   console.log(`  node    : ${NODE_BIN}`);
   console.log(`  claude  : ${CLAUDE_BIN || "(not found — install @anthropic-ai/claude-code)"}`);
-  console.log(`  codex   : ${CODEX_BIN || "(not found — optional)"}`);
+  console.log(`  ChatGPT : ${CODEX_BIN || "(not found — optional)"}`);
   console.log(`  ext ids : ${EXT_IDS.join(", ")}`);
   console.log(`  runtime : ${RUNTIME_DIR}  (log: ${join(RUNTIME_DIR, "host.log")})`);
   console.log();

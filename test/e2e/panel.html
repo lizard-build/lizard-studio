@@ -153,7 +153,7 @@
       const codexRegression = new URLSearchParams(location.search).get("regressions") === "codex";
       if (codexRegression) store.rkChatV2 = {
         activeId: "audit-a", lastHarness: "codex",
-        tabs: ["audit-a", "audit-b"].map((id) => ({ id, title: id === "audit-a" ? "Codex audit" : "Second chat", harness: "codex", model: "test-model", cwd: "/test/project", mode: "workspace" })),
+        tabs: ["audit-a", "audit-b"].map((id) => ({ id, title: id === "audit-a" ? "ChatGPT audit" : "Second chat", harness: "codex", model: "test-model", cwd: "/test/project", mode: "workspace" })),
       };
     </script>
 

@@ -1,7 +1,7 @@
 {
   "name": "@lizard-build/lizard-studio-host",
   "version": "1.0.33",
-  "description": "Native-messaging host installer that lets the Lizard Studio browser extension drive the local Claude Code and Codex CLIs.",
+  "description": "Local host installer for Claude Code and ChatGPT in the Lizard Studio browser extension.",
   "type": "module",
   "author": "Dragon Labs LLC",
   "bin": {

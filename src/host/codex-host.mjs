@@ -48,7 +48,7 @@ const codexSpawner = createCodexSpawner({ hostDir: HOST_DIR, nodePath: process.e
 
 // Bumped on every change the panel needs to know about. Reported in
 // `agentReady`. Claude's own HOST_VERSION is separate and untouched.
-const CODEX_HOST_VERSION = 3;
+const CODEX_HOST_VERSION = 4;
 
 // The browser bridge numbers its requests from here so the router can tell our
 // `browserResult` replies from claude's by value alone, and never has to parse
@@ -103,7 +103,7 @@ function truncateDeep(value, budget = 60000) {
 process.on("uncaughtException", (err) => {
   log("UNCAUGHT", err && (err.stack || err.message));
   if (process.stdout.destroyed) return;
-  try { send({ type: "error", message: "Codex host error: " + (err && err.message) }); } catch { /* ignore */ }
+  try { send({ type: "error", message: "ChatGPT host error: " + (err && err.message) }); } catch { /* ignore */ }
 });
 process.on("unhandledRejection", (reason) => log("UNHANDLED_REJECTION", String(reason)));
 process.stdout.on("error", () => { log("stdout error — router gone"); shutdown(0); });
@@ -268,7 +268,7 @@ function appSend(obj) {
 /** One JSON-RPC request. Rejects on an error reply or if the server dies. */
 function rpc(method, params, timeoutMs = 120000) {
   return new Promise((resolve, reject) => {
-    if (!app.proc) return reject(new Error("codex app-server is not running"));
+    if (!app.proc) return reject(new Error("ChatGPT connection is not running"));
     const id = app.nextId++;
     const timer = setTimeout(() => {
       app.pending.delete(id);
@@ -279,7 +279,7 @@ function rpc(method, params, timeoutMs = 120000) {
     if (!appSend({ id, method, params: params || {} })) {
       clearTimeout(timer);
       app.pending.delete(id);
-      reject(new Error("codex app-server is not accepting requests"));
+      reject(new Error("ChatGPT connection is not accepting requests"));
     }
   });
 }
@@ -342,7 +342,7 @@ function ensureProviderKey(p) {
   if (!p) return false;
   const name = providerEnvKey(p.id);
   if (CHILD_ENV[name] === (p.apiKey || "")) return false;
-  if (app.proc && anyTurnRunning()) throw new Error("Wait for the running Codex turns to finish before changing a provider key.");
+  if (app.proc && anyTurnRunning()) throw new Error("Wait for the running ChatGPT turns to finish before changing a provider key.");
   CHILD_ENV[name] = p.apiKey || "";
   return !!app.proc;
 }
@@ -366,7 +366,7 @@ function restartAppServer() {
 function startAppServer() {
   if (app.ready) return Promise.resolve();
   if (app.starting) return app.starting;
-  if (!CODEX) return Promise.reject(new Error("Codex isn't installed."));
+  if (!CODEX) return Promise.reject(new Error("ChatGPT connection is not set up. Run the host installer."));
 
   app.starting = new Promise((resolve, reject) => {
     let proc;
@@ -411,14 +411,14 @@ function startAppServer() {
       app.starting = null;
       for (const p of app.pending.values()) {
         clearTimeout(p.timer);
-        p.reject(new Error("codex app-server exited"));
+        p.reject(new Error("ChatGPT connection closed"));
       }
       app.pending.clear();
       prewarmed.clear();
       // Keep the panel's saved thread id. Mark each session stopped so the next
       // prompt resumes that history through a new server.
       for (const s of sessions.values()) {
-        if (s.running) endTurnWith(s, true, "Codex stopped unexpectedly.");
+        if (s.running) endTurnWith(s, true, "ChatGPT stopped unexpectedly.");
         if (s.threadId) byThread.delete(s.threadId);
         s.threadId = null;
         s.started = false;
@@ -459,7 +459,7 @@ function onAppMessage(msg) {
     if (!pending) return;
     app.pending.delete(msg.id);
     clearTimeout(pending.timer);
-    if (msg.error) pending.reject(new Error(msg.error.message || "codex error"));
+    if (msg.error) pending.reject(new Error(msg.error.message || "ChatGPT error"));
     else pending.resolve(msg.result);
     return;
   }
@@ -1017,7 +1017,7 @@ function handleNotification(method, params) {
       // is even a failure yet. Treating every one of these as fatal turned a
       // hiccup Codex was about to retry into a dead turn and a red banner.
       const err = params.error || {};
-      const text = [err.message, err.additionalDetails].filter(Boolean).join(" — ") || "Codex reported an error.";
+      const text = [err.message, err.additionalDetails].filter(Boolean).join(" — ") || "ChatGPT reported an error.";
       log("app-server error:", text.slice(0, 500), params.willRetry ? "(retrying)" : "(fatal)");
       if (params.willRetry) break;
       send({ type: "error", id: s ? s.id : undefined, message: text });
@@ -1177,7 +1177,7 @@ function touchTurn(s) {
     if (!s.running) return;
     s.silenceTimer = null;
     log("turn went silent for", TURN_SILENCE_MS, "ms — still awaiting completion");
-    send({ type: "error", id: s.id, message: "Codex hasn't sent an update for five minutes. The turn is still running." });
+    send({ type: "error", id: s.id, message: "ChatGPT hasn't sent an update for five minutes. The turn is still running." });
   }, TURN_SILENCE_MS);
   s.silenceTimer.unref?.();
 }
@@ -1248,7 +1248,7 @@ function handleServerRequest(reqId, method, params) {
         toolName: "Edit",
         input: { file_path: params.grantRoot || s.cwd || "", reason: params.reason || "" },
         suggestions: null,
-        description: params.reason || "Codex wants to change files.",
+        description: params.reason || "ChatGPT wants to change files.",
         toolUseId: params.itemId || null,
       });
       break;
@@ -1262,7 +1262,7 @@ function handleServerRequest(reqId, method, params) {
         toolName: "Permissions",
         input: { cwd: params.cwd, permissions: params.permissions || {} },
         suggestions: null,
-        description: params.reason || "Codex is asking for extra access.",
+        description: params.reason || "ChatGPT is asking for extra access.",
         toolUseId: params.itemId || null,
       });
       break;
@@ -1440,8 +1440,8 @@ async function startSession(msg) {
     log("app-server start failed:", err && err.message);
     s.opening = false;
     s.pending.length = 0;
-    send({ type: "error", id, message: `Couldn't start Codex: ${err && err.message}` });
-    endTurnWith(s, true, "Couldn't start Codex.");
+    send({ type: "error", id, message: `Couldn't start ChatGPT: ${err && err.message}` });
+    endTurnWith(s, true, "Couldn't start ChatGPT.");
     send({ type: "exit", agent: "codex", id, code: 1, quiet: true });
     return;
   }
@@ -1483,7 +1483,7 @@ async function startSession(msg) {
       }
     }
     s.threadId = (thread && thread.thread && thread.thread.id) || null;
-    if (!s.threadId) throw new Error("Codex didn't return a thread id");
+    if (!s.threadId) throw new Error("ChatGPT didn't return a thread id");
     if (sessions.get(id) !== s) {
       rpc("thread/unsubscribe", { threadId: s.threadId }, 8000).catch(() => {});
       return;
@@ -1494,7 +1494,7 @@ async function startSession(msg) {
   } catch (err) {
     log("thread start failed:", err && err.message);
     s.opening = false;
-    send({ type: "error", id, message: `Couldn't open a Codex session: ${err && err.message}` });
+    send({ type: "error", id, message: `Couldn't open a ChatGPT session: ${err && err.message}` });
     s.pending.length = 0;
     endTurnWith(s, true, "The session couldn't be opened.");
     send({ type: "exit", agent: "codex", id, code: 1, quiet: true });
@@ -1626,7 +1626,7 @@ async function sendPrompt(msg) {
     // No session at all — nothing is coming, so end the turn as well as saying
     // so. An error on its own leaves the panel spinning on a reply that will
     // never arrive.
-    send({ type: "error", id: msg.id, message: "This Codex chat has no session. Reopen it to start one." });
+    send({ type: "error", id: msg.id, message: "This ChatGPT chat has no session. Reopen it to start one." });
     send({ type: "event", id: msg.id, data: { type: "result", subtype: "error_during_execution", is_error: true, result: "No session.", num_turns: 0 } });
     return;
   }
@@ -1636,7 +1636,7 @@ async function sendPrompt(msg) {
       log("queued a prompt for", msg.id, "— the thread is still opening");
       return;
     }
-    send({ type: "error", id: s.id, message: "This Codex session isn't running." });
+    send({ type: "error", id: s.id, message: "This ChatGPT session isn't running." });
     endTurnWith(s, true, "The session isn't running.");
     return;
   }
@@ -1697,7 +1697,7 @@ async function interrupt(msg) {
     await rpc("turn/interrupt", { threadId: s.threadId, turnId: s.turnId }, 15000);
   } catch (err) {
     log("interrupt failed:", err && err.message);
-    send({ type: "error", id: s.id, message: "Couldn't confirm that Codex stopped. The turn may still be running." });
+    send({ type: "error", id: s.id, message: "Couldn't confirm that ChatGPT stopped. The turn may still be running." });
     return;
   }
   send({ type: "interrupted", id: s.id, respawn: false });
@@ -1929,7 +1929,7 @@ function codexConfigRead(id, msg) {
   const base = { type: "configRead", id, key: msg.key, scope: msg.scope, agent: "codex" };
   const spec = codexConfigResolve(msg.key, msg.scope, codexConfigCwd(id, msg));
   if (!spec) {
-    const why = msg.key === "config" ? "Codex keeps one config.toml, in its own folder." : "No project folder selected.";
+    const why = msg.key === "config" ? "ChatGPT keeps one config.toml, in its own folder." : "No project folder selected.";
     send({ ...base, ok: false, error: why });
     return;
   }

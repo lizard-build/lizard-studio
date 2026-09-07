@@ -181,14 +181,14 @@ export function createCodexSpawner({ hostDir, nodePath = process.execPath, redac
       this._exitResult = null;
       this._done = false;
       pendingSpawns.set(this._spawnId, this);
-      this._startupTimer = setTimeout(() => this._fail(new Error("Timed out starting Codex through launchd. Reopen the Studio panel and try again.")), 10000);
+      this._startupTimer = setTimeout(() => this._fail(new Error("Timed out starting ChatGPT through launchd. Reopen the Studio panel and try again.")), 10000);
       spawnReady.then(() => {
         if (this._done) return;
         execFile(
           "/bin/launchctl",
           ["submit", "-l", this._label, "--", nodePath, SHIM_PATH, String(spawnPort), SPAWN_TOKEN_FILE, this._spawnId],
           { timeout: 10000 },
-          (err) => { if (err) this._fail(new Error("Could not start Codex through launchd: " + err.message)); }
+          (err) => { if (err) this._fail(new Error("Could not start ChatGPT through launchd: " + err.message)); }
         );
       }, (err) => this._fail(err));
     }
@@ -206,7 +206,7 @@ export function createCodexSpawner({ hostDir, nodePath = process.execPath, redac
         sock.on("data", feed);
         sock.on("close", () => {
           // ctl gone without an exit message: the shim (or its job) died on us.
-          if (!this._done && !this._exitResult) this._fail(new Error("Codex launch relay closed unexpectedly."));
+          if (!this._done && !this._exitResult) this._fail(new Error("ChatGPT launch relay closed unexpectedly."));
         });
       } else if (chan === "io" && !this._io) {
         this._io = sock;
@@ -310,7 +310,7 @@ export function createCodexSpawner({ hostDir, nodePath = process.execPath, redac
 
   return {
     spawn(cmd, args, opts) {
-      if (closed) throw new Error("Codex launcher is closed.");
+      if (closed) throw new Error("ChatGPT launcher is closed.");
       return new DetachedCodex(cmd, args, opts);
     },
     close() {

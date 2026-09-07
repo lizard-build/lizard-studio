@@ -1,6 +1,6 @@
 # End-to-end tests
 
-## Codex regression checks
+## ChatGPT regression checks
 
 Run `npm test` for the host protocol and inline renderer checks. These replace
 OS boundaries and do not touch a live account, browser, or user files.
@@ -28,10 +28,10 @@ What they cover:
 
 - **The pipe.** Claude's handshake is byte-identical with and without the
   router. An unknown message type is ignored rather than fatal. Killing the
-  Codex host leaves Claude working. Nothing crosses Chrome's 1 MB cap.
+  ChatGPT host leaves Claude working. Nothing crosses Chrome's 1 MB cap.
 - **Shared operations.** Picking a folder, git, the composer's shell mode — sent
-  from a Codex chat, answered by the host that implements them.
-- **Codex.** Session start, streaming, shell and file cards, read-only refusing
+  from a ChatGPT chat, answered by the host that implements them.
+- **ChatGPT.** Session start, streaming, shell and file cards, read-only refusing
   to write, stop, transcript replay, token counts, prewarming.
 - **Claude.** A session still starts, streams and finishes; the permission round
   trip still lands; the slash-command list still arrives.

@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Lizard Studio — Claude Code & Codex Side Panel",
+  "name": "Lizard Studio — Claude Code & ChatGPT Side Panel",
   "version": "1.0.8",
   "description": "An AI coding agent that lives next to the page you're building.",
   "minimum_chrome_version": "116",

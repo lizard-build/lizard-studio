@@ -71,7 +71,7 @@
   // agent goes to Claude, which is what every build before this one sent.
   const HARNESSES = [
     { id: "claude", label: "Claude Code" },
-    { id: "codex", label: "Codex" },
+    { id: "codex", label: "ChatGPT" },
   ];
   const DEFAULT_HARNESS = "claude";
   function harnessLabel(id) {
@@ -86,8 +86,8 @@
   // Codex has three permission profiles where Claude has five modes. These are
   // the ids its host maps, so a remembered mode survives the round trip.
   const CODEX_MODES = [
-    { id: "read-only", label: "Read only", short: "Read", hint: "Codex can look but not touch — no edits, no commands that write.", cls: "mode-plan" },
-    { id: "workspace", label: "Ask permissions", short: "Ask", hint: "Codex works inside the project folder and asks before anything riskier.", cls: "mode-default" },
+    { id: "read-only", label: "Read only", short: "Read", hint: "ChatGPT can read files but cannot edit them or run commands that write.", cls: "mode-plan" },
+    { id: "workspace", label: "Ask permissions", short: "Ask", hint: "ChatGPT works inside the project folder and asks before anything riskier.", cls: "mode-default" },
     { id: "full-access", label: "Full access", short: "Full", hint: "No sandbox, no questions. Use with care.", cls: "mode-bypass" },
   ];
   function modesFor(harness) {
@@ -239,7 +239,7 @@
   // catalog, one sentence per rung, so the panel describes its rungs in the
   // words Codex itself uses.
   const CLAUDE_EFFORT_TIP = "Higher effort buys more thinking before Claude answers. Ultracode runs Extra plus multi-agent workflows.";
-  const CODEX_EFFORT_TIP = "Higher effort buys more reasoning before Codex answers. Ultra adds automatic task delegation.";
+  const CODEX_EFFORT_TIP = "Higher effort gives ChatGPT more time to reason before answering. Ultra adds automatic task delegation.";
   // The rungs that paint the slider green: Claude's Ultracode and Codex's Ultra
   // are the same idea — top reasoning plus multi-agent work.
   const isUltraEffort = (id) => id === "ultracode" || id === "ultra";
@@ -468,7 +468,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 25;
+  const EXPECTED_HOST_VERSION = 26;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -7023,7 +7023,7 @@
   const SETTINGS_TABS = [
     { id: "connection", label: "General" },
     { id: "claude", label: "Claude" },
-    { id: "codex", label: "Codex" },
+    { id: "codex", label: "ChatGPT" },
     { id: "models", label: "Models" },
   ];
   const isConfigTab = (id) => id === "claude" || id === "codex";
@@ -7089,16 +7089,16 @@
       title: "AGENTS.md",
       label: "AGENTS.md",
       format: "text",
-      blurb: "Project memory Codex reads at the start of every session.",
+      blurb: "Project memory ChatGPT reads at the start of every session.",
       project: "<project>/AGENTS.md",
       user: "~/.codex/AGENTS.md",
-      placeholder: "# Notes\n\nGuidance Codex should always follow in this project…",
+      placeholder: "# Notes\n\nGuidance ChatGPT should always follow in this project…",
     },
     hooks: {
       title: "Hooks",
       label: "Hooks",
       format: "json",
-      blurb: "Shell commands Codex runs on events. Unlike Claude's, this is the whole file rather than a section of one.",
+      blurb: "Shell commands ChatGPT runs on events. Unlike Claude's, this is the whole file rather than a section of one.",
       project: "<project>/.codex/hooks.json",
       user: "~/.codex/hooks.json",
       placeholder: '{\n  "hooks": []\n}',
@@ -7108,7 +7108,7 @@
       label: "Config",
       format: "text",
       userOnly: true, // Codex reads one config.toml, in its own folder
-      blurb: "Everything else Codex reads — default model, sandbox, and the MCP servers it starts.",
+      blurb: "Everything else ChatGPT reads — default model, sandbox, and the MCP servers it starts.",
       user: "~/.codex/config.toml",
       placeholder: 'model = "gpt-5.6-terra"\n\n[mcp_servers.playwright]\ncommand = "npx"\nargs = ["-y", "@playwright/mcp@latest"]\n',
     },
@@ -7187,7 +7187,7 @@
     // Static copy, so innerHTML only to set the inline code span on the path.
     blurb.innerHTML =
       "Any OpenAI-compatible endpoint — a llama.cpp box, OpenRouter, your own gateway. " +
-      "They show up in the Codex model picker. The provider is declared per session, so nothing " +
+      "They show up in the ChatGPT model picker. The provider is declared per session, so nothing " +
       'here touches <span class="set-code">~/.codex/config.toml</span>.';
     body.appendChild(blurb);
 
