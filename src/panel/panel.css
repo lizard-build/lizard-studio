@@ -1069,10 +1069,9 @@ button:active > .copy-swap {
   right: -32px;
   bottom: calc(100% + 6px);
   z-index: 20;
-  /* Size to the widest row so nothing wraps; capped to the panel so a very long
-     reset string can't push it off the left edge. */
+  /* Fit the widest row, then let text wrap within the panel width. */
   width: max-content;
-  min-width: 264px;
+  min-width: min(264px, calc(100vw - 20px));
   max-width: calc(100vw - 20px);
   display: flex;
   flex-direction: column;
@@ -1100,8 +1099,8 @@ button:active > .copy-swap {
   background-size: 180px 100%;
   animation: usage-skel-shimmer 1.3s ease-in-out infinite;
 }
-.usage-skel-resets { width: 150px; height: 12px; }
-.usage-skel-pct { width: 34px; height: 12px; }
+.usage-skel-resets { width: 150px; min-width: 0; height: 12px; }
+.usage-skel-pct { width: 34px; flex: 0 0 34px; height: 12px; }
 .usage-skel-bar { display: block; width: 100%; height: 100%; border-radius: 999px; }
 @keyframes usage-skel-shimmer {
   0% { background-position: -180px 0; }
@@ -1118,23 +1117,28 @@ button:active > .copy-swap {
   gap: 16px;
 }
 .usage-menu-row-label {
+  flex: 0 0 auto;
+  max-width: 45%;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 12px;
   font-weight: 500;
   color: var(--text-primary);
-  white-space: nowrap;
 }
 .usage-menu-row-meta {
   display: inline-flex;
   align-items: baseline;
   gap: 8px;
-  flex: 0 0 auto;
-  white-space: nowrap;
+  flex: 0 1 auto;
+  min-width: 0;
+  text-align: right;
 }
-/* Resets note matches the context value exactly (same size/weight/color).
-   Fixed-width + right-aligned so the plan-usage rows keep identical geometry
-   whether they show the loading skeleton or the real reset string / %, and
-   across reset strings of different lengths — the menu width never shifts. */
+/* Keep reset notes aligned when space allows; wrap them before the
+   percentage can cross the bar's right edge. */
 .usage-menu-row-resets {
+  flex: 0 1 150px;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 12px;
   font-weight: 500;
   color: var(--text-secondary);
@@ -1144,6 +1148,8 @@ button:active > .copy-swap {
 }
 .usage-menu-row-val { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
 .usage-menu-row-val.usage-pct {
+  flex: 0 0 34px;
+  white-space: nowrap;
   display: inline-block;
   width: 34px;
   text-align: right;
