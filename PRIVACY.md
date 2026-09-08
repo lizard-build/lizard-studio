@@ -1,17 +1,16 @@
 # Privacy Policy — Lizard Studio
 
-_Last updated: July 13, 2026_
+_Last updated: September 8, 2026_
 
 Lizard Studio is a Chrome extension (Manifest V3) that runs an AI coding agent
-(Anthropic's Claude Code) in your browser's side panel, together with an
+(Claude Code or ChatGPT) in your browser's side panel, together with an
 on-page design toolkit. This policy explains what the extension does with your
 data.
 
-**Short version:** Lizard Studio does not have any servers. We do not collect,
-store, transmit, sell, or share your data with anyone. Everything runs on your
-own machine. The only data that leaves your computer is what you send to
-Anthropic's Claude API through your own Claude account — exactly as it would if
-you ran the `claude` CLI in a terminal.
+Lizard Studio runs its extension and host on your computer. Dragon Labs LLC
+runs no chat server and receives no chat data. Chat content goes to the provider
+you choose through your local agent: Anthropic for Claude Code, OpenAI for
+ChatGPT, or a model endpoint you add in Settings.
 
 ## Who operates this extension
 
@@ -20,16 +19,17 @@ Dragon Labs LLC operates no backend service for the extension and receives no
 user data through it. The extension talks only to:
 
 1. A small **native messaging host** that you install on your own machine,
-   which launches the `claude` command-line tool locally; and
-2. **Anthropic's Claude API**, reached by that local `claude` process using
-   your own Claude credentials.
+   which runs the selected agent locally; and
+2. The **provider you select**, reached through that agent using your account
+   or credentials. Claude Code uses Anthropic; ChatGPT uses OpenAI. Custom models
+   use the endpoint you configure.
 
 We (the extension's authors) never receive your data.
 
 ## What data the extension handles, and where it goes
 
 When you actively use the chat or the browser-aware tools, the following data
-may be read from the current tab and sent to Anthropic's Claude API as part of
+may be read from the current tab and sent to your selected provider as part of
 your conversation, so that the agent can help you:
 
 - **Page content you point it at** — the DOM, accessibility snapshot, visible
@@ -41,21 +41,18 @@ your conversation, so that the agent can help you:
 - **Your chat messages and attachments** — text you type, images you paste or
   drop, and files/paths in the working directory you choose.
 
-This data is transmitted only to Anthropic and is governed by
-**Anthropic's Privacy Policy** (<https://www.anthropic.com/legal/privacy>) and
-the terms of your Claude account. Lizard Studio adds no additional recipients.
+Your selected provider's privacy policy and account terms govern its handling
+of chat data. Connected tools may send data to the services you configure.
 
-Read-only browser tools are pre-approved; any tool that acts on the page (click,
-type, navigate, run a command, edit a file) is gated behind an explicit
-permission prompt that shows you the exact action first.
+Actions follow the permission mode you choose for the chat. Modes that allow
+actions without a prompt do not ask for each action.
 
 ## What is stored, and where
 
-- **Chat sessions** are saved locally on your machine as ordinary Claude Code
-  transcripts (the same files `claude --resume` uses). They never leave your
-  disk except as part of your conversation with Claude.
-- **Extension settings** (e.g. your selected folder, model, and toolbar state)
-  are kept in Chrome's local `storage` on your device.
+- **Chat sessions** are saved locally by the selected agent. Chat content also
+  reaches your selected provider as part of the conversation.
+- **Extension settings and text drafts** (e.g. your selected folder, model,
+  and toolbar state) are kept in Chrome's local `storage` on your device.
 - The on-page toolkit's state (rulers, guides, grids, etc.) is ephemeral and
   per-tab; it is not persisted.
 
@@ -73,7 +70,7 @@ Nothing is written to any server operated by us, because none exists.
 The extension requests broad permissions solely to let the agent see and act on
 the page you are working on, on your instruction:
 
-- **`nativeMessaging`** — to communicate with the local host that runs `claude`.
+- **`nativeMessaging`** — to communicate with the local host that runs your selected agent.
 - **`<all_urls>` / content scripts** — so the design toolkit and page-reading
   tools work on whatever site you are building.
 - **`debugger`** — to capture console/network activity and run page evaluation

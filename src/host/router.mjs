@@ -214,7 +214,7 @@ function route(raw, text) {
   if (!child || !child.alive) {
     log("no live host for", name, "— dropping", (msg && msg.type) || "?");
     if (name !== "claude") {
-      notifyPanel({ type: "error", id: msg && msg.id, agent: name, message: `The ${name} helper isn't running.` });
+      notifyPanel({ type: "error", id: msg && msg.id, agent: name, message: `The ${name === "codex" ? "ChatGPT" : name} helper isn't running.` });
     }
     return;
   }

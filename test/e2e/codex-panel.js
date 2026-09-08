@@ -11,7 +11,7 @@ window.runCodexPanelTests = async function () {
   emit({ type: "ready", ok: true, version: 24, home: "/test", user: "Test" });
   check("an older host enters the update flow", t.posted("selfUpdate").length === 1);
   check("an older host cannot start a chat", t.posted("start").length === 0);
-  emit({ type: "ready", ok: true, version: 29, home: "/test", user: "Test" });
+  emit({ type: "ready", ok: true, version: 30, home: "/test", user: "Test" });
   emit({ type: "agentReady", agent: "codex", ok: true, version: 6 });
   check("reasoning stays on Default before the catalog arrives", document.querySelector("#effort-btn").disabled && t.text("#effort-btn") === "Default");
   check("starting without metadata sends no guessed effort", t.posted("start").some((m) => m.agent === "codex") && t.posted("start").filter((m) => m.agent === "codex").every((m) => m.effort == null));
@@ -51,11 +51,11 @@ window.runCodexPanelTests = async function () {
   check("another chat cannot change this chat's context window", t.text("#usage-menu").includes("51.0k / 258.4k (20%)"));
 
   emit({ type: "planUsage", agent: "codex", limits: [
-    { limitId: "codex", primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 7200 }, secondary: { usedPercent: 42, windowDurationMins: 10080, resetsAt: Math.floor(Date.now() / 1000) + 604800 } },
+    { limitId: "codex", limitName: "Codex", primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 7200 }, secondary: { usedPercent: 42, windowDurationMins: 10080, resetsAt: Math.floor(Date.now() / 1000) + 604800 } },
     { limitId: "other", limitName: "Other models", primary: { usedPercent: 8, windowDurationMins: 10080 } },
   ] });
   const usage = t.text("#usage-menu");
-  check("all reported quota windows appear", ["5-hour limit", "12%", "Weekly limit", "42%", "Weekly limit · Other models", "8%"].every((s) => usage.includes(s)));
+  check("all reported quota windows appear", ["5-hour limit · ChatGPT", "12%", "Weekly limit · ChatGPT", "42%", "Weekly limit · Other models", "8%"].every((s) => usage.includes(s)));
   check("ChatGPT quota scope is not rewritten as all models", !usage.includes("all models"));
   emit({ type: "planUsage", agent: "codex", error: "Couldn't refresh usage." });
   check("refresh failures are visible beside the last reading", t.text("#usage-menu").includes("Couldn't refresh usage.") && t.text("#usage-menu").includes("42%"));

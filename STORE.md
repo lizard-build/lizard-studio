@@ -5,10 +5,31 @@ field with the matching block below.
 
 ---
 
+## Name
+
+> Lizard Studio — Claude Code & ChatGPT Side Panel
+
+## Detailed description
+
+> Use Claude Code or ChatGPT beside the page you're building. Ask your agent to inspect the page, read errors, edit your local project, and check the result in the browser.
+>
+> Attach an element with Selector or a marked screenshot with Annotate. Rulers, guides, grids, an eyedropper, and responsive preview help you describe the change.
+>
+> Each chat keeps its own model, permissions, history, and text draft. Settings and skills are separate for Claude Code and ChatGPT. Sign in with your own account through the local host.
+>
+> Requires the free Lizard Studio host on your computer and the CLI for your chosen agent. Account or model-provider charges may apply.
+
+## Version 1.0.9 — what’s new
+
+- ChatGPT naming across the agent picker, settings, sign-in, usage, and host errors.
+- Separate chat drafts, reliable Save status, and retained settings drafts.
+- Attachments and selections stay in their source browser window.
+- Better keyboard navigation, sign-in, and history handling.
+
 ## Single purpose
 
 > Lizard Studio is a single-purpose developer tool: it runs an AI coding
-> assistant (Anthropic's Claude Code) in the browser side panel that can read,
+> assistant (Claude Code or ChatGPT) in the browser side panel that can read,
 > measure, and act on the web page you are currently building, so you can fix
 > front-end issues without leaving the browser. The on-page toolkit (rulers,
 > guides, grid, inspector, eyedropper, annotator, responsive preview) exists to
@@ -17,8 +38,7 @@ field with the matching block below.
 
 ## Short description (132 char max)
 
-> An AI coding agent that lives next to the page you're building — it can see,
-> measure, and fix the page with you.
+> Claude Code and ChatGPT in your browser side panel. Inspect, measure, and fix the page you're building.
 
 ## Data usage disclosures (Privacy practices tab)
 
@@ -38,9 +58,10 @@ field with the matching block below.
 - **Privacy policy URL:**
   `https://github.com/lizard-build/lizard-studio/blob/main/PRIVACY.md`
 
-> Note: data the user sends to the assistant is transmitted only to Anthropic's
-> Claude API through the user's own Claude account and their locally installed
-> `claude` CLI. Dragon Labs LLC operates no server and receives no user data.
+> Chat data reaches the provider selected by the user: Anthropic for Claude Code,
+> OpenAI for ChatGPT, or a model endpoint the user adds. The local CLI uses the
+> user’s account or credentials. Dragon Labs LLC runs no chat server and receives
+> no chat data.
 
 ---
 
@@ -52,9 +73,8 @@ section of the Dashboard.
 ### `nativeMessaging`
 
 > The extension's entire function depends on driving the user's locally
-> installed Claude Code CLI. It uses native messaging to talk to a small host
-> program the user installs on their own machine, which spawns the `claude`
-> process. No code is downloaded; the host only relays messages between the
+> installed agent CLI. It uses native messaging to talk to a small host
+> program the user installs on their own machine, which runs the selected agent. No code is downloaded; the host only relays messages between the
 > panel and the local CLI.
 
 ### Host permissions — `<all_urls>` (and content scripts on all URLs)
@@ -103,7 +123,7 @@ section of the Dashboard.
 
 ### `sidePanel`
 
-> Hosts the Claude Code chat UI in Chrome's side panel — the primary interface
+> Hosts the Claude Code and ChatGPT chat UI in Chrome's side panel — the primary interface
 > of the extension.
 
 ### `storage`

@@ -475,7 +475,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 29;
+  const EXPECTED_HOST_VERSION = 30;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -5056,7 +5056,7 @@
             .filter((window) => window && Number.isFinite(window.usedPercent))
             .map((window) => ({
               label: (window.windowDurationMins ? describeWindow(window.windowDurationMins) : "Plan usage")
-                + (limit.limitName || (limit.limitId && limit.limitId !== "codex") ? " · " + (limit.limitName || limit.limitId) : ""),
+                + (limit.limitName || (limit.limitId && limit.limitId !== "codex") ? " · " + String(limit.limitName || limit.limitId).replace(/(^|\s)codex(?=\s|$)/gi, "$1ChatGPT") : ""),
               pct: Math.max(0, Math.min(100, window.usedPercent)),
               resetsAt: window.resetsAt,
             })));

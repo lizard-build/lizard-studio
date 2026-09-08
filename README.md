@@ -2,16 +2,16 @@
 
 **[Install from the Chrome Web Store →](https://chromewebstore.google.com/detail/kgbaeoalmkabpoglpjcdmppdmcipfdeh)**
 
-**Claude Code in your browser's side panel — an AI coding agent that can see, measure, and fix the page you're building.**
+**Claude Code and ChatGPT in your browser's side panel — inspect, measure, and fix the page you're building.**
 
 A Chrome extension (Manifest V3) with two halves that feed each other:
 
-- **A real Claude Code chat** in the side panel — it drives the actual `claude` CLI on your machine (your account, your folder, your permissions), wired into the browser so Claude can read the DOM, take screenshots, watch the console/network, and click and type into the live tab.
+- **Claude Code and ChatGPT chats** in the side panel — each uses its local CLI on your machine (your account, your folder, your permissions), wired into the browser so your agent can read the DOM, take screenshots, watch the console/network, and click and type into the live tab.
 - **A design overlay toolkit** on the page: rulers, guides, grids, responsive preview, eyedropper, DevTools-style inspection, and an annotator whose screenshots drop straight into the chat.
 
-The loop: notice something off → measure or circle it on the page → send it to Claude with the element and screenshot attached → Claude inspects the live tab, edits the code in your project folder, and you watch the page update.
+The loop: notice something off → measure or circle it on the page → send it to your agent with the element and screenshot attached → the agent inspects the live tab, edits the code in your project folder, and you watch the page update.
 
-Everything runs locally. The extension talks to a tiny native host that spawns `claude`. No servers of ours, no telemetry — the only network traffic is Claude itself.
+The extension and its host run locally. Chats connect through your chosen agent and account. You can also add your own model endpoint. Dragon Labs LLC runs no chat server and collects no telemetry.
 
 ## Setup
 
@@ -25,7 +25,7 @@ Install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/
 
 > Content scripts can't run on `chrome://` pages, the New Tab page, or the Chrome Web Store.
 
-### 2. The Claude Code host (one-time)
+### 2. The local host (one-time)
 
 The chat talks to the CLI through a small local native-messaging host (Node, zero deps). Install once — macOS, Linux, Windows:
 
@@ -35,7 +35,7 @@ npx @lizard-build/lizard-studio-host install
 
 (`npx … uninstall` removes it. Hacking on the host? `bash src/host/install.sh` installs the local copy.)
 
-It resolves your `node`/`claude` paths, copies the host to `~/.lizard-studio/host`, and registers the origin-locked `com.lizard.code` manifest. Reload the extension and the panel connects. Requires the Claude Code CLI (`npm i -g @anthropic-ai/claude-code`).
+It resolves your Node.js and agent paths, copies the host to `~/.lizard-studio/host`, and registers the origin-locked `com.lizard.code` manifest. Reload the extension and the panel connects. Install the CLI for the agent you want to use: `npm i -g @anthropic-ai/claude-code` for Claude Code, or `npm i -g @openai/codex` for ChatGPT. The package and command names are the names required by the underlying CLI; the agent appears as **ChatGPT** in Lizard Studio.
 
 > The host runs from `~/.lizard-studio/host`, **not** the repo, on purpose: macOS TCC blocks browsers from launching hosts under `~/Desktop`/`~/Documents`/`~/Downloads`. Re-run the installer after `git pull`. Logs: `~/.lizard-studio/host/host.log`.
 >
@@ -43,7 +43,13 @@ It resolves your `node`/`claude` paths, copies the host to `~/.lizard-studio/hos
 
 ## The chat
 
-Each tab is its own `claude` process with its own folder, model, and permission mode; sessions persist as normal Claude Code transcripts (they show up in `claude --resume`). Claude gets `browser_*` tools over MCP — read (`dom`, `snapshot`, `info`), observe (`console`, `network`, `screenshot`, `eval`), and drive (`click`, `type`, `fill`, `key`, `navigate`, tabs); read-only tools are pre-approved, anything that acts on the page goes through Claude Code's permission dialog (**Ask · Accept edits · Plan · Auto · Bypass**, Shift+Tab to cycle). Point at elements with the Selector tool, send marked-up screenshots with Annotate. Streaming markdown, clickable file paths (alt-click reveals them in Finder), syntax highlighting, `Edit` diffs, collapsible tool cards, a live status pill, `/usage` plan card, multi-tab chats + history, folder picker, git branch chip, slash-command autocomplete, in-panel `/login`, model picker. `/remote-control` hands the tab's session to the Claude app so you can carry on from your phone (`/remote-control off` takes it back); it needs a claude.ai sign-in. Every session ships the [lizard-build/skill](https://github.com/lizard-build/skill) bootstrap, so "deploy this" works out of the box.
+Choose **Claude Code** or **ChatGPT** when you start a chat. Each chat keeps its own folder, model, permissions, history, and text draft. The agent can inspect and act on the page with browser tools. Use Selector to attach an element, or Annotate to attach a marked screenshot. Attachments stay in the browser window where you added them.
+
+Both agents support streaming replies, file links, tool cards, model and reasoning controls, usage details, and in-panel `/login`. The `/` menu lists the commands and skills available to the selected agent. A skill's package name can contain `claude` even when ChatGPT provides it; that name does not change which agent runs the chat.
+
+Claude Code supports editing past messages and `/remote-control` for continuing a session in the Claude app. ChatGPT offers its own sign-in flow and permission modes; Remote Control and editing past messages are unavailable there. Settings provide separate files and skills for each agent. Real CLI paths, such as `~/.codex/config.toml`, retain their required names.
+
+Every session includes the [Lizard Skill](https://github.com/lizard-build/skill) bootstrap for deployment tasks.
 
 ## The on-page toolkit
 
@@ -62,9 +68,9 @@ Tools toggle independently from a draggable toolbar; several run at once. Number
 
 ## Architecture
 
-No build step — plain JS. `src/core.js` (Shadow-DOM overlay, state, tool registry) + `src/tools/*.js` + `src/toolbar.js` are the content scripts; `src/background.js` is the service worker; `src/panel/` is the side-panel app (`chat.js` is the Claude Code client, `render.js` is XSS-safe markdown). A disabled terminal view (`terminal.js` + vendored xterm) lives in the tree but is excluded from the store build.
+No build step — plain JS. `src/core.js` (Shadow-DOM overlay, state, tool registry) + `src/tools/*.js` + `src/toolbar.js` are the content scripts; `src/background.js` is the service worker; `src/panel/` is the side-panel app (`chat.js` is the chat client, `render.js` is XSS-safe markdown). A disabled terminal view (`terminal.js` + vendored xterm) lives in the tree but is excluded from the store build.
 
-`src/host/` is the native host — `claude-host.mjs` (spawns `claude` in stream-json mode, one process per tab; bridges permissions + browser tools; replays transcripts; drives `/login` and `/remote-control`), `mcp-browser.mjs` (the `browser_*` MCP relay), `install.mjs` (cross-platform installer). It ships separately on npm as `@lizard-build/lizard-studio-host`. The host's login-shell env-capture is adapted from [21st-dev/1Code](https://github.com/21st-dev/1Code) (Apache-2.0).
+`src/host/` contains the local hosts — `router.mjs` routes each chat to its agent, `codex-host.mjs` connects ChatGPT through its CLI, `claude-host.mjs` (spawns `claude` in stream-json mode, one process per tab; bridges permissions + browser tools; replays transcripts; drives `/login` and `/remote-control`), `mcp-browser.mjs` (the `browser_*` MCP relay), `install.mjs` (cross-platform installer). It ships separately on npm as `@lizard-build/lizard-studio-host`. The host's login-shell env-capture is adapted from [21st-dev/1Code](https://github.com/21st-dev/1Code) (Apache-2.0).
 
 The UI follows the Lizard Brand Design System; the accent (emerald by default) is user-configurable via `--rk-accent*`. Roadmap, not yet built: baseline grid, WCAG contrast checker, font inspector, outline-all, palette extractor, smart guides, onion-skin diff.
 
