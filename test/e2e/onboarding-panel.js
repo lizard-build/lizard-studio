@@ -53,11 +53,25 @@ window.runOnboardingPanelTests = async function () {
   check("installation is marked done only after confirmation", node("#ob-node-claude").classList.contains("done"));
   if (scenario === "saved" || scenario === "draft") {
     check("saved chats and drafts keep their agent", selected().harness === "claude");
+    check("saved chat state is preserved", scenario === "saved"
+      ? selected().sessionId === "saved-session"
+      : selected().draft === "Keep this draft");
     check("an unavailable saved agent does not start", t.posted("start").length === 0);
   } else {
     const expected = scenario === "both" || scenario === "claude-only" ? "claude" : "codex";
     check("fresh chat selects an installed agent", selected().harness === expected);
-    check("only the installed agent starts", t.posted("start").length === 1 && t.posted("start")[0].agent === expected);
+    if (scenario !== "with-folder") {
+      check("a new chat waits for a folder before starting", !selected().cwd && t.posted("start").length === 0);
+      t.click('#folder-btn');
+      const request = t.posted("pickFolder").at(-1);
+      check("folder picker targets the active chat", request?.id === selected().id);
+      t.emit({ type: "folder", id: request.id, path: "/test/project" });
+    }
+    const starts = t.posted("start");
+    check("only the installed agent starts in the selected folder", starts.length === 1
+      && starts[0].agent === expected && starts[0].cwd === "/test/project");
+    codex(expected === "codex");
+    check("another readiness reply does not start a second session", t.posted("start").length === 1);
   }
   t.disconnect();
   check("disconnect clears stale installation checks", !node("#ob-node-claude").classList.contains("done"));

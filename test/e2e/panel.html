@@ -153,6 +153,18 @@
       if (seed) {
         try { store.rkChatV2 = JSON.parse(decodeURIComponent(seed)); } catch (_) {}
       }
+      const onboardingScenario = new URLSearchParams(location.search).get("onboarding");
+      if (!seed && ["saved", "draft", "with-folder"].includes(onboardingScenario)) {
+        store.rkChatV2 = {
+          activeId: "onboarding-chat", lastHarness: "claude",
+          tabs: [{
+            id: "onboarding-chat", title: "Setup test", harness: "claude",
+            cwd: "/test/project",
+            sessionId: onboardingScenario === "saved" ? "saved-session" : null,
+            draft: onboardingScenario === "draft" ? "Keep this draft" : "",
+          }],
+        };
+      }
       const historyRegression = new URLSearchParams(location.search).get("regressions") === "history";
       const auditRegression = new URLSearchParams(location.search).get("regressions") === "audit";
       const codexRegression = auditRegression || new URLSearchParams(location.search).get("regressions") === "codex";
