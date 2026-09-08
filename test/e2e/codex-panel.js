@@ -27,9 +27,9 @@ window.runCodexPanelTests = async function () {
   key("Home"); key("ArrowRight"); key("ArrowRight"); key("ArrowRight");
   check("Extra High sends the exact xhigh value", t.text("#effort-btn") === "Extra High" && t.posted("restartSession").at(-1)?.effort === "xhigh");
   key("End");
-  check("Ultra explains automatic task delegation", !document.querySelector(".effort-note").hidden && t.text(".effort-note").includes("automatic task delegation") && t.posted("restartSession").at(-1)?.effort === "ultra");
+  check("Ultra explanation stays in its tooltip", !document.querySelector(".effort-note") && t.text(".effort-tip").includes("automatic task delegation") && t.posted("restartSession").at(-1)?.effort === "ultra");
   catalog(["low", "medium", "high", "xhigh"]);
-  check("a shorter catalog removes unsupported levels", range.max === "3" && t.text("#effort-btn") === "Medium" && document.querySelector(".effort-note").hidden);
+  check("a shorter catalog removes unsupported levels", range.max === "3" && t.text("#effort-btn") === "Medium");
   key("End");
   check("the last ordinary level stays Extra High", t.text("#effort-btn") === "Extra High" && !document.querySelector(".effort-picker").classList.contains("is-ultra"));
   catalog([]);

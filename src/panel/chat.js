@@ -6649,9 +6649,6 @@
     // Green is for the multi-agent rung, not for whichever rung comes last —
     // gpt-5.5's ladder ends at Extra, and Extra is not Ultra.
     setEffortUltra(isUltraEffort(rung.id));
-    const note = els.effortMenu.querySelector(".effort-note");
-    note.hidden = !(chats.get(activeId)?.harness === "codex" && rung.id === "ultra");
-    note.textContent = note.hidden ? "" : CODEX_ULTRA_TIP;
   }
 
   // Pulls the handle toward the nearest stop while dragging, so it settles on a
@@ -9769,7 +9766,6 @@
                 <input class="effort-range" type="range" min="0" max="5" step="0.001" value="1"
                   aria-label="Effort level" />
               </div>
-              <div class="effort-note" hidden></div>
             </div>
           </div>
           <div class="usage-picker">

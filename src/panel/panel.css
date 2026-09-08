@@ -4471,7 +4471,6 @@ code.inline.path:focus-visible {
 .custom-model-cancel:active { transform: scale(0.97); }
 
 .effort-btn:disabled { opacity: 0.5; cursor: default; }
-.effort-note { margin-top: 10px; font-size: 12px; line-height: 1.4; color: var(--text-secondary); }
 
 .history-more {
   display: block;
