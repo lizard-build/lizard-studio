@@ -3762,6 +3762,31 @@ code.inline.path:focus-visible {
   border: 1px solid var(--border-primary);
 }
 .onboarding-logo.lizard { color: var(--control-primary); }
+.onboarding-agent { display: block; overflow: hidden; }
+.onboarding-reel {
+  display: flex;
+  flex-direction: column;
+  animation: onboarding-roulette 6s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+.onboarding-reel-item {
+  display: flex;
+  flex: 0 0 50px;
+  align-items: center;
+  justify-content: center;
+  width: 50px;
+  height: 50px;
+}
+@keyframes onboarding-roulette {
+  0%, 35% { transform: translateY(0); }
+  50%, 85% { transform: translateY(-50px); }
+  100% { transform: translateY(-100px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .onboarding-reel { animation: none; flex-direction: row; align-items: center; height: 50px; gap: 4px; padding: 0 3px; }
+  .onboarding-reel-item { flex: 0 0 20px; width: 20px; }
+  .onboarding-reel-item svg { width: 20px; height: 20px; }
+  .onboarding-reel-item:last-child { display: none; }
+}
 .onboarding-arrow { display: flex; color: var(--text-tertiary); }
 
 /* Bottom-pinned "waiting" status as a disabled Secondary button (DESIGN.md):
@@ -3835,7 +3860,7 @@ code.inline.path:focus-visible {
   font-size: 13px;
   font-weight: 600;
   line-height: 18px;
-  white-space: nowrap;
+  white-space: normal;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }

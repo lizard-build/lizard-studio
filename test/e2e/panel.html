@@ -49,6 +49,9 @@
           for (const m of msgs) this.emit(m);
           return msgs.length;
         },
+        disconnect() {
+          for (const fn of listeners.disconnect) fn();
+        },
         storage: store,
         seedStorage(value) {
           store.rkChatV2 = value;
@@ -181,6 +184,15 @@
         window.RKChat.mount(document.getElementById("bed"));
         window.RKChat.activate && window.RKChat.activate();
         window.__test.mounted = true;
+        if (new URLSearchParams(location.search).has("onboarding")) {
+          const script = document.createElement("script");
+          script.src = "onboarding-panel.js?t=" + stamp;
+          await new Promise((resolve, reject) => {
+            script.onload = resolve; script.onerror = reject;
+            document.body.appendChild(script);
+          });
+          window.__test.onboardingResult = await window.runOnboardingPanelTests();
+        }
         if (codexRegression || historyRegression) {
           await new Promise((resolve, reject) => {
             const script = document.createElement("script");
