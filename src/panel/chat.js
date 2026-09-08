@@ -9208,7 +9208,7 @@
   }
 
   // The `claude` install commands, one per shell. Detection picks a default; the
-  // toggle in the card lets the user switch (e.g. WSL vs native Windows).
+  // dropdown lets the user switch (e.g. WSL vs native Windows).
   const CLAUDE_INSTALL = {
     sh: "curl -fsSL https://claude.ai/install.sh | bash",
     ps: "irm https://claude.ai/install.ps1 | iex",
@@ -9234,8 +9234,10 @@
     if (els.obCopyClaude) els.obCopyClaude.dataset.cmd = cmd;
     if (els.obOsToggle) {
       els.obOsToggle.classList.toggle("hidden", installAgent === "codex");
-      for (const b of els.obOsToggle.querySelectorAll(".ob-os-tab"))
-        b.classList.toggle("active", b.dataset.os === claudeInstallOs);
+      els.obOsSelect.value = claudeInstallOs;
+      els.obOsIcon.innerHTML = claudeInstallOs === "sh"
+        ? ICON("terminal", 16)
+        : '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z"/></svg>';
     }
   }
   // Both hosts resolve their CLI at startup. Reconnect to check again after
@@ -9383,6 +9385,8 @@
     els.obCardClaude = root.querySelector("#ob-card-claude");
     els.obWaitLabel = root.querySelector("#ob-wait-label");
     els.obOsToggle = root.querySelector("#ob-os-toggle");
+    els.obOsSelect = root.querySelector("#ob-os-select");
+    els.obOsIcon = root.querySelector("#ob-os-icon");
     els.obClaudeCmd = root.querySelector("#ob-claude-cmd");
     els.obCopyClaude = root.querySelector("#chat-copy-claude");
     els.attachFileBtn = root.querySelector("#attach-file-btn");
@@ -9449,11 +9453,9 @@
     const installStep = root.querySelector("#ob-step-install");
     if (installStep) installStep.innerHTML = ICON("check", 14);
     if (els.obCopyClaude) wireCopyButton(els.obCopyClaude, () => els.obCopyClaude.dataset.cmd, 14);
-    if (els.obOsToggle) {
-      els.obOsToggle.addEventListener("click", (e) => {
-        const b = e.target.closest(".ob-os-tab");
-        if (!b) return;
-        claudeInstallOs = b.dataset.os;
+    if (els.obOsSelect) {
+      els.obOsSelect.addEventListener("change", () => {
+        claudeInstallOs = els.obOsSelect.value;
         renderClaudeCmd();
       });
     }
@@ -10043,10 +10045,14 @@
           <button class="ob-os-tab active" data-agent="claude" aria-pressed="true">Claude Code</button>
           <button class="ob-os-tab" data-agent="codex" aria-pressed="false">Codex CLI</button>
         </div>
-        <div id="ob-os-toggle" class="ob-os-toggle" role="tablist" aria-label="Operating system">
-          <button class="ob-os-tab" data-os="sh" role="tab">macOS / Linux</button>
-          <button class="ob-os-tab" data-os="ps" role="tab">Windows PS</button>
-          <button class="ob-os-tab" data-os="cmd" role="tab">Windows CMD</button>
+        <div id="ob-os-toggle" class="ob-os-picker">
+          <span id="ob-os-icon" class="ob-os-icon" aria-hidden="true"></span>
+          <select id="ob-os-select" class="ob-os-select" aria-label="Operating system and shell">
+            <option value="sh">macOS / Linux</option>
+            <option value="ps">Windows PowerShell</option>
+            <option value="cmd">Windows CMD</option>
+          </select>
+          <span class="ob-os-chevron" aria-hidden="true">${ICON("caret-down", 14)}</span>
         </div>
         <div class="cmd-row">
           <code id="ob-claude-cmd"></code>
