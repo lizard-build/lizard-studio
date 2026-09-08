@@ -818,7 +818,7 @@ button:active > .copy-swap {
   line-height: inherit;
 }
 .effort-stage::after {
-  content: "Ultracode";
+  content: "Extra High";
   visibility: hidden;
   white-space: nowrap;
 }
@@ -4463,3 +4463,6 @@ code.inline.path:focus-visible {
 }
 .custom-model-cancel:hover { background: var(--control-secondary); color: var(--text-primary); }
 .custom-model-cancel:active { transform: scale(0.97); }
+
+.effort-btn:disabled { opacity: 0.5; cursor: default; }
+.effort-note { margin-top: 10px; font-size: 12px; line-height: 1.4; color: var(--text-secondary); }

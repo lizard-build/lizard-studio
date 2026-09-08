@@ -34,7 +34,7 @@ async function host() {
     clearTimeout: (timer) => timers.delete(timer),
   });
   const source = readFileSync(new URL("../../src/host/codex-host.mjs", import.meta.url), "utf8");
-  const module = new SourceTextModule(source + `\nexport { app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
+  const module = new SourceTextModule(source + `\nexport { MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
   await module.link((name) => {
     const values = imports[name];
     assert.ok(values, `unexpected import: ${name}`);
@@ -216,4 +216,17 @@ test("closing a chat during start cannot revive it", async () => {
   assert.equal(h.api.byThread.has("orphan"), false);
   assert.equal(h.messages.some((m) => m.type === "started"), false);
   assert.ok(h.requests.some((r) => r.method === "thread/unsubscribe"));
+});
+
+test("effort uses the selected model's levels and omits unknown or unsupported choices", async () => {
+  const h = await host();
+  h.api.MODELS.push({ id: "four-levels", efforts: ["low", "medium", "high", "xhigh"] });
+  h.api.MODELS.push({ id: "six-levels", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] });
+  h.api.MODELS.push({ id: "no-levels", efforts: [] });
+  assert.equal(h.api.effortForModel("four-levels", "xhigh"), "xhigh");
+  assert.equal(h.api.effortForModel("four-levels", "max"), null);
+  assert.equal(h.api.effortForModel("six-levels", "ultra"), "ultra");
+  assert.equal(h.api.effortForModel("six-levels", "ultracode"), "ultra");
+  assert.equal(h.api.effortForModel("no-levels", "high"), null);
+  assert.equal(h.api.effortForModel("unknown", "max"), null);
 });

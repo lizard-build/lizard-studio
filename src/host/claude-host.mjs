@@ -222,7 +222,8 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v25: the bundled Codex host reports chat-scoped context usage and all quota
 //      windows. The panel requires this version before using those counters.
 // v26: ChatGPT labels and launchd startup for the bundled OpenAI host.
-const HOST_VERSION = 26;
+// v27: the OpenAI host sends only supported model effort levels.
+const HOST_VERSION = 27;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 

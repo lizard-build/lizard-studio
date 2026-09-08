@@ -11,10 +11,34 @@ window.runCodexPanelTests = async function () {
   emit({ type: "ready", ok: true, version: 24, home: "/test", user: "Test" });
   check("an older host enters the update flow", t.posted("selfUpdate").length === 1);
   check("an older host cannot start a chat", t.posted("start").length === 0);
-  emit({ type: "ready", ok: true, version: 26, home: "/test", user: "Test" });
-  emit({ type: "agentReady", agent: "codex", ok: true, version: 2 });
+  emit({ type: "ready", ok: true, version: 27, home: "/test", user: "Test" });
+  emit({ type: "agentReady", agent: "codex", ok: true, version: 5 });
+  check("reasoning stays on Default before the catalog arrives", document.querySelector("#effort-btn").disabled && t.text("#effort-btn") === "Default");
+  check("starting without metadata sends no guessed effort", t.posted("start").some((m) => m.agent === "codex") && t.posted("start").filter((m) => m.agent === "codex").every((m) => m.effort == null));
   emit({ type: "models", agent: "codex", defaultModel: "test-model", models: [{ id: "test-model", label: "Test model", contextWindow: 258400, efforts: ["high"], defaultEffort: "high" }] });
   for (const id of ["audit-a", "audit-b"]) emit({ type: "event", id, data: { type: "system", subtype: "init", agent: "codex", session_id: id, model: "test-model", cwd: "/test/project" } });
+  const range = document.querySelector(".effort-range");
+  const catalog = (efforts) => emit({ type: "models", agent: "codex", defaultModel: "test-model", models: [{ id: "test-model", label: "Test model", efforts, defaultEffort: "medium" }] });
+  const key = (name) => range.dispatchEvent(new KeyboardEvent("keydown", { key: name, bubbles: true }));
+  t.click("#effort-btn");
+  check("a single reasoning level has a fixed, finite slider", range.disabled && range.max === "0" && document.querySelector("#effort-menu").style.getPropertyValue("--effort-progress") === "0");
+  catalog(["low", "medium", "high", "xhigh", "max", "ultra"]);
+  check("a catalog refresh updates an open slider", !range.disabled && range.max === "5");
+  key("Home"); key("ArrowRight"); key("ArrowRight"); key("ArrowRight");
+  check("Extra High sends the exact xhigh value", t.text("#effort-btn") === "Extra High" && t.posted("restartSession").at(-1)?.effort === "xhigh");
+  key("End");
+  check("Ultra explains automatic task delegation", !document.querySelector(".effort-note").hidden && t.text(".effort-note").includes("automatic task delegation") && t.posted("restartSession").at(-1)?.effort === "ultra");
+  catalog(["low", "medium", "high", "xhigh"]);
+  check("a shorter catalog removes unsupported levels", range.max === "3" && t.text("#effort-btn") === "Medium" && document.querySelector(".effort-note").hidden);
+  key("End");
+  check("the last ordinary level stays Extra High", t.text("#effort-btn") === "Extra High" && !document.querySelector(".effort-picker").classList.contains("is-ultra"));
+  catalog([]);
+  check("missing model levels disable the picker", document.querySelector("#effort-btn").disabled && t.text("#effort-btn") === "Default");
+  catalog(["low", "medium", "high", "xhigh"]);
+  check("returning metadata restores the saved effort", t.text("#effort-btn") === "Extra High" && !document.querySelector("#effort-btn").disabled);
+  emit({ type: "models", agent: "codex", models: [] });
+  check("an empty catalog clears stale reasoning choices", document.querySelector("#effort-btn").disabled);
+  catalog(["low", "medium", "high", "xhigh"]);
   t.click("#usage-btn");
   check("missing context usage is shown as unknown", t.text("#usage-menu").includes("Awaiting usage"));
   check("opening ChatGPT usage requests its account limits", t.posted("planUsage").some((m) => m.agent === "codex"));
@@ -52,7 +76,10 @@ window.runCodexPanelTests = async function () {
   event({ type: "stream_event", event: { type: "message_stop" } });
   event({ type: "assistant", message: { id: "streamed", content: [{ type: "text", text: "Проверка потока." }], usage: {} } });
   event({ type: "result", subtype: "success", is_error: false, result: "", usage: {} });
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  const deadline = Date.now() + 5000;
+  while (!document.querySelector("#bed").textContent.includes("Проверка потока.") && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
   check("streaming and canonical copies produce one reply", (document.querySelector("#bed").textContent.match(/Проверка потока\./g) || []).length === 1);
   check("panel reports no runtime errors", t.errors.length === 0);
 

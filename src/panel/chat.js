@@ -232,14 +232,15 @@
   // the slider reads Max while the turn quietly runs something lower — so the
   // slider is built from whatever the chosen model actually offers.
   const EFFORT_LABELS = {
-    low: "Low", medium: "Medium", high: "High", xhigh: "Extra",
+    low: "Low", medium: "Medium", high: "High", xhigh: "Extra High",
     max: "Max", ultra: "Ultra", ultracode: "Ultracode",
   };
   // What the tooltip says. Claude's line is ours; Codex's comes from the
   // catalog, one sentence per rung, so the panel describes its rungs in the
   // words Codex itself uses.
   const CLAUDE_EFFORT_TIP = "Higher effort buys more thinking before Claude answers. Ultracode runs Extra plus multi-agent workflows.";
-  const CODEX_EFFORT_TIP = "Higher effort gives ChatGPT more time to reason before answering. Ultra adds automatic task delegation.";
+  const CODEX_EFFORT_TIP = "Reasoning levels supported by the selected model. Higher levels allow more time to reason.";
+  const CODEX_ULTRA_TIP = "Maximum reasoning with automatic task delegation.";
   // The rungs that paint the slider green: Claude's Ultracode and Codex's Ultra
   // are the same idea — top reasoning plus multi-agent work.
   const isUltraEffort = (id) => id === "ultracode" || id === "ultra";
@@ -250,7 +251,7 @@
     if (!chat || chat.harness !== "codex") return EFFORTS;
     const row = codexRow(chat);
     const ids = row && row.efforts;
-    if (!ids || !ids.length) return EFFORTS;
+    if (!Array.isArray(ids) || !ids.length) return [];
     return ids.map((id) => ({ id, label: EFFORT_LABELS[id] || id, hint: (row.effortInfo && row.effortInfo[id]) || "" }));
   }
   function activeEfforts() {
@@ -268,10 +269,11 @@
     if (opts && opts.fromConfig && has(CODEX_DEFAULT_EFFORT)) return CODEX_DEFAULT_EFFORT;
     if (row && has(row.defaultEffort)) return row.defaultEffort;
     if (has(DEFAULT_EFFORT)) return DEFAULT_EFFORT;
-    return list[list.length - 1].id;
+    return list.length ? list[list.length - 1].id : null;
   }
   function effortTipFor(chat, effortId) {
     if (!chat || chat.harness !== "codex") return CLAUDE_EFFORT_TIP;
+    if (effortId === "ultra") return CODEX_ULTRA_TIP;
     const rung = effortsFor(chat).find((e) => e.id === effortId);
     return (rung && rung.hint) || CODEX_EFFORT_TIP;
   }
@@ -280,8 +282,13 @@
   function clampEffort(chat) {
     if (!chat) return;
     const list = effortsFor(chat);
-    if (list.some((e) => e.id === chat.effort)) return;
+    if (!list.length || list.some((e) => e.id === chat.effort)) return;
     chat.effort = defaultEffortFor(chat, { fromConfig: !chat.effort });
+  }
+
+  // Preserve saved preferences while metadata loads, but send only known levels.
+  function selectedEffortFor(chat) {
+    return effortsFor(chat).some((e) => e.id === chat.effort) ? chat.effort : null;
   }
 
   // Usable context window per model (tokens) — the denominator behind the
@@ -468,7 +475,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 26;
+  const EXPECTED_HOST_VERSION = 27;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -4959,7 +4966,7 @@
         break;
       // Codex publishes its own model list; this is where the picker learns it.
       case "models":
-        if (msg.agent === "codex" && Array.isArray(msg.models) && msg.models.length) {
+        if (msg.agent === "codex" && Array.isArray(msg.models)) {
           CODEX_MODELS = msg.models.map((m) => ({
             id: m.id,
             label: m.label || m.id,
@@ -4968,7 +4975,7 @@
             defaultEffort: m.defaultEffort || null,
             upgrade: m.upgrade || null,
           }));
-          CODEX_DEFAULT_MODEL = msg.defaultModel || CODEX_MODELS[0].id;
+          CODEX_DEFAULT_MODEL = msg.defaultModel || CODEX_MODELS[0]?.id || "";
           CODEX_DEFAULT_EFFORT = msg.defaultEffort || null;
           for (const m of msg.models) if (m.contextWindow) CODEX_CONTEXT_LIMITS[m.id] = m.contextWindow;
           // A chat started before the list arrived is holding a placeholder.
@@ -4985,6 +4992,7 @@
           }
           syncComposer();
           if (els.modelMenu && !els.modelMenu.classList.contains("hidden")) renderModelMenu();
+          if (els.effortMenu && menuIsOpen(els.effortMenu)) renderEffortMenu();
         }
         break;
       // Codex's plan limits, sent after every turn — no probe, no parsing.
@@ -5259,7 +5267,7 @@
       cwd: chat.cwd,
       model: chat.model,
       provider: providerFor(chat),
-      effort: chat.effort,
+      effort: selectedEffortFor(chat),
       permissionMode: chat.mode,
       resume: resume || chat.sessionId || undefined,
     });
@@ -6281,7 +6289,7 @@
     chat.restartPending = false;
     // A failed post means the host never saw the change — mark the session
     // not-started so the next (re)start spawns with the values shown in the UI.
-    if (!post({ type: "restartSession", id: chat.id, model: chat.model, provider: providerFor(chat), effort: chat.effort, permissionMode: chat.mode })) {
+    if (!post({ type: "restartSession", id: chat.id, model: chat.model, provider: providerFor(chat), effort: selectedEffortFor(chat), permissionMode: chat.mode })) {
       chat.started = false;
     }
   }
@@ -6426,6 +6434,7 @@
   function applyEffort(chat, effortId) {
     const list = effortsFor(chat);
     const e = list.find((x) => x.id === effortId) || list.find((x) => x.id === defaultEffortFor(chat)) || list[0];
+    if (!e) return;
     chat.effort = e.id;
     lastFor(chat.harness).effort = e.id;
     savePrefs();
@@ -6461,6 +6470,7 @@
   }
 
   function toggleEffortMenu() {
+    if (!activeEfforts().length) return;
     if (menuIsOpen(els.effortMenu)) return hideEffortMenu();
     renderEffortMenu();
     openMenu(els.effortMenu);
@@ -6470,6 +6480,8 @@
   // Opening re-seats the slider on the chat's current effort — no animation,
   // it should already be there when the panel appears.
   function renderEffortMenu() {
+    cancelAnimationFrame(effortSlider.springFrame);
+    effortSlider.springFrame = 0;
     const chat = chats.get(activeId);
     syncEffortLadder();
     const id = (chat && chat.effort) || defaultEffortFor(chat);
@@ -6487,6 +6499,7 @@
   }
 
   function setEffortValue(next, animateLabel) {
+    if (!activeEfforts().length) return;
     const max = activeEfforts().length - 1;
     const value = effortClamp(Number.isFinite(next) ? next : 0, 0, max);
     const index = effortClamp(Math.round(value), 0, max);
@@ -6496,16 +6509,19 @@
     els.effortRange.value = String(value);
     const rungs = activeEfforts();
     els.effortRange.setAttribute("aria-valuetext", (rungs[index] || {}).label || "");
-    els.effortMenu.style.setProperty("--effort-progress", String(value / max));
+    els.effortMenu.style.setProperty("--effort-progress", String(max ? value / max : 0));
     const rung = rungs[index] || {};
     const label = rung.label || "";
     if (index !== prev) swapEffortLabel(label, index > prev, animateLabel);
-    else if (!els.effortLevel.textContent) els.effortLevel.textContent = label;
+    else if (els.effortLevel.textContent !== label) swapEffortLabel(label, false, false);
     // The tooltip follows the handle: on Codex it is that rung's own sentence.
     if (els.effortTip) els.effortTip.textContent = effortTipFor(chats.get(activeId), rung.id);
     // Green is for the multi-agent rung, not for whichever rung comes last —
     // gpt-5.5's ladder ends at Extra, and Extra is not Ultra.
     setEffortUltra(isUltraEffort(rung.id));
+    const note = els.effortMenu.querySelector(".effort-note");
+    note.hidden = !(chats.get(activeId)?.harness === "codex" && rung.id === "ultra");
+    note.textContent = note.hidden ? "" : CODEX_ULTRA_TIP;
   }
 
   // Pulls the handle toward the nearest stop while dragging, so it settles on a
@@ -6792,7 +6808,8 @@
       ticks.innerHTML = "";
       for (let i = 0; i < rungs.length; i += 1) ticks.appendChild(el("span", "effort-tick"));
     }
-    els.effortRange.max = String(rungs.length - 1);
+    els.effortRange.max = String(Math.max(0, rungs.length - 1));
+    els.effortRange.disabled = rungs.length < 2;
   }
 
   function bindEffortSlider() {
@@ -6824,6 +6841,7 @@
     });
     // Arrows/Home/End move a whole stop at a time and commit right away.
     els.effortRange.addEventListener("keydown", (e) => {
+      if (activeEfforts().length < 2) return;
       const targets = {
         ArrowLeft: effortSlider.index - 1,
         ArrowDown: effortSlider.index - 1,
@@ -7736,10 +7754,19 @@
     els.modelBtn.querySelector(".model-label").textContent = model.label;
     const efforts = effortsFor(chat);
     const effort = efforts.find((e) => e.id === chat.effort) || efforts.find((e) => e.id === defaultEffortFor(chat)) || efforts[0];
-    if (els.effortBtn) els.effortBtn.querySelector(".effort-label").textContent = (effort && effort.label) || "";
+    if (els.effortBtn) {
+      els.effortBtn.querySelector(".effort-label").textContent = effort?.label || "Default";
+      els.effortBtn.disabled = !efforts.length;
+      els.effortBtn.title = efforts.length ? "Reasoning effort" : "This model has not provided reasoning levels. It uses its default.";
+    }
+    if (!efforts.length && els.effortMenu) {
+      cancelAnimationFrame(effortSlider.springFrame);
+      hideEffortMenu();
+      syncEffortLadder();
+    }
     // The multi-agent rung reads in the brand green, on the pill too — Claude's
     // Ultracode, Codex's Ultra.
-    if (els.effortPicker) els.effortPicker.classList.toggle("is-ultra", isUltraEffort(effort.id));
+    if (els.effortPicker) els.effortPicker.classList.toggle("is-ultra", isUltraEffort(effort?.id));
     refreshUsageUI();
     setRunningUI(chat.turnRunning);
     syncBashMode(chat);
@@ -9612,6 +9639,7 @@
                 <input class="effort-range" type="range" min="0" max="5" step="0.001" value="1"
                   aria-label="Effort level" />
               </div>
+              <div class="effort-note" hidden></div>
             </div>
           </div>
           <div class="usage-picker">

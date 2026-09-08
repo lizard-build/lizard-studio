@@ -48,7 +48,7 @@ const codexSpawner = createCodexSpawner({ hostDir: HOST_DIR, nodePath: process.e
 
 // Bumped on every change the panel needs to know about. Reported in
 // `agentReady`. Claude's own HOST_VERSION is separate and untouched.
-const CODEX_HOST_VERSION = 4;
+const CODEX_HOST_VERSION = 5;
 
 // The browser bridge numbers its requests from here so the router can tell our
 // `browserResult` replies from claude's by value alone, and never has to parse
@@ -616,17 +616,8 @@ function effortForModel(modelId, effort) {
   const want = effortFor(effort);
   if (!want) return null;
   const row = MODELS.find((m) => m.id === modelId);
-  if (!row || !row.efforts.length) return want;
-  if (row.efforts.includes(want)) return want;
-  // Nearest rung down rather than an error from the server. The panel should
-  // never offer a rung this model lacks, so reaching here means something got
-  // out of step — land somewhere sane instead of failing the turn.
-  const ladder = ["ultra", "max", "xhigh", "high", "medium", "low"];
-  const from = ladder.indexOf(want);
-  for (let i = Math.max(from, 0); i < ladder.length; i++) {
-    if (row.efforts.includes(ladder[i])) return ladder[i];
-  }
-  return row.efforts[row.efforts.length - 1];
+  if (!row || !row.efforts.length) return null;
+  return row.efforts.includes(want) ? want : null;
 }
 
 // ---- sessions -----------------------------------------------------------------
