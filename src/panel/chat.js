@@ -475,7 +475,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 27;
+  const EXPECTED_HOST_VERSION = 28;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -626,6 +626,16 @@
           for (const t of p.tabs) {
             const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt });
             chats.set(chat.id, chat);
+    let lastScrollTop = 0;
+    const earlier = () => {
+      if (chat.id === activeId && chat.messagesEl.scrollTop < 160 && chat.historyCursor) requestHistoryPage(chat);
+    };
+    chat.messagesEl.addEventListener("scroll", () => {
+      const top = chat.messagesEl.scrollTop;
+      if (top < lastScrollTop) earlier();
+      lastScrollTop = top;
+    }, { passive: true });
+    chat.messagesEl.addEventListener("wheel", (e) => { if (e.deltaY < 0) earlier(); }, { passive: true });
             order.push(chat.id);
           }
           activeId = chats.has(p.activeId) ? p.activeId : order[0];
@@ -957,6 +967,13 @@
       // Whether this tab's on-disk transcript has been requested/replayed yet.
       // Restored tabs (and history re-opens) carry a sessionId but no messages.
       replayed: false,
+      historyCursor: null,
+      historyRequest: null,
+      historyLoaded: false,
+      historySeen: new Set(),
+      historyBashSeen: new Set(),
+      historyNav: null,
+      historyError: false,
       // Git state for the cwd (filled in from the host's gitBranches reply).
       isRepo: false,
       branch: null,
@@ -1616,7 +1633,7 @@
     const row = el("div", "msg msg-user");
     const bubble = buildBubble(text, attachments, opts && opts.contexts);
     row.appendChild(bubble);
-    if (opts && opts.real) {
+    if (opts && opts.real && !chat.historyPage) {
       const turnIndex = ++chat.turnIndexCounter;
       row.dataset.turnIndex = String(turnIndex);
       wireEditableBubble(chat, bubble, turnIndex, text, attachments);
@@ -4680,6 +4697,7 @@
       codexUsage.fetching = false;
       for (const c of chats.values()) {
         c.started = false;
+        if (c.historyRequest) historyFailed(c, c.historyRequest);
         if (c.turnRunning) {
           systemNote(c, "Host disconnected mid-turn.", "warn");
           endTurn(c, null);
@@ -4897,7 +4915,11 @@
       case "event":
         if (chat) onClaudeEvent(chat, msg.data);
         break;
+      case "transcriptPart":
+        if (chat) receiveHistoryPart(chat, msg);
+        break;
       case "transcript":
+        if (chat && msg.paged) { receiveHistoryPage(chat, msg); break; }
         if (chat) {
           replayTranscript(chat, msg.events);
           // Flush any local bash runs that come after the last transcript event.
@@ -4954,6 +4976,7 @@
           harnessReady[msg.agent] = false;
           for (const c of chats.values()) {
             if (c.harness !== msg.agent) continue;
+            if (c.historyRequest) historyFailed(c, c.historyRequest);
             c.started = false;
             clearPermCards(c);
             if (c.turnRunning) {
@@ -5281,6 +5304,11 @@
     if (!chat || chat.replayed) return;
     if (chat.sessionId) {
       if (!connected || !hostReady) return;
+      if (chat.harness === "codex") {
+        chat.replayed = true;
+        requestHistoryPage(chat);
+        return;
+      }
       chat.replayed = true;
       chat._bashIdx = 0;
       if (Array.isArray(chat.bashHistory)) chat.bashHistory.sort((a, b) => (a.ts || 0) - (b.ts || 0));
@@ -5296,6 +5324,100 @@
       chat.bashHistory.sort((a, b) => (a.ts || 0) - (b.ts || 0));
       drainBashUntil(chat, Infinity);
     }
+  }
+
+  function historyNav(chat) {
+    if (!chat.historyNav) {
+      chat.historyNav = el("button", "history-more");
+      chat.historyNav.type = "button";
+      chat.historyNav.addEventListener("click", () => requestHistoryPage(chat));
+    }
+    const button = chat.historyNav;
+    button.disabled = !!chat.historyRequest;
+    button.textContent = chat.historyRequest ? "Loading messages…" : chat.historyError ? "Couldn't load messages. Retry" : "Load earlier messages";
+    button.hidden = !chat.historyRequest && !chat.historyError && !chat.historyCursor;
+    chat.messagesEl.prepend(button);
+  }
+
+  function requestHistoryPage(chat) {
+    if (chat.historyRequest || !chat.sessionId || (chat.historyLoaded && !chat.historyCursor)) return;
+    const request = { id: newId(), sessionId: chat.sessionId, initial: !chat.historyLoaded, parts: [], timer: null };
+    chat.historyRequest = request;
+    chat.historyError = false;
+    historyNav(chat);
+    request.timer = setTimeout(() => historyFailed(chat, request), 150000);
+    if (!post({ type: "loadTranscript", id: chat.id, sessionId: chat.sessionId,
+      cwd: chat.cwd, requestId: request.id, cursor: chat.historyCursor, paged: true })) historyFailed(chat, request);
+  }
+
+  function historyFailed(chat, request) {
+    if (chat.historyRequest !== request || !chats.has(chat.id)) return;
+    clearTimeout(request.timer);
+    chat.historyRequest = null;
+    chat.historyError = true;
+    historyNav(chat);
+  }
+
+  function receiveHistoryPart(chat, msg) {
+    const request = chat.historyRequest;
+    if (!request || msg.requestId !== request.id || msg.sessionId !== request.sessionId) return;
+    if (msg.index !== request.parts.length || !Number.isInteger(msg.total) || msg.total < 1 || typeof msg.text !== "string") {
+      historyFailed(chat, request); return;
+    }
+    request.parts.push(msg.text);
+    if (request.parts.length === msg.total) {
+      try { receiveHistoryPage(chat, JSON.parse(request.parts.join(""))); }
+      catch (_) { historyFailed(chat, request); }
+    }
+  }
+
+  function receiveHistoryPage(chat, msg) {
+    const request = chat.historyRequest;
+    if (!request || msg.requestId !== request.id || msg.sessionId !== request.sessionId || msg.sessionId !== chat.sessionId) return;
+    if (msg.error || !Array.isArray(msg.events)) { historyFailed(chat, request); return; }
+    clearTimeout(request.timer);
+    const box = chat.messagesEl;
+    const anchor = [...box.children].find((node) => node !== chat.historyNav && node.getBoundingClientRect().bottom > box.getBoundingClientRect().top);
+    const anchorTop = anchor?.getBoundingClientRect().top;
+    const oldTop = box.scrollTop;
+    // Render into a separate state so older tool results cannot change a live
+    // reply, its counters, or its pending requests.
+    const page = makeChat({ id: "history-" + chat.id, harness: chat.harness, model: chat.model, cwd: chat.cwd });
+    page.historyPage = true;
+    const seen = new Set();
+    const events = msg.events.filter((event) => {
+      if (!event.historyItemId) return true;
+      if (chat.historySeen.has(event.historyItemId)) return false;
+      seen.add(event.historyItemId);
+      return true;
+    });
+    const stamps = events.map((event) => Date.parse(event.timestamp)).filter(Number.isFinite);
+    const oldest = msg.nextCursor && stamps.length ? Math.min(...stamps) : -Infinity;
+    page.bashHistory = chat.bashHistory.filter((entry) => !chat.historyBashSeen.has(entry.id) && (entry.ts || 0) >= oldest).sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    replayTranscript(page, events);
+    drainBashUntil(page, Infinity);
+    for (const entry of page.bashHistory) chat.historyBashSeen.add(entry.id);
+    for (const id of seen) chat.historySeen.add(id);
+    const nodes = [...page.messagesEl.childNodes];
+    const fragment = document.createDocumentFragment();
+    for (const node of nodes) fragment.appendChild(node);
+    box.prepend(fragment);
+    chat.historyRequest = null;
+    chat.historyLoaded = true;
+    chat.historyCursor = msg.nextCursor || null;
+    chat.historyError = false;
+    historyNav(chat);
+    if (nodes.length) chat.empty = false;
+    if (request.initial && !anchor) {
+      chat.stick = true;
+      scrollToBottom(chat);
+      // Hidden tabs have no layout until activated; restoreScroll uses stick.
+    } else if (anchor) {
+      box.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+      chat.stick = false;
+    } else box.scrollTop = oldTop;
+    chat.scrollTop = box.scrollTop;
+    if (chat.id === activeId) syncComposer();
   }
 
   // Render a chunk of past messages (the host streams them in order across one or
@@ -5588,6 +5710,14 @@
 
   // Wipe a tab's transcript and start a fresh session (used on folder change).
   function resetChatSession(chat) {
+    if (chat.historyRequest) clearTimeout(chat.historyRequest.timer);
+    chat.historyRequest = null;
+    chat.historyCursor = null;
+    chat.historyLoaded = false;
+    chat.historySeen.clear();
+    chat.historyBashSeen.clear();
+    chat.historyNav = null;
+    chat.historyError = false;
     chat.messagesEl.innerHTML = "";
     chat.loginCard = null; // detached from the DOM above; drop the stale reference
     chat.statusEl = null; // wiped with the stream; recreated on next render

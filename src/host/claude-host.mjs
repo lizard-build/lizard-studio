@@ -223,7 +223,8 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 //      windows. The panel requires this version before using those counters.
 // v26: ChatGPT labels and launchd startup for the bundled OpenAI host.
 // v27: the OpenAI host sends only supported model effort levels.
-const HOST_VERSION = 27;
+// v28: paged ChatGPT history and lossless history message chunks.
+const HOST_VERSION = 28;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 

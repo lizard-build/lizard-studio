@@ -150,7 +150,12 @@
       if (seed) {
         try { store.rkChatV2 = JSON.parse(decodeURIComponent(seed)); } catch (_) {}
       }
+      const historyRegression = new URLSearchParams(location.search).get("regressions") === "history";
       const codexRegression = new URLSearchParams(location.search).get("regressions") === "codex";
+      if (historyRegression) store.rkChatV2 = {
+        activeId: "history-a", lastHarness: "codex",
+        tabs: [{ id: "history-a", title: "History", harness: "codex", model: "test-model", cwd: "/test/project", sessionId: "thread-history", mode: "workspace" }],
+      };
       if (codexRegression) store.rkChatV2 = {
         activeId: "audit-a", lastHarness: "codex",
         tabs: ["audit-a", "audit-b"].map((id) => ({ id, title: id === "audit-a" ? "ChatGPT audit" : "Second chat", harness: "codex", model: "test-model", cwd: "/test/project", mode: "workspace" })),
@@ -175,14 +180,14 @@
         window.RKChat.mount(document.getElementById("bed"));
         window.RKChat.activate && window.RKChat.activate();
         window.__test.mounted = true;
-        if (codexRegression) {
+        if (codexRegression || historyRegression) {
           await new Promise((resolve, reject) => {
             const script = document.createElement("script");
-            script.src = "codex-panel.js?t=" + stamp;
+            script.src = (historyRegression ? "history-panel.js?t=" : "codex-panel.js?t=") + stamp;
             script.onload = resolve; script.onerror = reject;
             document.body.appendChild(script);
           });
-          window.__test.codexResult = await window.runCodexPanelTests();
+          window.__test.codexResult = historyRegression ? await window.runHistoryPanelTests() : await window.runCodexPanelTests();
         }
       })().catch((err) => window.__test.errors.push(String(err.message)));
     </script>

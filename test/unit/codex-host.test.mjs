@@ -34,7 +34,7 @@ async function host() {
     clearTimeout: (timer) => timers.delete(timer),
   });
   const source = readFileSync(new URL("../../src/host/codex-host.mjs", import.meta.url), "utf8");
-  const module = new SourceTextModule(source + `\nexport { MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
+  const module = new SourceTextModule(source + `\nexport { loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
   await module.link((name) => {
     const values = imports[name];
     assert.ok(values, `unexpected import: ${name}`);
@@ -229,4 +229,50 @@ test("effort uses the selected model's levels and omits unknown or unsupported c
   assert.equal(h.api.effortForModel("six-levels", "ultracode"), "ultra");
   assert.equal(h.api.effortForModel("no-levels", "high"), null);
   assert.equal(h.api.effortForModel("unknown", "max"), null);
+});
+
+
+test("history reads the newest five full turns and passes the older cursor", async () => {
+  const h = await host();
+  h.respond((req) => {
+    assert.equal(req.method, "thread/turns/list");
+    assert.equal(req.params.limit, 5);
+    assert.equal(req.params.sortDirection, "desc");
+    assert.equal(req.params.itemsView, "full");
+    return { data: [3, 2].map((n) => ({ id: "t" + n, startedAt: 1000 + n, items: [{ id: "m" + n, type: "agentMessage", text: "Reply " + n }] })), nextCursor: "older" };
+  });
+  await h.api.loadTranscript({ id: "a", sessionId: "thread-a", requestId: "r1", paged: true });
+  const page = h.messages.at(-1);
+  assert.deepEqual(page.events.map((e) => e.message.content[0].text), ["Reply 2", "Reply 3"]);
+  assert.equal(page.nextCursor.value, "older");
+  assert.equal(page.requestId, "r1");
+  await h.api.loadTranscript({ id: "a", sessionId: "thread-a", requestId: "r2", cursor: page.nextCursor });
+  assert.equal(h.requests.at(-1).params.cursor, "older");
+});
+
+test("oversized Unicode history survives native frames without truncation", async () => {
+  const h = await host();
+  const original = { type: "transcript", id: "a", sessionId: "thread-a", requestId: "large", events: [{ text: 'Привет 🦎 \"\\'.repeat(120000) }], paged: true, done: true };
+  h.api.sendTranscriptPage(original);
+  const frames = h.messages.filter((m) => m.type === "transcriptPart");
+  assert.ok(frames.length > 1);
+  for (const frame of frames) assert.ok(Buffer.byteLength(JSON.stringify(frame)) < 900 * 1024);
+  assert.deepEqual(JSON.parse(frames.map((f) => f.text).join("")), original);
+  assert.equal(h.messages.some((m) => m.type === "error"), false);
+});
+
+test("older CLI history fallback pages without offset drift or swallowed failures", async () => {
+  const h = await host();
+  let turns = Array.from({ length: 12 }, (_, i) => ({ id: "t" + i, items: [] }));
+  h.respond((req) => { if (req.method === "thread/turns/list") throw new Error("method not found"); return { thread: { turns } }; });
+  await h.api.loadTranscript({ id: "a", sessionId: "thread-a", requestId: "r1" });
+  const cursor = h.messages.at(-1).nextCursor;
+  assert.deepEqual(cursor, { kind: "legacy", before: "t7" });
+  turns.push({ id: "new", items: [] });
+  await h.api.loadTranscript({ id: "a", sessionId: "thread-a", requestId: "r2", cursor });
+  assert.equal(h.messages.at(-1).nextCursor.before, "t2");
+  h.respond(() => { throw new Error("read failed"); });
+  await h.api.loadTranscript({ id: "a", sessionId: "thread-a", requestId: "r3", cursor });
+  assert.equal(h.messages.at(-1).requestId, "r3");
+  assert.match(h.messages.at(-1).error, /read failed/);
 });

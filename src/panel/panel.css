@@ -4472,3 +4472,18 @@ code.inline.path:focus-visible {
 
 .effort-btn:disabled { opacity: 0.5; cursor: default; }
 .effort-note { margin-top: 10px; font-size: 12px; line-height: 1.4; color: var(--text-secondary); }
+
+.history-more {
+  display: block;
+  margin: 0 auto 16px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.history-more[hidden] { display: none; }
+.history-more:disabled { cursor: default; }

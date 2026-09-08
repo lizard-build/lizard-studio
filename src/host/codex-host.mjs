@@ -48,7 +48,7 @@ const codexSpawner = createCodexSpawner({ hostDir: HOST_DIR, nodePath: process.e
 
 // Bumped on every change the panel needs to know about. Reported in
 // `agentReady`. Claude's own HOST_VERSION is separate and untouched.
-const CODEX_HOST_VERSION = 5;
+const CODEX_HOST_VERSION = 6;
 
 // The browser bridge numbers its requests from here so the router can tell our
 // `browserResult` replies from claude's by value alone, and never has to parse
@@ -1738,39 +1738,70 @@ async function restartSession(msg) {
   });
 }
 
-async function loadTranscript(msg) {
+// Fetch newest turns first. The cursor belongs to the server, so appending a
+// new turn cannot shift the boundary of an older page.
+async function transcriptPage(msg) {
   const threadId = msg.sessionId;
-  if (!threadId) return;
+  if (msg.cursor?.kind !== "legacy") {
+    try {
+      const res = await rpc("thread/turns/list", {
+        threadId, cursor: msg.cursor?.value || undefined,
+        limit: 5, sortDirection: "desc", itemsView: "full",
+      }, 60000);
+      if (!Array.isArray(res?.data)) throw new Error("Invalid history page");
+      return { turns: res.data.slice().reverse(), nextCursor: res.nextCursor ? { kind: "turns", value: res.nextCursor } : null };
+    } catch (err) {
+      // Older CLIs have no paged read. Keep their browser payload bounded too.
+      if (!/unknown (method|variant)|method not found|unsupported method/i.test(err?.message || "")) throw err;
+    }
+  }
+  const res = await rpc("thread/read", { threadId, includeTurns: true }, 60000);
+  const turns = res?.thread?.turns || [];
+  const end = msg.cursor?.kind === "legacy" ? turns.findIndex((t) => t.id === msg.cursor.before) : turns.length;
+  if (end < 0) throw new Error("History changed. Reopen the chat to reload it.");
+  const start = Math.max(0, end - 5);
+  return { turns: turns.slice(start, end), nextCursor: start > 0 ? { kind: "legacy", before: turns[start].id } : null };
+}
+
+// Split the serialized page, including a single oversized message, without
+// truncating any content. Even escaped Unicode stays below Chrome's 1 MB cap.
+function sendTranscriptPage(message) {
+  const json = JSON.stringify(message);
+  if (Buffer.byteLength(json) <= MAX_MSG) return send(message);
+  const chunkSize = 100000;
+  for (let offset = 0; offset < json.length; offset += chunkSize) {
+    send({ type: "transcriptPart", id: message.id, sessionId: message.sessionId,
+      requestId: message.requestId, index: offset / chunkSize,
+      total: Math.ceil(json.length / chunkSize), text: json.slice(offset, offset + chunkSize) });
+  }
+}
+
+async function loadTranscript(msg) {
+  if (!msg.sessionId) return;
+  const meta = { type: "transcript", id: msg.id, sessionId: msg.sessionId,
+    requestId: msg.requestId, paged: true, done: true };
   try {
     await startAppServer();
-    // The panel asks for the transcript the moment it reconnects, which can land
-    // in the same millisecond as a session start that replaces the app-server to
-    // pick up a custom provider key. The read then dies with the old process and
-    // the tab comes back empty — so a dead server is not a failure here, it is a
-    // reason to wait for the new one and ask again.
-    let res;
-    try {
-      res = await rpc("thread/read", { threadId, includeTurns: true }, 60000);
-    } catch (err) {
-      if (!/app-server exited/i.test((err && err.message) || "")) throw err;
-      log("thread/read raced an app-server restart — retrying");
+    let page;
+    try { page = await transcriptPage(msg); }
+    catch (err) {
+      if (!/app-server exited/i.test(err?.message || "")) throw err;
       await startAppServer();
-      res = await rpc("thread/read", { threadId, includeTurns: true }, 60000);
+      page = await transcriptPage(msg);
     }
-    const thread = (res && res.thread) || {};
-    const turns = thread.turns || [];
     const s = sessions.get(msg.id) || makeSession(msg.id, msg.cwd);
     const events = [];
-    for (const turn of turns) {
+    for (const turn of page.turns) {
       for (const item of turn.items || []) {
         const replay = replayItem(s, item);
-        if (replay) events.push(...replay);
+        if (replay) events.push(...replay.map((event) => ({ ...event, historyItemId: item.id,
+          timestamp: turn.startedAt ? new Date(turn.startedAt * 1000).toISOString() : undefined })));
       }
     }
-    send({ type: "transcript", id: msg.id, events, done: true });
+    sendTranscriptPage({ ...meta, events, nextCursor: page.nextCursor });
   } catch (err) {
-    log("thread/read failed:", err && err.message);
-    send({ type: "transcript", id: msg.id, events: [], done: true, error: String(err && err.message) });
+    log("history read failed:", err?.message);
+    send({ ...meta, events: [], error: String(err?.message || err) });
   }
 }
 
