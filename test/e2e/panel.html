@@ -151,7 +151,8 @@
         try { store.rkChatV2 = JSON.parse(decodeURIComponent(seed)); } catch (_) {}
       }
       const historyRegression = new URLSearchParams(location.search).get("regressions") === "history";
-      const codexRegression = new URLSearchParams(location.search).get("regressions") === "codex";
+      const auditRegression = new URLSearchParams(location.search).get("regressions") === "audit";
+      const codexRegression = auditRegression || new URLSearchParams(location.search).get("regressions") === "codex";
       if (historyRegression) store.rkChatV2 = {
         activeId: "history-a", lastHarness: "codex",
         tabs: [{ id: "history-a", title: "History", harness: "codex", model: "test-model", cwd: "/test/project", sessionId: "thread-history", mode: "workspace" }],
@@ -188,6 +189,15 @@
             document.body.appendChild(script);
           });
           window.__test.codexResult = historyRegression ? await window.runHistoryPanelTests() : await window.runCodexPanelTests();
+          if (auditRegression) {
+            await new Promise((resolve, reject) => {
+              const script = document.createElement("script");
+              script.src = "audit-panel.js?t=" + stamp;
+              script.onload = resolve; script.onerror = reject;
+              document.body.appendChild(script);
+            });
+            window.__test.auditResult = await window.runAuditPanelTests();
+          }
         }
       })().catch((err) => window.__test.errors.push(String(err.message)));
     </script>
