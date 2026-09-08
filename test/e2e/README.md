@@ -66,3 +66,10 @@ Then drive it from the console — `__test.emit({type:"ready", …})`,
 `__test.toolCards()`, `__test.rows("#harness-menu")`. A `?seed=<json>` parameter
 starts the panel from a remembered state, which is how the persistence and
 per-tab checks are done.
+
+The automated browser suites use the same page with `?regressions=codex`,
+`?regressions=history`, or `?regressions=audit`. The audit suite also runs the
+Codex suite, then checks chat drafts, delayed config replies, agent selection,
+sign-in controls, skills, and keyboard focus. Read `__test.codexResult`,
+`__test.auditResult`, and `__test.errors` after the suite finishes. These tests
+use fake host replies and do not send prompts to live accounts.

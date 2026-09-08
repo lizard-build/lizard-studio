@@ -224,7 +224,7 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v26: ChatGPT labels and launchd startup for the bundled OpenAI host.
 // v27: the OpenAI host sends only supported model effort levels.
 // v28: paged ChatGPT history and lossless history message chunks.
-const HOST_VERSION = 28;
+const HOST_VERSION = 29;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -1778,14 +1778,14 @@ function killBashForSession(id) {
 const commandCache = new Map();   // cwd -> { list, skills, plugins }
 const harvestWaiters = new Map(); // cwd -> Set of tab ids awaiting an in-flight harvest
 
-function sendCommands(id, data) {
-  send({ type: "commands", id, list: data.list, skills: data.skills, plugins: data.plugins });
+function sendCommands(id, data, cwd) {
+  send({ type: "commands", id, agent: "claude", cwd, list: data.list, skills: data.skills, plugins: data.plugins });
 }
 
 function ensureCommands(id, cwd, model) {
   cwd = cwd || homedir();
   if (commandCache.has(cwd)) {
-    sendCommands(id, commandCache.get(cwd));
+    sendCommands(id, commandCache.get(cwd), cwd);
     return;
   }
   // A harvest for this cwd is already running — two tabs opening in the same
@@ -1835,7 +1835,7 @@ function harvestCommands(cwd, model) {
         plugins: Array.isArray(o.plugins) ? o.plugins.map((p) => ({ name: p.name, source: p.source })) : [],
       };
       commandCache.set(cwd, data);
-      for (const wid of harvestWaiters.get(cwd) || []) sendCommands(wid, data);
+      for (const wid of harvestWaiters.get(cwd) || []) sendCommands(wid, data, cwd);
       log("harvested", data.list.length, "commands,", data.skills.length, "skills,", data.plugins.length, "plugins for", cwd);
       finish();
     }
@@ -2604,7 +2604,7 @@ function configCwd(id, msg) {
 
 function configRead(id, msg) {
   const spec = configResolve(msg.key, msg.scope, configCwd(id, msg));
-  const base = { type: "configRead", id, key: msg.key, scope: msg.scope };
+  const base = { type: "configRead", id, key: msg.key, scope: msg.scope, agent: "claude", cwd: msg.cwd, requestId: msg.requestId };
   if (!spec) { send({ ...base, ok: false, error: "No project folder selected." }); return; }
   const exists = existsSync(spec.path);
   try {
@@ -2624,7 +2624,7 @@ function configRead(id, msg) {
 
 function configWrite(id, msg) {
   const spec = configResolve(msg.key, msg.scope, configCwd(id, msg));
-  const base = { type: "configWrite", id, key: msg.key, scope: msg.scope };
+  const base = { type: "configWrite", id, key: msg.key, scope: msg.scope, agent: "claude", cwd: msg.cwd, requestId: msg.requestId };
   if (!spec) { send({ ...base, ok: false, error: "No project folder selected." }); return; }
   const raw = String(msg.content == null ? "" : msg.content);
   let toWrite;
@@ -2682,6 +2682,9 @@ function handle(msg) {
   if (!msg) return;
   const id = msg.id || "default";
   switch (msg.type) {
+    case "listSkills":
+      ensureCommands(id, msg.cwd);
+      break;
     case "configRead":
       configRead(id, msg);
       break;

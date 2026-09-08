@@ -93,70 +93,55 @@ chrome.commands.onCommand.addListener((command) => {
 // There's no chrome.sidePanel.close(), so the panel page keeps a port open while
 // it's alive (see sidepanel.js). That lets us (a) know whether a panel is open
 // and (b) ask it to window.close() itself for the toggle button.
-const panelPorts = new Set();
+// A side panel belongs to one browser window. Never route by last focus:
+// another window may become active between selecting content and delivering it.
+const panelPorts = new Map();
+function panelsForWindow(windowId) {
+  if (!Number.isInteger(windowId) || windowId < 0) return [];
+  return [...panelPorts].filter(([, id]) => id === windowId).map(([port]) => port);
+}
+function sendToPanels(windowId, message) {
+  const ports = panelsForWindow(windowId);
+  for (const port of ports) {
+    try { port.postMessage(message); } catch (_) {}
+  }
+  return ports.length;
+}
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "rk-sidepanel") return;
-  panelPorts.add(port);
-  // The panel just came up (natively, via openPanelOnActionClick — so onClicked
-  // didn't run). Bring the in-page toolbar up alongside it, on the tab the user is
-  // looking at, so opening Studio still surfaces both. The content script no-ops
-  // if the bar is already shown, so SW-recycle reconnects don't re-toggle it.
-  showToolbarOnActiveTab();
+  panelPorts.set(port, null);
+  port.onMessage.addListener((msg) => {
+    if (msg?.type !== "panelReady" || !Number.isInteger(msg.windowId) || msg.windowId < 0) return;
+    if (!panelPorts.has(port) || panelPorts.get(port) !== null) return;
+    panelPorts.set(port, msg.windowId);
+    showToolbarOnActiveTab(msg.windowId);
+  });
   port.onDisconnect.addListener(() => {
+    const windowId = panelPorts.get(port);
     panelPorts.delete(port);
-    // Side panel went away (user closed it, or it closed itself) — closing the
-    // panel and closing the toolbar are tied together, so hide the bar too. The
-    // panel reconnects across service-worker restarts (see sidepanel.js), so an
-    // empty set here means a genuine close, not a transient SW recycle.
-    if (panelPorts.size === 0) hideToolbarEverywhere();
+    if (windowId != null && !panelsForWindow(windowId).length) hideToolbarInWindow(windowId);
   });
 });
 
-// Show the Lizard Studio toolbar on the tab the user is currently looking at.
-// Used when the side panel opens (its port connects).
-//
-// We broadcast to every tab rather than resolving the active tab in the worker:
-// opening the side panel steals focus, so a lastFocusedWindow query right after
-// the panel connects is unreliable. Each content script decides for itself — it
-// only raises the bar if its tab is the visible (foreground) one and the bar
-// isn't already up, so exactly the tab the user is looking at responds. Safe to
-// call on every connect, including transient service-worker reconnects.
-function showToolbarOnActiveTab() {
-  chrome.tabs.query({}, (tabs) => {
-    for (const t of tabs) {
-      // Inject-on-miss only for tabs the user can see: a foreground tab with no
-      // listener means the content script never arrived (extension installed
-      // after the page loaded, or document_idle hasn't fired yet).
-      if (t.id != null) sendToTab(t.id, "RK_SHOW_TOOLBAR", t.active);
-    }
+function showToolbarOnActiveTab(windowId) {
+  chrome.tabs.query({ windowId }, (tabs) => {
+    for (const t of tabs) if (t.id != null) sendToTab(t.id, "RK_SHOW_TOOLBAR", t.active);
   });
 }
-
-// The show broadcast above is one-shot, at panel-connect time — a background
-// tab ignores it (visibilityState check in main.js) and never hears it again.
-// While the panel is open, catch up whatever tab comes to the front, so
-// "panel open ⇒ toolbar up" holds on the tab the user is actually looking at,
-// not just the one that was in front when the panel opened.
-function catchUpActiveTab(tabId) {
-  if (panelPorts.size === 0) return;
-  sendToTab(tabId, "RK_SHOW_TOOLBAR", true);
+function catchUpActiveTab(tabId, windowId) {
+  if (panelsForWindow(windowId).length) sendToTab(tabId, "RK_SHOW_TOOLBAR", true);
 }
-chrome.tabs.onActivated.addListener(({ tabId }) => catchUpActiveTab(tabId));
-chrome.windows.onFocusChanged.addListener((winId) => {
-  if (winId === chrome.windows.WINDOW_ID_NONE) return;
-  chrome.tabs.query({ active: true, windowId: winId }, (tabs) => {
-    const t = tabs && tabs[0];
-    if (t && t.id != null) catchUpActiveTab(t.id);
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => catchUpActiveTab(tabId, windowId));
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  chrome.tabs.query({ active: true, windowId }, (tabs) => {
+    const tab = tabs && tabs[0];
+    if (tab && tab.id != null) catchUpActiveTab(tab.id, windowId);
   });
 });
-
-// Tell every tab's content script to hide the Lizard Studio toolbar. Used when the
-// side panel closes. hide() is idempotent and a no-op where the bar isn't shown.
-function hideToolbarEverywhere() {
-  chrome.tabs.query({}, (tabs) => {
-    for (const t of tabs) {
-      if (t.id != null) chrome.tabs.sendMessage(t.id, { type: "RK_HIDE_TOOLBAR" }).catch(() => {});
-    }
+function hideToolbarInWindow(windowId) {
+  chrome.tabs.query({ windowId }, (tabs) => {
+    for (const t of tabs) if (t.id != null) sendToTab(t.id, "RK_HIDE_TOOLBAR", false);
   });
 }
 
@@ -175,14 +160,15 @@ function openPanel(tab) {
 // getContexts() sees the panel regardless, so consult it before opening; the
 // user gesture survives extension-API promise boundaries, so open() still works.
 async function toggleSidePanel(tab) {
-  if (panelPorts.size > 0) {
-    panelPorts.forEach((p) => p.postMessage({ cmd: "close" }));
+  const windowId = tab && tab.windowId;
+  if (!Number.isInteger(windowId)) return;
+  if (sendToPanels(windowId, { cmd: "close" })) {
     return;
   }
   let hasPanel = false;
   try {
     const ctxs = await chrome.runtime.getContexts({ contextTypes: ["SIDE_PANEL"] });
-    hasPanel = ctxs.length > 0;
+    hasPanel = ctxs.some((ctx) => ctx.windowId === windowId);
   } catch (_) { /* very old Chrome — fall through to open */ }
   if (!hasPanel) {
     openPanel(tab);
@@ -192,8 +178,7 @@ async function toggleSidePanel(tab) {
   // (the panel retries every ~500ms) instead of inverting the toggle.
   const deadline = Date.now() + 2000;
   const tryClose = () => {
-    if (panelPorts.size > 0) panelPorts.forEach((p) => p.postMessage({ cmd: "close" }));
-    else if (Date.now() < deadline) setTimeout(tryClose, 150);
+    if (!sendToPanels(windowId, { cmd: "close" }) && Date.now() < deadline) setTimeout(tryClose, 150);
   };
   tryClose();
 }
@@ -239,7 +224,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   switch (msg.type) {
     case "RK_CLOSE_SIDEPANEL":
       // Unconditional close — used when the toolbar itself is dismissed.
-      panelPorts.forEach((p) => p.postMessage({ cmd: "close" }));
+      sendToPanels(sender.tab && sender.tab.windowId, { cmd: "close" });
       break;
     case "RK_RESPONSIVE_ON":
       // Ack only after the DNR rule is actually live so the content script can
@@ -255,12 +240,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // Selector tool clicked an element — hand it to the side-panel chat as
       // context. Content scripts can't reach the panel directly, so relay it
       // over the open panel port(s).
-      panelPorts.forEach((p) => p.postMessage({ cmd: "pickElement", element: msg.element }));
+      sendResponse({ ok: !!sendToPanels(sender.tab && sender.tab.windowId, { cmd: "pickElement", element: msg.element }) });
       break;
     case "RK_ADD_TO_CHAT":
       // Annotate tool produced an annotated screenshot — relay it to the
       // side-panel chat, which attaches it like a pasted image.
-      panelPorts.forEach((p) => p.postMessage({ cmd: "addImage", dataUrl: msg.dataUrl }));
+      sendResponse({ ok: !!sendToPanels(sender.tab && sender.tab.windowId, { cmd: "addImage", dataUrl: msg.dataUrl }) });
       break;
   }
 });

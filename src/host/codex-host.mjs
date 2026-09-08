@@ -48,7 +48,7 @@ const codexSpawner = createCodexSpawner({ hostDir: HOST_DIR, nodePath: process.e
 
 // Bumped on every change the panel needs to know about. Reported in
 // `agentReady`. Claude's own HOST_VERSION is separate and untouched.
-const CODEX_HOST_VERSION = 6;
+const CODEX_HOST_VERSION = 7;
 
 // The browser bridge numbers its requests from here so the router can tell our
 // `browserResult` replies from claude's by value alone, and never has to parse
@@ -1412,13 +1412,9 @@ async function startSession(msg) {
 
   const s = makeSession(id, cwd);
   // A custom model brings its own provider, declared inline on thread/start.
-  // It is deliberately checked before the catalog test below: its id is ours,
-  // not Codex's, so that test would throw it away.
   s.provider = msg.provider && msg.provider.baseUrl ? msg.provider : null;
   s.model = s.provider ? s.provider.model : msg.model || null;
-  // A model id from the Claude picker means nothing here — take the catalog
-  // default rather than handing Codex a name it will reject.
-  if (!s.provider && s.model && !MODELS.some((m) => m.id === s.model)) s.model = null;
+  // Keep an explicit choice even before the catalog arrives. The server validates it.
   s.effort = msg.effort || null;
   s.mode = msg.permissionMode || "default";
   sessions.set(id, s);
@@ -1545,18 +1541,18 @@ const BROWSER_HINT =
 
 async function loadSkills(s) {
   try {
-    const res = await rpc("skills/list", {}, 15000);
+    const res = await rpc("skills/list", { cwds: [s.cwd] }, 15000);
     const entries = (res && res.data) || [];
     const names = [];
     for (const entry of entries) {
-      for (const skill of entry.skills || []) if (skill.name) names.push(skill.name);
+      for (const skill of entry.skills || []) if (skill.name && skill.enabled !== false && !names.includes(skill.name)) names.push(skill.name);
     }
-    if (!names.length) return;
     // Codex has no slash commands, but it does have skills — and the panel's
     // "/" menu is the natural place for them.
-    send({ type: "commands", id: s.id, list: names, skills: names });
+    send({ type: "commands", id: s.id, agent: "codex", cwd: s.cwd, list: names, skills: names });
   } catch (err) {
     log("skills/list failed:", err && err.message);
+    send({ type: "commands", id: s.id, agent: "codex", cwd: s.cwd, list: [], skills: [], error: "Could not load skills." });
   }
 }
 
@@ -1857,6 +1853,12 @@ function handle(msg) {
     case "browserResult": resolveBrowser(msg); break;
     case "configRead": codexConfigRead(msg.id, msg); break;
     case "configWrite": codexConfigWrite(msg.id, msg); break;
+    case "listSkills":
+      startAppServer().then(() => loadSkills({ id: msg.id, cwd: msg.cwd || homedir() })).catch((err) => send({ type: "commands", id: msg.id, agent: "codex", cwd: msg.cwd, list: [], skills: [], error: err.message }));
+      break;
+    case "rewind": send({ type: "error", id: msg.id, message: "Editing past messages is not supported in ChatGPT chats." }); break;
+    case "remoteControl": send({ type: "remoteControl", id: msg.id, ok: false, error: "Remote Control is only available in Claude Code chats." }); break;
+    case "authCode": send({ type: "authDone", id: msg.id, ok: false, message: "Complete sign-in on the ChatGPT sign-in page." }); break;
     case "authLogin": startLogin(msg.id); break;
     case "authCancel": cancelLogin(msg.id); break;
     case "prewarm":
@@ -1948,7 +1950,7 @@ function codexConfigCwd(id, msg) {
 }
 
 function codexConfigRead(id, msg) {
-  const base = { type: "configRead", id, key: msg.key, scope: msg.scope, agent: "codex" };
+  const base = { type: "configRead", id, key: msg.key, scope: msg.scope, agent: "codex", cwd: msg.cwd, requestId: msg.requestId };
   const spec = codexConfigResolve(msg.key, msg.scope, codexConfigCwd(id, msg));
   if (!spec) {
     const why = msg.key === "config" ? "ChatGPT keeps one config.toml, in its own folder." : "No project folder selected.";
@@ -1976,7 +1978,7 @@ function codexConfigRead(id, msg) {
 }
 
 function codexConfigWrite(id, msg) {
-  const base = { type: "configWrite", id, key: msg.key, scope: msg.scope, agent: "codex" };
+  const base = { type: "configWrite", id, key: msg.key, scope: msg.scope, agent: "codex", cwd: msg.cwd, requestId: msg.requestId };
   const spec = codexConfigResolve(msg.key, msg.scope, codexConfigCwd(id, msg));
   if (!spec) { send({ ...base, ok: false, error: "No project folder selected." }); return; }
   const raw = String(msg.content == null ? "" : msg.content);

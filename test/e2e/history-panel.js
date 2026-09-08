@@ -11,7 +11,7 @@ window.runHistoryPanelTests = async function () {
   });
   const reply = (req, evs, cursor, extra = {}) => t.emit({ type: "transcript", id: req.id,
     sessionId: req.sessionId, requestId: req.requestId, paged: true, done: true, events: evs, nextCursor: cursor, ...extra });
-  t.emit({ type: "ready", ok: true, version: 28, home: "/test" });
+  t.emit({ type: "ready", ok: true, version: 29, home: "/test" });
   t.emit({ type: "agentReady", agent: "codex", ok: true, version: 6 });
   const initial = last();
   check("opening a restored chat asks for the tail once", t.posted("loadTranscript").length === 1 && initial.paged && initial.cursor === null);

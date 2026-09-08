@@ -475,7 +475,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 28;
+  const EXPECTED_HOST_VERSION = 29;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -584,8 +584,10 @@
   // Commands the panel runs itself. The headless CLI doesn't list them (both are
   // REPL-only there), so splice them into the autocomplete menu ourselves.
   const LOCAL_COMMANDS = ["login", "remote-control"];
-  function withLocalCommands(list) {
-    const missing = LOCAL_COMMANDS.filter((c) => !list.includes(c));
+  function withLocalCommands(list, agent) {
+    if (agent === "codex") list = list.filter((c) => c !== "remote-control" && c !== "rc");
+    const local = agent === "codex" ? ["login"] : LOCAL_COMMANDS;
+    const missing = local.filter((c) => !list.includes(c));
     return missing.length ? [...missing, ...list] : list;
   }
 
@@ -624,7 +626,7 @@
         if (Array.isArray(p.usageLabels) && p.usageLabels.length) usageLabels = p.usageLabels;
         if (Array.isArray(p.tabs) && p.tabs.length) {
           for (const t of p.tabs) {
-            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt });
+            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt, draft: t.draft, bashMode: t.bashMode });
             chats.set(chat.id, chat);
     let lastScrollTop = 0;
     const earlier = () => {
@@ -646,11 +648,14 @@
       done && done();
     }
   }
+  let composerChatId = null;
   function savePrefs() {
     try {
+      const owner = chats.get(composerChatId);
+      if (owner && els.input) owner.draft = els.input.value;
       const tabs = order.map((id) => {
         const c = chats.get(id);
-        return { id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: c.sessionId, bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt };
+        return { id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: c.sessionId, bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, bashMode: c.bashMode };
       });
       chrome.storage.local.set({
         rkChatV2: {
@@ -697,6 +702,16 @@
   function registerMenu(menu, onClose) {
     if (!menu || menuRegistry.includes(menu)) return;
     menuRegistry.push(menu);
+    menu.addEventListener("keydown", (e) => {
+      const rows = [...menu.querySelectorAll("button:not(:disabled)")];
+      if (!rows.length || !["ArrowDown", "ArrowUp", "Home", "End", "Escape"].includes(e.key)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") { closeMenu(menu); els.input.focus(); return; }
+      const index = rows.indexOf(document.activeElement);
+      const next = e.key === "Home" ? 0 : e.key === "End" ? rows.length - 1 : e.key === "ArrowDown" ? (index + 1) % rows.length : (index - 1 + rows.length) % rows.length;
+      rows[next].focus();
+    });
     if (onClose) menuTeardowns.set(menu, onClose);
   }
   function menuIsOpen(menu) {
@@ -710,6 +725,8 @@
     menu.classList.remove("is-closing");
     menu.classList.remove("hidden");
     openPopover(menu);
+    const first = menu.querySelector("button.current, button");
+    if (first) first.focus();
   }
   function closeMenu(menu) {
     if (!menuIsOpen(menu)) return;
@@ -781,8 +798,7 @@
     if (!trigger) return;
     anchorPopover(menu, trigger);
     trigger.setAttribute("aria-expanded", "true");
-    // Focus the panel, not the first row: Escape has somewhere to fire from,
-    // and nothing inside is pre-selected for a stray Enter to act on.
+    // Give non-button controls (such as the effort slider) a focus target.
     try { menu.focus({ preventScroll: true }); } catch (_) { menu.focus(); }
   }
 
@@ -947,7 +963,8 @@
       // persists finished runs ({ id, command, output, code, ts }) so they
       // survive a panel reload (they live only in the panel, never in the CLI
       // transcript); `bashRuns` tracks in-flight ones (execId -> render nodes).
-      bashMode: false,
+      draft: typeof opts.draft === "string" ? opts.draft : "",
+      bashMode: !!opts.bashMode,
       bashHistory: Array.isArray(opts.bashHistory) ? opts.bashHistory : [],
       bashRuns: new Map(),
       // Finished bash-mode runs not yet seen by the model. Each real prompt
@@ -1064,7 +1081,13 @@
   function setActive(id) {
     if (!chats.has(id)) return;
     const fromId = activeId;
+    const owner = chats.get(composerChatId);
+    if (owner) owner.draft = els.input.value;
     activeId = id;
+    composerChatId = id;
+    els.input.value = chats.get(id).draft;
+    hideSlash();
+    autosize();
     // Bringing the tab forward counts as seeing its result.
     chats.get(id).unseen = false;
     // Note where the tab being left was read to, swap the panels, put the
@@ -1636,7 +1659,7 @@
     if (opts && opts.real && !chat.historyPage) {
       const turnIndex = ++chat.turnIndexCounter;
       row.dataset.turnIndex = String(turnIndex);
-      wireEditableBubble(chat, bubble, turnIndex, text, attachments);
+      if (chat.harness !== "codex") wireEditableBubble(chat, bubble, turnIndex, text, attachments);
     }
     append(chat, row);
     return row;
@@ -1658,6 +1681,7 @@
   }
 
   function beginEdit(chat, bubble, turnIndex, text, attachments) {
+    if (chat.harness === "codex") return;
     const mdNode = bubble.querySelector(".md");
     bubble.classList.add("editing");
     const ta = el("textarea", "msg-edit");
@@ -1710,6 +1734,7 @@
   // truncate, resume, write the edited prompt to the new process — as one
   // atomic step (see rewindSession in claude-host.mjs).
   function resendEdited(chat, turnIndex, newText, attachments) {
+    if (chat.harness === "codex") return;
     const rows = Array.from(chat.messagesEl.children);
     const startIdx = rows.findIndex((r) => r.dataset && r.dataset.turnIndex === String(turnIndex));
     if (startIdx === -1) return;
@@ -4217,7 +4242,7 @@
           chat.replayed = true;
           if (d.cwd) { chat.cwd = d.cwd; rememberCwd(d.cwd); }
           if (d.session_id) chat.sessionId = d.session_id;
-          if (Array.isArray(d.slash_commands)) chat.slashCommands = withLocalCommands(d.slash_commands);
+          if (Array.isArray(d.slash_commands)) chat.slashCommands = withLocalCommands(d.slash_commands, chat.harness);
           if (Array.isArray(d.skills)) chat.skills = d.skills;
           if (Array.isArray(d.plugins)) chat.plugins = d.plugins.map((p) => ({ name: p.name, source: p.source }));
           if (d.model) reflectModel(chat, d.model);
@@ -5068,17 +5093,24 @@
           systemNote(chat, "Lost the browser tools for this session — the agent can't see the tab.", "warn", { dismissible: true });
         }
         break;
-      case "commands":
-        if (chat && Array.isArray(msg.list)) {
-          chat.slashCommands = withLocalCommands(msg.list);
+      case "commands": {
+        const agent = msg.agent || (chat && chat.harness) || "claude";
+        const cwd = msg.cwd || (chat && chat.cwd);
+        const cacheKey = JSON.stringify([agent, cwd]);
+        const previous = skillLists.get(cacheKey);
+        if (previous) clearTimeout(previous.timer);
+        skillLists.set(cacheKey, { loading: false, skills: msg.skills || [], error: msg.error || "" });
+        if (chat && chat.harness === agent && chat.cwd === cwd && Array.isArray(msg.list)) {
+          chat.slashCommands = withLocalCommands(msg.list, chat.harness);
           if (Array.isArray(msg.skills)) chat.skills = msg.skills;
           if (Array.isArray(msg.plugins)) chat.plugins = msg.plugins;
           // If the user is mid-"/" in this tab, populate the menu now.
           if (chat.id === activeId && /^\/[^\s]*$/.test(els.input.value)) updateSlash();
           // Refresh the Skills list if it's the open settings view.
-          if (chat.id === activeId && settingsOpen() && settingsTab === "claude" && cfgKeyBy.claude === "skills") renderSettings();
         }
+        if (settingsOpen() && settingsTab === agent && activeCwd() === cwd && cfgKeyBy[agent] === "skills") renderSettings();
         break;
+      }
       case "exit":
         if (chat) {
           chat.started = false;
@@ -5154,39 +5186,8 @@
         }
         break;
       case "configRead":
-        // Ignore replies for a (key, scope) we've since navigated away from.
-        if (settingsOpen() && cfgEdit && cfgEdit.key === msg.key && cfgEdit.scope === msg.scope
-            && (msg.agent || "claude") === cfgEdit.agent) {
-          cfgEdit.loading = false;
-          if (msg.ok) {
-            cfgEdit.content = msg.content || "";
-            cfgEdit.original = msg.content || "";
-            cfgEdit.path = msg.path || "";
-            cfgEdit.exists = !!msg.exists;
-            cfgEdit.error = "";
-          } else {
-            cfgEdit.error = msg.error || "Couldn't read the file.";
-            cfgEdit.content = "";
-            cfgEdit.original = "";
-          }
-          renderSettings();
-        }
-        break;
       case "configWrite":
-        if (settingsOpen() && cfgEdit && cfgEdit.key === msg.key && cfgEdit.scope === msg.scope) {
-          cfgEdit.saving = false;
-          if (msg.ok) {
-            cfgEdit.original = cfgEdit.content;
-            cfgEdit.exists = true;
-            cfgEdit.status = "Saved";
-            cfgEdit.statusKind = "ok";
-            cfgEdit.error = "";
-          } else {
-            cfgEdit.error = msg.error || "Save failed.";
-            cfgEdit.status = "";
-          }
-          renderSettings();
-        }
+        finishConfigRequest(msg);
         break;
       case "shellKilled":
         onShellKilled(msg);
@@ -5217,7 +5218,7 @@
         }
         break;
       case "authUrl":
-        if (chat) loginShowUrl(chat, msg.url);
+        if (chat) loginShowUrl(chat, msg.url, msg.code);
         break;
       case "authDone":
         if (chat) loginDone(chat, msg.ok, msg.message);
@@ -5811,6 +5812,10 @@
     // anything else after the command is the session name shown in the app.
     const rc = /^\/(?:remote-control|rc)(?:\s+([\s\S]*))?$/.exec(text);
     if (rc) {
+      if (chat.harness === "codex") {
+        systemNote(chat, "Remote Control is only available in Claude Code chats.", "warn");
+        return;
+      }
       els.input.value = "";
       autosize();
       userBubble(chat, text, null);
@@ -5868,10 +5873,12 @@
     chat.queue.push(entry);
     chat.contexts = [];
     chat.attachments = [];
-    renderContextChips();
-    renderAttachmentThumbs();
-    els.input.value = "";
-    autosize();
+    if (chat.id === activeId) {
+      renderContextChips();
+      renderAttachmentThumbs();
+      els.input.value = "";
+      autosize();
+    }
     entry.el = renderQueuedBubble(chat, entry);
     updateTabDots(); // a queued prompt keeps the tab's yellow dot alive
     if (chat.id === activeId) updateGreeting(); // queued bubble lands while `empty` is still true
@@ -6189,7 +6196,7 @@
     const icon = el("span", "login-icon");
     icon.innerHTML = '<span class="login-spinner"></span>';
     titleRow.appendChild(icon);
-    titleRow.appendChild(el("span", "login-title", "Sign in to Claude"));
+    titleRow.appendChild(el("span", "login-title", chat.harness === "codex" ? "Sign in to ChatGPT" : "Sign in to Claude Code"));
     card.appendChild(titleRow);
     card._icon = icon;
     card._auto = expired;
@@ -6204,9 +6211,10 @@
     }
   }
 
-  function loginShowUrl(chat, url) {
+  function loginShowUrl(chat, url, code) {
     const card = chat.loginCard;
     if (!card) return;
+    if (card._controls) for (const control of card._controls) control.remove();
     card.classList.add("waiting");
     // The auto card is the only place the expired session is mentioned — don't
     // let the sign-in instructions overwrite the reason it's here.
@@ -6223,6 +6231,16 @@
     const open = el("button", "login-open", "Open sign-in page");
     open.type = "button";
     open.addEventListener("click", openTab);
+    if (chat.harness === "codex") {
+      card._status.textContent = code ? "Open the sign-in page and enter this code:" : "Open the sign-in page to continue.";
+      const deviceCode = el("div", "login-device-code", code || "");
+      const cancel = el("button", "login-fallback", "Cancel sign-in");
+      cancel.type = "button";
+      cancel.addEventListener("click", () => post({ type: "authCancel", id: chat.id }));
+      card.append(open, deviceCode, cancel);
+      card._controls = [open, deviceCode, cancel];
+      return;
+    }
     // The browser callback completes sign-in on its own in almost every case;
     // pasting the authorization code is a fallback for when it can't reach the
     // CLI (remote host, blocked localhost callback), so keep it tucked away.
@@ -6456,7 +6474,9 @@
     els.modeMenu.appendChild(el("div", "mode-head", "Permission mode"));
     for (const m of modesFor((chats.get(activeId) || {}).harness)) {
       const isCur = !!(chat && chat.mode === m.id);
-      const row = el("div", "mode-item " + m.cls + (isCur ? " current" : ""));
+      const row = el("button", "mode-item " + m.cls + (isCur ? " current" : ""));
+      row.type = "button";
+      row.setAttribute("aria-pressed", String(isCur));
       row.appendChild(el("span", "mode-dot"));
       const meta = el("div", "mode-meta");
       meta.appendChild(el("div", "mode-item-label", m.label));
@@ -6508,7 +6528,9 @@
     menu.appendChild(el("div", "model-head", title));
     for (const it of items) {
       const isCur = it.id === currentId;
-      const row = el("div", "model-item" + (isCur ? " current" : ""));
+      const row = el("button", "model-item" + (isCur ? " current" : ""));
+      row.type = "button";
+      row.setAttribute("aria-pressed", String(isCur));
       const logo = el("span", "model-item-logo");
       // Whose model this is. The Anthropic mark next to a GPT model was simply
       // wrong — and OpenAI's own mark has no colour to speak of, so it takes
@@ -7178,7 +7200,7 @@
   // the host's configResolve() understands.
   const CONFIG_FILES = {
     claude: ["claudemd", "hooks", "mcp", "plugins", "skills"],
-    codex: ["agents", "hooks", "config"],
+    codex: ["agents", "hooks", "config", "skills"],
   };
   const CONFIG_META = {
     claudemd: {
@@ -7230,6 +7252,7 @@
   // Codex keeps its own set, in its own places. Same shape as CONFIG_META so
   // the editor doesn't need to know which agent it is rendering.
   const CODEX_CONFIG_META = {
+    skills: { title: "Skills", label: "Skills", readonly: true, blurb: "Skills available to ChatGPT in this project. Edit them at their source files." },
     agents: {
       title: "AGENTS.md",
       label: "AGENTS.md",
@@ -7270,6 +7293,11 @@
   // the modal's re-renders so unsaved text isn't lost; keyed by (key, scope) so
   // late host replies for a scope we've since switched away from are ignored.
   let cfgEdit = null;
+  const cfgEditors = new Map();
+  const cfgRequests = new Map();
+  const skillLists = new Map();
+  let settingsReturnFocus = null;
+  const settingsInert = new Map();
 
   function settingsOpen() {
     return mounted && els.settingsOverlay && !els.settingsOverlay.classList.contains("hidden");
@@ -7277,17 +7305,27 @@
 
   function openSettings() {
     settingsTab = "connection";
-    modelDraft = null;
     modelRemoveId = null;
     cfgKeyBy.claude = "claudemd";
     cfgKeyBy.codex = "agents";
     skillsFilter = "";
     cfgEdit = null;
     renderSettings();
+    settingsReturnFocus = document.activeElement;
     els.settingsOverlay.classList.remove("hidden");
+    for (let node = els.settingsOverlay; node.parentElement && node !== document.body; node = node.parentElement) {
+      for (const sibling of node.parentElement.children) if (sibling !== node) {
+        settingsInert.set(sibling, sibling.inert);
+        sibling.inert = true;
+      }
+    }
+    els.settingsClose.focus();
   }
   function closeSettings() {
     els.settingsOverlay.classList.add("hidden");
+    for (const [node, inert] of settingsInert) node.inert = inert;
+    settingsInert.clear();
+    if (settingsReturnFocus && settingsReturnFocus.isConnected) settingsReturnFocus.focus();
     cfgEdit = null;
   }
   // Live-refresh the modal (e.g. host (re)connected while it's open) without
@@ -7307,7 +7345,6 @@
         if (settingsTab === t.id) return;
         settingsTab = t.id;
         cfgEdit = null; // a different agent's file is a different editor
-        modelDraft = null; // and a half-typed model is not worth carrying across tabs
         modelRemoveId = null;
         renderSettings();
       });
@@ -7521,29 +7558,76 @@
 
   // Request a config file from the host; the reply lands in onHostMessage's
   // `configRead` case, which repaints. Starts in a loading state.
+  function requestConfig(editor, type) {
+    const requestId = newId();
+    const request = { editor, type, content: editor.content };
+    cfgRequests.set(requestId, request);
+    const fail = (error) => finishConfigRequest({ type, requestId, ok: false, error });
+    request.timer = setTimeout(() => fail("The host didn't reply. Try again."), 30000);
+    const { agent, key, scope, cwd, id } = editor;
+    if (!post({ type, requestId, id, agent, key, scope, cwd, content: request.content })) {
+      fail(type === "configRead" ? "Host disconnected — can't read the file." : "Host disconnected — not saved.");
+    }
+  }
+
+  function finishConfigRequest(msg) {
+    const request = cfgRequests.get(msg.requestId);
+    if (!request || request.type !== msg.type) return;
+    const editor = request.editor;
+    clearTimeout(request.timer);
+    cfgRequests.delete(msg.requestId);
+    editor.error = msg.ok ? "" : (msg.error || "The request failed.");
+    editor.status = "";
+    if (msg.type === "configRead") {
+      editor.loading = false;
+      editor.readFailed = !msg.ok;
+      if (msg.ok) {
+        editor.content = editor.original = msg.content || "";
+        editor.path = msg.path || "";
+        editor.exists = !!msg.exists;
+      }
+    } else {
+      editor.saving = false;
+      if (msg.ok) {
+        editor.original = request.content;
+        editor.exists = true;
+        editor.status = editor.content === request.content ? "Saved" : "Earlier changes saved. New edits aren't saved.";
+        editor.statusKind = editor.content === request.content ? "ok" : "dim";
+      }
+    }
+    if (settingsOpen() && cfgEdit === editor) {
+      const focused = document.activeElement;
+      const selection = focused && focused.matches(".settings-editor")
+        ? { start: focused.selectionStart, end: focused.selectionEnd, direction: focused.selectionDirection, scroll: focused.scrollTop } : null;
+      renderSettings();
+      if (selection) {
+        const textarea = els.settingsBody.querySelector(".settings-editor");
+        if (textarea) { textarea.focus(); textarea.setSelectionRange(selection.start, selection.end, selection.direction); textarea.scrollTop = selection.scroll; }
+      }
+    }
+  }
+
   function loadConfig(agent, key, scope) {
-    cfgEdit = { agent, key, scope, loading: true, content: "", original: "", path: "", exists: false, error: "", status: "", statusKind: "", saving: false };
-    // The agent is named outright: which section of the modal you are looking
-    // at decides whose files these are, not which chat happens to be active.
-    if (!post({ type: "configRead", id: activeId, agent, key, scope, cwd: activeCwd() })) {
-      cfgEdit.loading = false;
-      cfgEdit.error = "Host disconnected — can't read the file.";
+    const cwd = activeCwd();
+    const cacheKey = JSON.stringify([agent, key, scope, scope === "user" ? null : cwd]);
+    const cached = cfgEditors.get(cacheKey);
+    if (cached && (cached.loading || cached.saving || cached.content !== cached.original)) {
+      cfgEdit = cached;
+    } else {
+      cfgEdit = { agent, key, scope, cwd, id: activeId, loading: true, content: "", original: "", path: "", exists: false, error: "", status: "", statusKind: "", saving: false };
+      cfgEditors.set(cacheKey, cfgEdit);
+      requestConfig(cfgEdit, "configRead");
     }
     renderSettings();
   }
 
   function saveConfig() {
-    if (!cfgEdit || cfgEdit.saving) return;
+    if (!cfgEdit || cfgEdit.saving || cfgEdit.loading) return;
     cfgEdit.saving = true;
     cfgEdit.error = "";
     cfgEdit.status = "Saving…";
     cfgEdit.statusKind = "dim";
-    const { agent, key, scope, content } = cfgEdit;
-    if (!post({ type: "configWrite", id: activeId, agent, key, scope, cwd: activeCwd(), content })) {
-      cfgEdit.saving = false;
-      cfgEdit.status = "";
-      cfgEdit.error = "Host disconnected — not saved.";
-    }
+    requestConfig(cfgEdit, "configWrite");
     renderSettings();
   }
 
@@ -7552,8 +7636,7 @@
     const meta = configMetaFor(agent, cfgKey);
     const sec = el("div", "settings-section");
 
-    // Segmented control choosing which file/view to show. Switching discards
-    // the current file's unsaved edits (same as leaving the tab).
+    // Each file keeps its own draft across scope and tab changes.
     const files = el("div", "settings-filepick");
     for (const k of CONFIG_FILES[agent]) {
       const km = configMetaFor(agent, k);
@@ -7575,7 +7658,7 @@
     // Read-only view (Skills): no file, scope, or editor — just a list.
     if (meta.readonly) {
       sec.appendChild(el("div", "settings-blurb", meta.blurb));
-      renderSkillsList(sec);
+      renderSkillsList(sec, agent);
       els.settingsBody.appendChild(sec);
       return;
     }
@@ -7613,6 +7696,15 @@
       return;
     }
 
+    if (cfgEdit.readFailed) {
+      sec.appendChild(el("div", "settings-msg bad", cfgEdit.error));
+      const retry = el("button", "settings-save-btn", "Retry");
+      retry.addEventListener("click", () => loadConfig(agent, cfgKey, cfgEdit.scope));
+      sec.appendChild(retry);
+      els.settingsBody.appendChild(sec);
+      return;
+    }
+
     // Plugins: an on/off list of installed plugins instead of a raw editor.
     if (meta.toggles) {
       renderPluginToggles(sec);
@@ -7623,6 +7715,7 @@
     const ta = el("textarea", "settings-editor" + (meta.format === "json" ? " mono" : ""));
     ta.value = cfgEdit.content;
     ta.placeholder = meta.placeholder;
+    ta.setAttribute("aria-label", meta.title + " (" + cfgEdit.scope + ")");
     ta.spellcheck = false;
     sec.appendChild(ta);
 
@@ -7643,6 +7736,7 @@
     actions.appendChild(revert);
 
     const msg = el("span", "settings-msg");
+    msg.setAttribute("aria-live", "polite");
     actions.appendChild(msg);
     const paintMsg = () => {
       msg.className = "settings-msg";
@@ -7667,7 +7761,7 @@
       cfgEdit.content = ta.value;
       cfgEdit.status = "";
       cfgEdit.error = "";
-      save.disabled = !dirty();
+      save.disabled = !dirty() || cfgEdit.saving;
       revert.classList.toggle("hidden", !dirty());
       paintMsg();
     });
@@ -7679,11 +7773,30 @@
 
   // Read-only, filterable list of the skills available in the active chat
   // (populated by the host's command harvest / the session init event).
-  function renderSkillsList(sec) {
-    const chat = chats.get(activeId);
-    const skills = (chat && Array.isArray(chat.skills) ? chat.skills.slice() : []).sort((a, b) => a.localeCompare(b));
+  function renderSkillsList(sec, agent) {
+    const cwd = activeCwd();
+    const cacheKey = JSON.stringify([agent, cwd]);
+    let cached = skillLists.get(cacheKey);
+    if (!cached && cwd) {
+      cached = { loading: true, skills: [] };
+      skillLists.set(cacheKey, cached);
+      const expire = () => {
+        if (!cached.loading) return;
+        cached.loading = false;
+        cached.error = "Couldn't load skills. Reopen this view to try again.";
+        if (settingsOpen() && settingsTab === agent && cfgKeyBy[agent] === "skills") renderSettings();
+      };
+      cached.timer = setTimeout(expire, 20000);
+      if (!post({ type: "listSkills", id: activeId, agent, cwd })) expire();
+    }
+    const skills = ((cached && cached.skills) || []).slice().sort((a, b) => a.localeCompare(b));
     if (!skills.length) {
-      sec.appendChild(el("div", "settings-note", "No skills loaded yet — open or start a chat in this folder first."));
+      sec.appendChild(el("div", "settings-note", !cwd ? "Choose a project folder first." : cached.loading ? "Loading skills…" : cached.error || "No skills available in this project."));
+      if (cached && cached.error) {
+        const retry = el("button", "settings-save-btn", "Retry");
+        retry.addEventListener("click", () => { skillLists.delete(cacheKey); renderSettings(); });
+        sec.appendChild(retry);
+      }
       return;
     }
     const search = el("input", "settings-search-input");
@@ -7780,7 +7893,6 @@
     }
     map[key] = on;
     cfgEdit.content = JSON.stringify(map, null, 2);
-    cfgEdit.original = cfgEdit.content;
     saveConfig(); // writes + re-renders with a "Saved" flash
   }
 
@@ -7806,6 +7918,7 @@
     const soundSw = el("button", "settings-switch" + (soundOnDone ? " on" : ""));
     soundSw.type = "button";
     soundSw.setAttribute("role", "switch");
+    soundSw.setAttribute("aria-label", "Completion sound");
     soundSw.setAttribute("aria-checked", String(soundOnDone));
     soundSw.appendChild(el("span", "settings-switch-knob"));
     soundSw.addEventListener("click", () => {
@@ -8776,7 +8889,9 @@
     els.harnessMenu.appendChild(el("div", "branch-head", "Harness"));
     for (const h of HARNESSES) {
       const isCur = h.id === current;
-      const row = el("div", "branch-item" + (isCur ? " current" : ""));
+      const row = el("button", "branch-item" + (isCur ? " current" : ""));
+      row.type = "button";
+      row.setAttribute("aria-pressed", String(isCur));
       const ic = el("span", "branch-item-ic");
       ic.innerHTML = HARNESS_ICON(h.id, 13);
       row.appendChild(ic);
@@ -8800,12 +8915,19 @@
   // mode swap to whatever this agent was last left on.
   function chooseHarness(chat, id) {
     if (!chat || chat.harness === id) return;
+    if (!chat.empty || chat.turnRunning || chat.queue.length) {
+      createChat({ cwd: chat.cwd, harness: id });
+      return;
+    }
     const hadSession = chat.started || chat.sessionId;
     // Tell the agent we are leaving to let go of this chat, while the message
     // still routes to it. Otherwise its session lives on, holding a thread
     // nobody will ever speak to again.
     if (hadSession) post({ type: "close", id: chat.id, agent: chat.harness });
     chat.harness = id;
+    chat.slashCommands = [];
+    chat.skills = [];
+    chat.plugins = [];
     lastHarness = id;
     const last = lastFor(id);
     chat.model = last.model || defaultModelFor(id);
@@ -8858,7 +8980,9 @@
     }
     for (const b of chat.branches) {
       const isCur = b === chat.branch;
-      const row = el("div", "branch-item" + (isCur ? " current" : ""));
+      const row = el("button", "branch-item" + (isCur ? " current" : ""));
+      row.type = "button";
+      row.setAttribute("aria-pressed", String(isCur));
       const ic = el("span", "branch-item-ic");
       ic.innerHTML = ICON("git-branch", 13);
       row.appendChild(ic);
@@ -8910,6 +9034,11 @@
   }
 
   function autosize() {
+    const owner = chats.get(composerChatId);
+    if (owner && owner.draft !== els.input.value) {
+      owner.draft = els.input.value;
+      savePrefs();
+    }
     els.input.style.height = "auto";
     els.input.style.height = Math.min(els.input.scrollHeight, 200) + "px";
     updateSlashGhost();
@@ -9373,6 +9502,21 @@
     });
     els.settingsClose.addEventListener("click", closeSettings);
     // Click the dimmed backdrop (outside the modal) to dismiss.
+    window.addEventListener("beforeunload", (e) => {
+      savePrefs();
+      if ([...cfgEditors.values()].some((editor) => editor.saving || editor.content !== editor.original) || modelDraft) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    });
+    els.settingsOverlay.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeSettings(); return; }
+      if (e.key !== "Tab") return;
+      const items = [...els.settingsOverlay.querySelectorAll("button, input, textarea, select, [tabindex='0']")].filter((node) => !node.disabled && node.getClientRects().length);
+      const first = items[0], last = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    });
     els.settingsOverlay.addEventListener("click", (e) => {
       if (e.target === els.settingsOverlay) closeSettings();
     });
@@ -9682,9 +9826,7 @@
           <span class="branch-label">main</span>
         </button>
         <div id="branch-menu" class="branch-menu hidden"></div>
-        <!-- Which agent runs this chat. Only reachable while the chat is empty:
-             once it has spoken, switching would mean a different session and a
-             lost transcript, and this whole row is hidden by then anyway. -->
+        <!-- Agent selection for a new chat. Existing conversations retain their agent. -->
         <button id="harness-btn" class="harness-btn" title="Which agent runs this chat">
           <span id="harness-ic" class="harness-ic" aria-hidden="true"></span>
           <span class="harness-label">Claude Code</span>

@@ -26,6 +26,10 @@
       setTimeout(connectBg, 500);
       return;
     }
+    chrome.windows.getCurrent((win) => {
+      if (chrome.runtime.lastError || !win || !Number.isInteger(win.id)) return;
+      try { bg.postMessage({ type: "panelReady", windowId: win.id }); } catch (_) {}
+    });
     bg.onMessage.addListener((m) => {
       if (!m) return;
       if (m.cmd === "close") window.close();

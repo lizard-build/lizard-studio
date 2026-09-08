@@ -34,7 +34,7 @@ async function host() {
     clearTimeout: (timer) => timers.delete(timer),
   });
   const source = readFileSync(new URL("../../src/host/codex-host.mjs", import.meta.url), "utf8");
-  const module = new SourceTextModule(source + `\nexport { loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
+  const module = new SourceTextModule(source + `\nexport { handle, loadSkills, loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
   await module.link((name) => {
     const values = imports[name];
     assert.ok(values, `unexpected import: ${name}`);
@@ -275,4 +275,47 @@ test("older CLI history fallback pages without offset drift or swallowed failure
   await h.api.loadTranscript({ id: "a", sessionId: "thread-a", requestId: "r3", cursor });
   assert.equal(h.messages.at(-1).requestId, "r3");
   assert.match(h.messages.at(-1).error, /read failed/);
+});
+
+test("unsupported Codex actions return a failure instead of silently hanging", async () => {
+  const h = await host(); h.session();
+  for (const [type, response] of [["rewind", "error"], ["remoteControl", "remoteControl"], ["authCode", "authDone"]]) {
+    const before = h.messages.length;
+    h.api.handle({ type, id: "a", code: "test-only", text: "changed" });
+    assert.equal(h.messages.length, before + 1); assert.equal(h.messages.at(-1).type, response);
+    assert.equal(h.messages.at(-1).id, "a");
+    if (response !== "error") assert.equal(h.messages.at(-1).ok, false);
+  }
+  assert.equal(h.requests.length, 0);
+});
+
+test("cold start preserves the chosen model even when the catalog is empty", async () => {
+  const h = await host();
+  assert.equal(h.api.MODELS.length, 0);
+  h.respond((r) => r.method === "thread/start" ? { thread: { id: "cold-thread" } } : {});
+  await h.api.startSession({ id: "cold", cwd: "/test/project", model: "saved-valid-model" });
+  assert.equal(h.requests.find((r) => r.method === "thread/start").params.model, "saved-valid-model");
+  assert.equal(h.api.sessions.get("cold").model, "saved-valid-model");
+});
+
+test("skills discovery scopes the request and removes disabled and duplicate entries", async () => {
+  const h = await host();
+  h.respond(() => ({ data: [{ cwd: "/test/project", skills: [{ name: "enabled", enabled: true }, { name: "disabled", enabled: false }, { name: "enabled" }] }] }));
+  await h.api.loadSkills({ id: "a", cwd: "/test/project" });
+  assert.deepEqual(h.requests[0].params, { cwds: ["/test/project"] });
+  assert.deepEqual(h.messages.at(-1), { type: "commands", id: "a", agent: "codex", cwd: "/test/project", list: ["enabled"], skills: ["enabled"] });
+  h.respond(() => ({ data: [] })); await h.api.loadSkills({ id: "a", cwd: "/test/project" });
+  assert.deepEqual(h.messages.at(-1).skills, []);
+  h.respond(() => { throw new Error("offline"); }); await h.api.loadSkills({ id: "a", cwd: "/test/project" });
+  assert.ok(h.messages.at(-1).error);
+});
+
+test("config responses echo the request identity even on validation errors", async () => {
+  const h = await host();
+  for (const type of ["configRead", "configWrite"]) {
+    h.api.handle({ type, id: "a", requestId: "request-" + type, key: "invalid-key", scope: "user", cwd: "/test/project", content: "test" });
+    const reply = h.messages.at(-1);
+    assert.equal(reply.type, type); assert.equal(reply.requestId, "request-" + type);
+    assert.equal(reply.agent, "codex"); assert.equal(reply.cwd, "/test/project"); assert.equal(reply.ok, false);
+  }
 });

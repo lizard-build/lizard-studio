@@ -11,7 +11,7 @@ window.runCodexPanelTests = async function () {
   emit({ type: "ready", ok: true, version: 24, home: "/test", user: "Test" });
   check("an older host enters the update flow", t.posted("selfUpdate").length === 1);
   check("an older host cannot start a chat", t.posted("start").length === 0);
-  emit({ type: "ready", ok: true, version: 28, home: "/test", user: "Test" });
+  emit({ type: "ready", ok: true, version: 29, home: "/test", user: "Test" });
   emit({ type: "agentReady", agent: "codex", ok: true, version: 6 });
   check("reasoning stays on Default before the catalog arrives", document.querySelector("#effort-btn").disabled && t.text("#effort-btn") === "Default");
   check("starting without metadata sends no guessed effort", t.posted("start").some((m) => m.agent === "codex") && t.posted("start").filter((m) => m.agent === "codex").every((m) => m.effort == null));

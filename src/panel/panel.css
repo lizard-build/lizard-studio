@@ -4486,3 +4486,19 @@ code.inline.path:focus-visible {
 }
 .history-more[hidden] { display: none; }
 .history-more:disabled { cursor: default; }
+
+/* Native controls retain the existing menu layout and expose keyboard focus. */
+button.model-item, button.mode-item, button.branch-item {
+  width: 100%; border: 0; background: transparent; color: inherit;
+  font: inherit; text-align: left; cursor: pointer;
+}
+button.model-item.current, button.branch-item.current { background: rgba(255, 255, 255, 0.08); }
+button.mode-item.current { background: rgba(255, 255, 255, 0.04); }
+button.model-item:hover, button.mode-item:hover, button.branch-item:hover,
+button.model-item:focus-visible, button.mode-item:focus-visible, button.branch-item:focus-visible {
+  background: rgba(255, 255, 255, 0.06);
+}
+button.model-item:focus-visible, button.mode-item:focus-visible, button.branch-item:focus-visible {
+  outline: 2px solid currentColor; outline-offset: -2px;
+}
+.login-device-code { font: 600 20px monospace; letter-spacing: 0.12em; user-select: all; margin: 12px 0; }
