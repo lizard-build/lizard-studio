@@ -3762,6 +3762,31 @@ code.inline.path:focus-visible {
   border: 1px solid var(--border-primary);
 }
 .onboarding-logo.lizard { color: var(--control-primary); }
+.onboarding-agent { display: block; overflow: hidden; }
+.onboarding-reel {
+  display: flex;
+  flex-direction: column;
+  animation: onboarding-roulette 6s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+.onboarding-reel-item {
+  display: flex;
+  flex: 0 0 50px;
+  align-items: center;
+  justify-content: center;
+  width: 50px;
+  height: 50px;
+}
+@keyframes onboarding-roulette {
+  0%, 35% { transform: translateY(0); }
+  50%, 85% { transform: translateY(-50px); }
+  100% { transform: translateY(-100px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .onboarding-reel { animation: none; flex-direction: row; align-items: center; height: 50px; gap: 4px; padding: 0 3px; }
+  .onboarding-reel-item { flex: 0 0 20px; width: 20px; }
+  .onboarding-reel-item svg { width: 20px; height: 20px; }
+  .onboarding-reel-item:last-child { display: none; }
+}
 .onboarding-arrow { display: flex; color: var(--text-tertiary); }
 
 /* Bottom-pinned "waiting" status as a disabled Secondary button (DESIGN.md):
@@ -3808,11 +3833,48 @@ code.inline.path:focus-visible {
   color: var(--text-primary);
 }
 
-/* Shell picker on the Install-Claude card: the DESIGN.md "Tab Picker"
-   segmented control (container bg-secondary/12px/4px pad; active tab
-   #2e2e2e/10px + shadow-sm, semibold; inactive text-secondary → white on
-   hover). Swaps the command below (macOS/Linux · PowerShell · CMD); the
-   detected OS is pre-selected, the user can override (e.g. WSL). */
+/* Shell dropdown keeps the install controls within a narrow side panel. */
+.ob-os-picker {
+  position: relative;
+  width: 100%;
+  margin: 0 0 12px;
+}
+.ob-os-select {
+  appearance: none;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  height: 36px;
+  padding: 0 36px;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  color-scheme: dark;
+  font-family: var(--font-family);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.ob-os-select:hover { background: var(--control-secondary); }
+.ob-os-select:focus-visible {
+  outline: 2px solid var(--control-primary);
+  outline-offset: 2px;
+}
+.ob-os-icon, .ob-os-chevron {
+  position: absolute;
+  top: 50%;
+  display: flex;
+  color: var(--text-secondary);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+.ob-os-icon { left: 12px; }
+.ob-os-chevron { right: 12px; }
+
+/* Agent picker. */
 .ob-os-toggle {
   display: flex;
   align-items: center;
@@ -3835,7 +3897,7 @@ code.inline.path:focus-visible {
   font-size: 13px;
   font-weight: 600;
   line-height: 18px;
-  white-space: nowrap;
+  white-space: normal;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }

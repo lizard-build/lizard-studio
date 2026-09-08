@@ -82,6 +82,7 @@
   // else in `agentReady`. A missing one still shows in the list — hiding it
   // would leave no way to find out it exists.
   const harnessReady = { claude: false, codex: false };
+  const harnessChecked = { claude: false, codex: false };
 
   // Codex has three permission profiles where Claude has five modes. These are
   // the ids its host maps, so a remembered mode survives the round trip.
@@ -511,9 +512,7 @@
   // Package version the host reported when it swapped itself out, so the pod
   // can name it once the new copy is back up.
   let hostUpdateVersion = "";
-  // "Install Claude Code" onboarding step: when the host is linked but can't
-  // find the `claude` CLI, we poll by forcing a reconnect — a fresh host process
-  // re-runs resolveClaude and its `ready` tells us if `claude` showed up.
+  // Reconnect while neither CLI is installed so both hosts check again.
   let recheckTimer = null;
 
   // Tab model: id -> chat. `order` is the visible tab order; `history` holds
@@ -4704,6 +4703,10 @@
   // ---- host transport -------------------------------------------------------
   function connect() {
     clearTimeout(reconnectTimer);
+    for (const h of HARNESSES) {
+      harnessReady[h.id] = false;
+      harnessChecked[h.id] = false;
+    }
     try {
       port = chrome.runtime.connectNative(HOST_NAME);
     } catch (err) {
@@ -4719,6 +4722,10 @@
       port = null;
       connected = false;
       hostReady = false;
+      for (const h of HARNESSES) {
+        harnessReady[h.id] = false;
+        harnessChecked[h.id] = false;
+      }
       codexUsage.fetching = false;
       for (const c of chats.values()) {
         c.started = false;
@@ -4825,7 +4832,8 @@
     switch (msg.type) {
       case "ready":
         hostReady = (msg.version || 0) >= EXPECTED_HOST_VERSION;
-        harnessReady.claude = msg.ok !== false;
+        harnessReady.claude = msg.ok === true;
+        harnessChecked.claude = true;
         // The chip is drawn before any host has spoken, so it starts out
         // assuming nothing is installed. This is the moment that stops being
         // true — repaint it, or it sits dimmed for a working agent.
@@ -4863,25 +4871,7 @@
           }, HOST_UPDATE_GRACE_MS);
           break;
         }
-        // Host is linked but the `claude` CLI isn't installed — surface the real
-        // "Install Claude Code" onboarding step (platform-aware) and keep polling.
-        // Installing it makes a freshly-spawned host resolve `claude`, and the
-        // next `ready` falls through to a normal session. Don't start a chat
-        // here: there's no `claude` to spawn.
-        if (!msg.ok) {
-          showOnboarding("claude");
-          break;
-        }
-        stopClaudeRecheck();
-        hideOnboarding();
-        // Start whichever tab is in front; others start when first shown.
-        {
-          const a = chats.get(activeId);
-          if (a && !a.started) startChatSession(a);
-          maybeReplay(a);
-          // Deliver anything queued while the host was down or restarting.
-          if (a && a.started && !a.turnRunning) dispatchNextQueued(a);
-        }
+        finishAgentCheck();
         break;
       case "interrupted":
         // Stop hard-kills the process and resumes in a fresh one — end the
@@ -4991,14 +4981,17 @@
       case "agentReady":
         if (msg.agent) {
           harnessReady[msg.agent] = !!msg.ok;
+          harnessChecked[msg.agent] = true;
           syncComposer();
           updateSetup();
           refreshSettingsIfOpen();
+          finishAgentCheck();
         }
         break;
       case "agentExit":
         if (msg.agent) {
           harnessReady[msg.agent] = false;
+          harnessChecked[msg.agent] = true;
           for (const c of chats.values()) {
             if (c.harness !== msg.agent) continue;
             if (c.historyRequest) historyFailed(c, c.historyRequest);
@@ -5010,6 +5003,7 @@
             }
           }
           updateSetup();
+          finishAgentCheck();
         }
         break;
       // Codex publishes its own model list; this is where the picker learns it.
@@ -5275,7 +5269,7 @@
 
   // ---- session control ------------------------------------------------------
   function startChatSession(chat, resume) {
-    if (!hostReady) return;
+    if (!hostReady || !harnessReady[chat.harness || DEFAULT_HARNESS]) return;
     // Never spawn a session in an unspecified directory — wait for an explicit
     // folder pick. The empty-state setup chips stay visible so the user knows.
     if (!chat.cwd) {
@@ -9040,7 +9034,10 @@
       savePrefs();
     }
     els.input.style.height = "auto";
-    els.input.style.height = Math.min(els.input.scrollHeight, 200) + "px";
+    // An empty field uses rows="1"; wrapped placeholder text must not size it.
+    if (els.input.value) {
+      els.input.style.height = Math.min(els.input.scrollHeight, 200) + "px";
+    }
     updateSlashGhost();
   }
 
@@ -9186,14 +9183,39 @@
   }
 
   // ---- onboarding overlay ---------------------------------------------------
+  function finishAgentCheck() {
+    if (!hostReady) return;
+    const available = HARNESSES.find((h) => harnessReady[h.id]);
+    if (!available) {
+      showOnboarding(HARNESSES.every((h) => harnessChecked[h.id]) ? "agent" : "checking");
+      return;
+    }
+    setObNode(els.obNodeClaude, els.obDotClaude, "done");
+    setObNode(els.obNodeLink, els.obDotLink, "done");
+    if (els.obLine2) els.obLine2.classList.add("done");
+    hideOnboarding();
+    const chat = chats.get(activeId);
+    // Choose an installed agent only for a fresh, unused chat. Saved sessions
+    // and drafts keep their agent even if its CLI is currently missing.
+    if (chat && harnessChecked[chat.harness] && !harnessReady[chat.harness]
+        && chat.empty && !chat.started && !chat.sessionId && !chat.draft && !chat.queue.length) {
+      chooseHarness(chat, available.id);
+    }
+    if (!chat || !harnessReady[chat.harness]) return;
+    if (!chat.started) startChatSession(chat);
+    maybeReplay(chat);
+    if (chat.started && !chat.turnRunning) dispatchNextQueued(chat);
+  }
+
   // The `claude` install commands, one per shell. Detection picks a default; the
-  // toggle in the card lets the user switch (e.g. WSL vs native Windows).
+  // dropdown lets the user switch (e.g. WSL vs native Windows).
   const CLAUDE_INSTALL = {
     sh: "curl -fsSL https://claude.ai/install.sh | bash",
     ps: "irm https://claude.ai/install.ps1 | iex",
     cmd: "curl -fsSL https://claude.ai/install.cmd -o install.cmd && install.cmd",
   };
   let claudeInstallOs = null; // "sh" | "ps" | "cmd" — lazily detected, then sticky
+  let installAgent = "claude";
   function detectClaudeOs() {
     // The host's home path is the strongest signal once we're linked (C:\… vs /…);
     // fall back to the browser's platform string.
@@ -9207,19 +9229,19 @@
   }
   function renderClaudeCmd() {
     if (!claudeInstallOs) claudeInstallOs = detectClaudeOs();
-    const cmd = CLAUDE_INSTALL[claudeInstallOs] || CLAUDE_INSTALL.sh;
+    const cmd = installAgent === "codex" ? "npm i -g @openai/codex" : CLAUDE_INSTALL[claudeInstallOs] || CLAUDE_INSTALL.sh;
     if (els.obClaudeCmd) els.obClaudeCmd.textContent = cmd;
     if (els.obCopyClaude) els.obCopyClaude.dataset.cmd = cmd;
     if (els.obOsToggle) {
-      for (const b of els.obOsToggle.querySelectorAll(".ob-os-tab"))
-        b.classList.toggle("active", b.dataset.os === claudeInstallOs);
+      els.obOsToggle.classList.toggle("hidden", installAgent === "codex");
+      els.obOsSelect.value = claudeInstallOs;
+      els.obOsIcon.innerHTML = claudeInstallOs === "sh"
+        ? ICON("terminal", 16)
+        : '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z"/></svg>';
     }
   }
-  // Poll for `claude` becoming available while the Install-Claude step is up. A
-  // running host resolves the binary once at startup, so we tear the port down
-  // and reconnect: the fresh host process re-runs resolveClaude and its `ready`
-  // decides stay-or-go. (Calling port.disconnect() doesn't fire our own
-  // onDisconnect, so we drive the reconnect ourselves.)
+  // Both hosts resolve their CLI at startup. Reconnect to check again after
+  // installation. A local disconnect does not fire our onDisconnect handler.
   function startClaudeRecheck() {
     if (recheckTimer) return;
     recheckTimer = setInterval(() => {
@@ -9249,26 +9271,25 @@
       if (dot) dot.innerHTML = ""; // current → CSS ::after dot; idle → empty ring
     }
   }
-  // stage: "link" (host not connected) or "claude" (linked, but `claude` missing).
+  // Stages: connect the helper, check the CLIs, or install either missing CLI.
   function showOnboarding(stage = "link") {
     if (!mounted) return;
-    const link = stage !== "claude";
-    // Stepper: Install extension (done) → Install Claude Code → Link up. Steps
-    // complete strictly in order: a step after the current one always renders
-    // pending (empty ring, grey connector), even when it's technically already
-    // satisfied — on the "claude" stage the host IS linked, but showing step 3
-    // checked while step 2 is still current would read as nonsense.
-    setObNode(els.obNodeClaude, els.obDotClaude, link ? "done" : "current");
-    setObNode(els.obNodeLink, els.obDotLink, link ? "current" : "idle");
-    if (els.obLine2) els.obLine2.classList.toggle("done", link);
+    const link = stage !== "agent";
+    const installed = HARNESSES.some((h) => harnessReady[h.id]);
+    // The helper must connect before it can check either CLI. Never mark an
+    // unchecked installation as done just because the extension is present.
+    setObNode(els.obNodeClaude, els.obDotClaude, installed ? "done" : link ? "idle" : "current");
+    setObNode(els.obNodeLink, els.obDotLink, hostReady ? "done" : "current");
+    if (els.obLine2) els.obLine2.classList.toggle("done", installed);
     if (els.obCardLink) els.obCardLink.classList.toggle("hidden", !link);
     if (els.obCardClaude) els.obCardClaude.classList.toggle("hidden", link);
     if (els.obWaitLabel)
       els.obWaitLabel.textContent = link
-        ? "Waiting for install to finish…"
-        : "Waiting for Claude Code…";
+        ? stage === "checking" ? "Checking installed agents…" : "Waiting for connection…"
+        : "Waiting for either agent…";
     if (link) {
       stopClaudeRecheck();
+      if (stage === "checking") startClaudeRecheck();
     } else {
       renderClaudeCmd();
       startClaudeRecheck();
@@ -9359,10 +9380,13 @@
     els.obDotLink = root.querySelector("#ob-step-linkdot");
     els.obNodeClaude = root.querySelector("#ob-node-claude");
     els.obDotClaude = root.querySelector("#ob-step-claude");
+    els.obLine2 = root.querySelector("#ob-line-2");
     els.obCardLink = root.querySelector("#ob-card-link");
     els.obCardClaude = root.querySelector("#ob-card-claude");
     els.obWaitLabel = root.querySelector("#ob-wait-label");
     els.obOsToggle = root.querySelector("#ob-os-toggle");
+    els.obOsSelect = root.querySelector("#ob-os-select");
+    els.obOsIcon = root.querySelector("#ob-os-icon");
     els.obClaudeCmd = root.querySelector("#ob-claude-cmd");
     els.obCopyClaude = root.querySelector("#chat-copy-claude");
     els.attachFileBtn = root.querySelector("#attach-file-btn");
@@ -9406,19 +9430,32 @@
     const claudeLogo = root.querySelector("#onboarding-logo-claude");
     const lizardLogo = root.querySelector("#onboarding-logo-lizard");
     const claudeLogo2 = root.querySelector("#onboarding-logo-claude2");
-    if (claudeLogo) claudeLogo.innerHTML = window.RKClaudeHTML(28);
+    const agentReel = '<span class="onboarding-reel">' +
+      '<span class="onboarding-reel-item">' + window.RKClaudeHTML(28) + '</span>' +
+      '<span class="onboarding-reel-item">' + HARNESS_ICON("codex", 28) + '</span>' +
+      '<span class="onboarding-reel-item">' + window.RKClaudeHTML(28) + '</span></span>';
+    if (claudeLogo) claudeLogo.innerHTML = agentReel;
     if (lizardLogo) lizardLogo.innerHTML = window.RKLizardHTML(30);
-    if (claudeLogo2) claudeLogo2.innerHTML = window.RKClaudeHTML(28);
-    // "Install extension" is always done; the "Link up" / "Install Claude Code"
+    if (claudeLogo2) claudeLogo2.innerHTML = agentReel;
+    root.querySelector("#ob-agent-toggle").addEventListener("click", (e) => {
+      const button = e.target.closest("[data-agent]");
+      if (!button) return;
+      installAgent = button.dataset.agent;
+      for (const tab of button.parentElement.querySelectorAll("[data-agent]")) {
+        const selected = tab === button;
+        tab.classList.toggle("active", selected);
+        tab.setAttribute("aria-pressed", String(selected));
+      }
+      renderClaudeCmd();
+    });
+    // "Install extension" is always done; the "Link up" / "Install agent"
     // dots are driven by showOnboarding() (check icon / current-dot / empty ring).
     const installStep = root.querySelector("#ob-step-install");
     if (installStep) installStep.innerHTML = ICON("check", 14);
     if (els.obCopyClaude) wireCopyButton(els.obCopyClaude, () => els.obCopyClaude.dataset.cmd, 14);
-    if (els.obOsToggle) {
-      els.obOsToggle.addEventListener("click", (e) => {
-        const b = e.target.closest(".ob-os-tab");
-        if (!b) return;
-        claudeInstallOs = b.dataset.os;
+    if (els.obOsSelect) {
+      els.obOsSelect.addEventListener("change", () => {
+        claudeInstallOs = els.obOsSelect.value;
         renderClaudeCmd();
       });
     }
@@ -9701,6 +9738,19 @@
     });
     mounted = true;
 
+    // Reflow drafts when the side panel opens or changes width. Ignore height
+    // changes caused by autosize itself so the observer cannot loop.
+    if (window.ResizeObserver) {
+      let inputWidth = 0;
+      new ResizeObserver(([entry]) => {
+        const width = entry.contentRect.width;
+        if (width > 0 && width !== inputWidth) {
+          inputWidth = width;
+          autosize();
+        }
+      }).observe(els.input);
+    }
+
     // Refresh the greeting's time-of-day line every few minutes — it can cross
     // a boundary while the panel idles open on an empty chat.
     setInterval(() => {
@@ -9949,22 +9999,18 @@
     </div>
 
     <div id="chat-onboarding" class="chat-onboarding hidden">
-      <!-- Display order: Install extension → Install Claude Code → Link up. The
-           panel can only verify claude after the host links up, so the middle
-           step shows done optimistically until the host reports back; if claude
-           is actually missing, showOnboarding("claude") flips it to current and
-           demotes Link up to pending — steps complete strictly in order. -->
+      <!-- CLI installation stays unchecked until a host confirms either CLI. -->
       <div class="onboarding-steps" aria-hidden="true">
         <div class="ob-step done">
           <span id="ob-step-install" class="ob-step-dot"></span>
           <span class="ob-step-label">Install extension</span>
         </div>
         <span id="ob-line-1" class="ob-step-line done"></span>
-        <div id="ob-node-claude" class="ob-step done">
+        <div id="ob-node-claude" class="ob-step">
           <span id="ob-step-claude" class="ob-step-dot"></span>
-          <span class="ob-step-label">Install<br />Claude Code</span>
+          <span class="ob-step-label">Install<br />agent</span>
         </div>
-        <span id="ob-line-2" class="ob-step-line done"></span>
+        <span id="ob-line-2" class="ob-step-line"></span>
         <div id="ob-node-link" class="ob-step current">
           <span id="ob-step-linkdot" class="ob-step-dot"></span>
           <span class="ob-step-label">Link up</span>
@@ -9974,31 +10020,39 @@
       <!-- Link-up card: host not connected yet. -->
       <div id="ob-card-link" class="onboarding-card">
         <div class="onboarding-logos" aria-hidden="true">
-          <span id="onboarding-logo-claude" class="onboarding-logo"></span>
+          <span id="onboarding-logo-claude" class="onboarding-logo onboarding-agent"></span>
           <span class="onboarding-arrow">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
           </span>
           <span id="onboarding-logo-lizard" class="onboarding-logo lizard"></span>
         </div>
-        <h2>Connect Claude Code</h2>
-        <p>Same Claude Code you run in the terminal, now in your sidebar. One command to link them:</p>
+        <h2>Connect your agent</h2>
+        <p>Use Claude Code or ChatGPT in your sidebar. Run this command to connect and check for Claude Code or Codex CLI:</p>
         <div class="cmd-row">
           <code>npx @lizard-build/lizard-studio-host@latest install</code>
           <button id="chat-copy-install" class="cmd-copy-btn" title="Copy" aria-label="Copy install command" data-cmd="npx @lizard-build/lizard-studio-host@latest install"></button>
         </div>
       </div>
 
-      <!-- Install-Claude card: host linked, but the claude CLI is missing. -->
+      <!-- The helper confirmed that neither CLI is installed. -->
       <div id="ob-card-claude" class="onboarding-card hidden">
         <div class="onboarding-logos" aria-hidden="true">
-          <span id="onboarding-logo-claude2" class="onboarding-logo"></span>
+          <span id="onboarding-logo-claude2" class="onboarding-logo onboarding-agent"></span>
         </div>
-        <h2>Install Claude Code</h2>
-        <p>Almost there – install Claude Code to proceed. Paste this in your terminal:</p>
-        <div id="ob-os-toggle" class="ob-os-toggle" role="tablist" aria-label="Operating system">
-          <button class="ob-os-tab" data-os="sh" role="tab">macOS / Linux</button>
-          <button class="ob-os-tab" data-os="ps" role="tab">Windows PS</button>
-          <button class="ob-os-tab" data-os="cmd" role="tab">Windows CMD</button>
+        <h2>Install either agent</h2>
+        <p>Install Claude Code or Codex CLI to continue. Codex CLI connects ChatGPT. Choose one and run its command:</p>
+        <div id="ob-agent-toggle" class="ob-os-toggle" role="group" aria-label="Agent to install">
+          <button class="ob-os-tab active" data-agent="claude" aria-pressed="true">Claude Code</button>
+          <button class="ob-os-tab" data-agent="codex" aria-pressed="false">Codex CLI</button>
+        </div>
+        <div id="ob-os-toggle" class="ob-os-picker">
+          <span id="ob-os-icon" class="ob-os-icon" aria-hidden="true"></span>
+          <select id="ob-os-select" class="ob-os-select" aria-label="Operating system and shell">
+            <option value="sh">macOS / Linux</option>
+            <option value="ps">Windows PowerShell</option>
+            <option value="cmd">Windows CMD</option>
+          </select>
+          <span class="ob-os-chevron" aria-hidden="true">${ICON("caret-down", 14)}</span>
         </div>
         <div class="cmd-row">
           <code id="ob-claude-cmd"></code>
@@ -10008,7 +10062,7 @@
 
       <button class="onboarding-wait-btn" disabled aria-live="polite">
         <span class="onboarding-wait-spinner"></span>
-        <span id="ob-wait-label">Waiting for install to finish…</span>
+        <span id="ob-wait-label">Waiting for connection…</span>
       </button>
     </div>
   `;

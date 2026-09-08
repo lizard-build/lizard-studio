@@ -49,6 +49,9 @@
           for (const m of msgs) this.emit(m);
           return msgs.length;
         },
+        disconnect() {
+          for (const fn of listeners.disconnect) fn();
+        },
         storage: store,
         seedStorage(value) {
           store.rkChatV2 = value;
@@ -150,6 +153,18 @@
       if (seed) {
         try { store.rkChatV2 = JSON.parse(decodeURIComponent(seed)); } catch (_) {}
       }
+      const onboardingScenario = new URLSearchParams(location.search).get("onboarding");
+      if (!seed && ["saved", "draft", "with-folder"].includes(onboardingScenario)) {
+        store.rkChatV2 = {
+          activeId: "onboarding-chat", lastHarness: "claude",
+          tabs: [{
+            id: "onboarding-chat", title: "Setup test", harness: "claude",
+            cwd: "/test/project",
+            sessionId: onboardingScenario === "saved" ? "saved-session" : null,
+            draft: onboardingScenario === "draft" ? "Keep this draft" : "",
+          }],
+        };
+      }
       const historyRegression = new URLSearchParams(location.search).get("regressions") === "history";
       const auditRegression = new URLSearchParams(location.search).get("regressions") === "audit";
       const codexRegression = auditRegression || new URLSearchParams(location.search).get("regressions") === "codex";
@@ -181,6 +196,15 @@
         window.RKChat.mount(document.getElementById("bed"));
         window.RKChat.activate && window.RKChat.activate();
         window.__test.mounted = true;
+        if (new URLSearchParams(location.search).has("onboarding")) {
+          const script = document.createElement("script");
+          script.src = "onboarding-panel.js?t=" + stamp;
+          await new Promise((resolve, reject) => {
+            script.onload = resolve; script.onerror = reject;
+            document.body.appendChild(script);
+          });
+          window.__test.onboardingResult = await window.runOnboardingPanelTests();
+        }
         if (codexRegression || historyRegression) {
           await new Promise((resolve, reject) => {
             const script = document.createElement("script");
