@@ -9040,7 +9040,10 @@
       savePrefs();
     }
     els.input.style.height = "auto";
-    els.input.style.height = Math.min(els.input.scrollHeight, 200) + "px";
+    // An empty field uses rows="1"; wrapped placeholder text must not size it.
+    if (els.input.value) {
+      els.input.style.height = Math.min(els.input.scrollHeight, 200) + "px";
+    }
     updateSlashGhost();
   }
 
@@ -9700,6 +9703,19 @@
       }
     });
     mounted = true;
+
+    // Reflow drafts when the side panel opens or changes width. Ignore height
+    // changes caused by autosize itself so the observer cannot loop.
+    if (window.ResizeObserver) {
+      let inputWidth = 0;
+      new ResizeObserver(([entry]) => {
+        const width = entry.contentRect.width;
+        if (width > 0 && width !== inputWidth) {
+          inputWidth = width;
+          autosize();
+        }
+      }).observe(els.input);
+    }
 
     // Refresh the greeting's time-of-day line every few minutes — it can cross
     // a boundary while the panel idles open on an empty chat.

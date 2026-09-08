@@ -13,6 +13,27 @@ window.runAuditPanelTests = async function () {
   const chat = (title) => [...document.querySelectorAll(".chat-tab")].find((n) => n.textContent.includes(title)).click();
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 
+  const bed = node("#bed"), input = node("#composer-input");
+  const originalWidth = bed.style.width;
+  type("#composer-input", "");
+  const emptyHeight = input.offsetHeight;
+  bed.style.width = "60px";
+  type("#composer-input", "");
+  check("empty composer ignores wrapped placeholder height", input.offsetHeight === emptyHeight);
+  bed.style.width = "360px"; await pause();
+  check("empty composer stays compact after the panel opens", input.offsetHeight === emptyHeight);
+  type("#composer-input", "A draft that wraps when the panel is narrow. ".repeat(8));
+  const narrowHeight = input.offsetHeight;
+  bed.style.width = "720px"; await pause();
+  check("draft height shrinks when the panel widens", input.offsetHeight < narrowHeight);
+  bed.style.width = "360px"; await pause();
+  check("draft height grows when the panel narrows", input.offsetHeight === narrowHeight);
+  type("#composer-input", "Line\n".repeat(50));
+  check("long drafts stay capped and scroll", input.offsetHeight <= 200 && input.scrollHeight > input.clientHeight);
+  type("#composer-input", "");
+  check("clearing a long draft restores one row", input.offsetHeight === emptyHeight);
+  bed.style.width = originalWidth; await pause();
+
   type("#composer-input", "Only for A");
   chat("Second chat"); await pause();
   check("A02: switching chats does not move the draft", node("#composer-input").value === "");
