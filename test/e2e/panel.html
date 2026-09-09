@@ -165,6 +165,11 @@
           }],
         };
       }
+      const sessionFailureRegression = new URLSearchParams(location.search).get("regressions") === "session-failure";
+      if (sessionFailureRegression) store.rkChatV2 = {
+        activeId: "failure-a", lastHarness: "codex",
+        tabs: [{ id: "failure-a", title: "New chat", harness: "codex", cwd: "/test/project", mode: "workspace" }],
+      };
       const historyRegression = new URLSearchParams(location.search).get("regressions") === "history";
       const auditRegression = new URLSearchParams(location.search).get("regressions") === "audit";
       const codexRegression = auditRegression || new URLSearchParams(location.search).get("regressions") === "codex";
@@ -204,6 +209,15 @@
             document.body.appendChild(script);
           });
           window.__test.onboardingResult = await window.runOnboardingPanelTests();
+        }
+        if (sessionFailureRegression) {
+          const script = document.createElement("script");
+          script.src = "session-failure-panel.js?t=" + stamp;
+          await new Promise((resolve, reject) => {
+            script.onload = resolve; script.onerror = reject;
+            document.body.appendChild(script);
+          });
+          window.__test.sessionFailureResult = await window.runSessionFailurePanelTests();
         }
         if (codexRegression || historyRegression) {
           await new Promise((resolve, reject) => {

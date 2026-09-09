@@ -476,7 +476,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 30;
+  const EXPECTED_HOST_VERSION = 31;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -882,6 +882,7 @@
       chat.messagesEl.appendChild(node);
     }
     if (stick && chat.id === activeId) scrollToBottom(chat);
+    if (chat.id === activeId) updateGreeting();
   }
 
   // ---- chat objects ---------------------------------------------------------
@@ -1109,7 +1110,7 @@
     // someone who has been switching between two of them.
     if (chat.harness) lastHarness = chat.harness;
     // Lazily spin up the session the first time a tab is shown.
-    if (connected && hostReady && !chat.started) startChatSession(chat);
+    if (connected && hostReady && !chat.started && !chat.sessionFailure) startChatSession(chat);
     // Re-render a restored/re-opened conversation from its on-disk transcript.
     maybeReplay(chat);
     // The scroll is already where it belongs (restoreScroll above) — doing it
@@ -2270,7 +2271,10 @@
     const remove = () => {
       if (!note.parentNode) return;
       note.classList.add("leaving");
-      setTimeout(() => note.remove(), 180);
+      setTimeout(() => {
+        note.remove();
+        if (chat.id === activeId) updateGreeting();
+      }, 180);
     };
     if (opts.dismissible) {
       note.classList.add("dismissible");
@@ -2284,6 +2288,62 @@
     if (opts.ttl) setTimeout(remove, opts.ttl);
     append(chat, note);
     return note;
+  }
+
+  function clearSessionFailure(chat) {
+    if (chat.sessionFailure) chat.sessionFailure.remove();
+    chat.sessionFailure = null;
+    if (chat.id === activeId) { updateSetup(); syncBashMode(chat); }
+  }
+
+  function showSessionFailure(chat, message, code) {
+    const routing = code === "AGENT_ROUTING_REQUIRED"
+      || (chat.harness === "codex" && /permission-mode[\s\S]*workspace[\s\S]*invalid/i.test(message));
+    const invalidMode = code === "INVALID_PERMISSION_MODE";
+    const label = harnessLabel(chat.harness || DEFAULT_HARNESS);
+    clearSessionFailure(chat);
+    chat.started = false;
+    chat.restartPending = false;
+    chat.restartFlush = false;
+    chat.suppressExitNote = true;
+    const card = el("section", "session-failure");
+    chat.sessionFailure = card;
+    const heading = el("div", "session-failure-heading");
+    heading.setAttribute("role", "alert");
+    heading.appendChild(el("strong", "session-failure-title", routing ? "Update the local helper" : `${label} couldn't connect`));
+    heading.appendChild(el("p", "session-failure-description", routing
+      ? "This helper sent ChatGPT to the wrong agent. Update it, then reopen this panel."
+      : invalidMode ? "Choose a supported permission setting, then try again."
+      : "The session stopped. You can reconnect and keep this chat."));
+    card.appendChild(heading);
+    const actions = el("div", "session-failure-actions");
+    const button = el("button", "session-failure-action", routing ? "Update helper" : "Reconnect");
+    button.type = "button";
+    button.addEventListener("click", () => {
+      if (routing) {
+        retryHostUpdate();
+      } else {
+        chat.restartFlush = true;
+        startChatSession(chat);
+        if (chat.started) {
+          button.disabled = true;
+          button.textContent = "Connecting…";
+        }
+      }
+    });
+    actions.appendChild(button);
+    card.appendChild(actions);
+    const details = el("details", "session-failure-details");
+    details.appendChild(el("summary", null, "Details"));
+    details.appendChild(el("pre", null, message || "The local helper ended the session."));
+    if (routing) {
+      details.appendChild(el("p", null, "If the update does not help, run this in your terminal, then reopen the panel:"));
+      details.appendChild(el("code", null, HOST_INSTALL_CMD));
+    }
+    card.appendChild(details);
+    append(chat, card);
+    if (chat.turnRunning) endTurn(chat, null);
+    if (chat.id === activeId) { updateSetup(); syncBashMode(chat); setRunningUI(chat.turnRunning); }
   }
 
   // True when `row` is still the last *content* in the transcript. Transient UI
@@ -4858,7 +4918,10 @@
           // This `ready` is the one the update was waiting for — the new copy
           // is up. Any other one means nothing was wrong to begin with, so
           // there's nothing to report.
-          if (hostUpdatePending) hostUpdateDone(hostUpdateVersion);
+          if (hostUpdatePending) {
+            hostUpdateDone(hostUpdateVersion);
+            for (const c of chats.values()) clearSessionFailure(c);
+          }
           hostUpdatePending = false;
           hostUpdateVersion = "";
         } else {
@@ -4904,6 +4967,8 @@
         break;
       case "started":
         if (chat) {
+          clearSessionFailure(chat);
+          chat.lastHostError = null;
           // A fresh spawn read the current keychain credentials by definition —
           // reset the idle clock or sessionLooksStale would see the pre-restart
           // timestamp and demand another restart, forever.
@@ -5110,12 +5175,14 @@
           chat.started = false;
           clearPermCards(chat);
           liftSuppress(chat); // no respawn coming — don't leave the event gate shut
-          if (chat.turnRunning) endTurn(chat, null);
-          if (chat.suppressExitNote || msg.quiet) {
+          if (chat.suppressExitNote || chat.sessionFailure || msg.quiet) {
             chat.suppressExitNote = false;
           } else {
-            systemNote(chat, `${harnessLabel(chat.harness || DEFAULT_HARNESS)} session ended (code ${msg.code}).`, "warn");
+            if (chat.lastHostError) chat.lastHostError.note.remove();
+            showSessionFailure(chat, chat.lastHostError?.message || `Session ended (code ${msg.code}).`);
           }
+          chat.lastHostError = null;
+          if (chat.turnRunning) endTurn(chat, null);
         }
         break;
       case "folder":
@@ -5238,7 +5305,13 @@
               startLogin(chat, { expired: true });
             }
           } else {
-            systemNote(chat, msg.message || "Host error", "warn");
+            const message = msg.message || "Host error";
+            if (msg.code === "AGENT_ROUTING_REQUIRED" || msg.code === "INVALID_PERMISSION_MODE"
+                || /permission-mode[\s\S]*invalid|Couldn't (?:start ChatGPT|open a ChatGPT session)|This ChatGPT (?:chat has no session|session isn't running)/i.test(message)) {
+              showSessionFailure(chat, message, msg.code);
+            } else {
+              chat.lastHostError = { message, note: systemNote(chat, message, "warn") };
+            }
           }
         }
         break;
@@ -5714,6 +5787,8 @@
     chat.historyNav = null;
     chat.historyError = false;
     chat.messagesEl.innerHTML = "";
+    chat.sessionFailure = null;
+    chat.lastHostError = null;
     chat.loginCard = null; // detached from the DOM above; drop the stale reference
     chat.statusEl = null; // wiped with the stream; recreated on next render
     chat.permCards.clear(); // card nodes went with the innerHTML wipe
@@ -5845,7 +5920,7 @@
     // prompt shows as a queued bubble and delivers when the session is back,
     // instead of the Enter press being silently swallowed. The queue drains
     // from endTurn() and from the reconnect's `ready` handler.
-    if (chat.turnRunning || !connected || !hostReady) {
+    if (chat.turnRunning || chat.sessionFailure || !connected || !hostReady) {
       queuePrompt(chat, text);
       return;
     }
@@ -5991,6 +6066,7 @@
   // Drains the next queued prompt (if any) once a turn finishes. Runs even if
   // `chat` isn't the active tab — background chats keep working while queued.
   function dispatchNextQueued(chat) {
+    if (chat.sessionFailure) return;
     if (!Array.isArray(chat.queue) || !chat.queue.length) return;
     // Head of the queue is open for editing — hold everything until the user
     // is done with it (or deletes it); both paths call back in here.
@@ -6162,8 +6238,9 @@
     // .busy is what the button's click reads to decide send-or-interrupt, and
     // what panel.css morphs the arrow into the square on.
     els.send.classList.toggle("busy", on);
-    els.send.title = on ? "Interrupt" : "Send";
-    els.send.setAttribute("aria-label", on ? "Interrupt" : "Send");
+    const label = on ? "Interrupt" : chats.get(activeId)?.sessionFailure ? "Queue message" : "Send";
+    els.send.title = label;
+    els.send.setAttribute("aria-label", label);
     els.root.classList.toggle("running", on);
   }
 
@@ -8793,7 +8870,7 @@
   function updateSetup() {
     if (!els.setup) return;
     const chat = chats.get(activeId);
-    els.setup.classList.toggle("hidden", !(chat && chat.empty));
+    els.setup.classList.toggle("hidden", !(chat && chat.empty && !chat.sessionFailure));
     updateGreeting();
   }
 
@@ -9179,7 +9256,7 @@
     const on = !!(chat && chat.bashMode);
     if (els.composerBox) els.composerBox.classList.toggle("bash-active", on);
     if (els.bashPill) els.bashPill.classList.toggle("hidden", !on);
-    if (els.input) els.input.placeholder = on ? PLACEHOLDER_BASH : PLACEHOLDER_NORMAL;
+    if (els.input) els.input.placeholder = on ? PLACEHOLDER_BASH : chat?.sessionFailure ? "Write a message to queue" : PLACEHOLDER_NORMAL;
   }
 
   // ---- onboarding overlay ---------------------------------------------------
@@ -9198,10 +9275,10 @@
     // Choose an installed agent only for a fresh, unused chat. Saved sessions
     // and drafts keep their agent even if its CLI is currently missing.
     if (chat && harnessChecked[chat.harness] && !harnessReady[chat.harness]
-        && chat.empty && !chat.started && !chat.sessionId && !chat.draft && !chat.queue.length) {
+        && chat.empty && !chat.started && !chat.sessionFailure && !chat.sessionId && !chat.draft && !chat.queue.length) {
       chooseHarness(chat, available.id);
     }
-    if (!chat || !harnessReady[chat.harness]) return;
+    if (!chat || !harnessReady[chat.harness] || chat.sessionFailure) return;
     if (!chat.started) startChatSession(chat);
     maybeReplay(chat);
     if (chat.started && !chat.turnRunning) dispatchNextQueued(chat);

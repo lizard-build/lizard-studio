@@ -105,7 +105,10 @@ function spawnAgent(name) {
 
   let proc;
   try {
-    proc = spawn(process.execPath, [path], { stdio: ["pipe", "pipe", "pipe"] });
+    proc = spawn(process.execPath, [path], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, LIZARD_STUDIO_ROUTER_PID: String(process.pid) },
+    });
   } catch (err) {
     log("spawn failed for", name, err && err.message);
     if (!spec.primary) notifyPanel({ type: "agentExit", agent: name, code: -1, error: String(err && err.message) });
