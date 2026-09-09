@@ -30,7 +30,7 @@ function panel() {
   const window = { RKRender: {}, RKIconHTML: () => "", addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }) };
   const source = readFileSync(new URL("../../src/panel/chat.js", import.meta.url), "utf8").replace(
     "  window.RKChat =",
-    "  window.browserTest = { handleBrowserOp, ensureAttached, cdpSessions, dbgSend }; port = { postMessage: (m) => testReplies.push(m) };\n  window.RKChat =",
+    "  window.browserTest = { handleBrowserOp, ensureAttached, cdpSessions, pinnedTabBySession, dbgSend }; port = { postMessage: (m) => testReplies.push(m) };\n  window.RKChat =",
   );
   vm.runInNewContext(source, {
     window, document: { addEventListener() {} }, chrome, console, navigator: { platform: "MacIntel" }, testReplies: replies,
@@ -207,4 +207,15 @@ test("a timed-out click is not replayed", async () => {
   await click;
   assert.equal(p.replies[0].ok, false);
   assert.equal(clicks, 1);
+});
+
+
+test("batch reads and opens preserve the chat working tab", async () => {
+  const p = panel();
+  p.pinnedTabBySession.set("chat-a", 99);
+  await p.call("tab_open", { url: "https://test.invalid/", active: false, preserveWorkingTab: true });
+  await p.call("dom", { tabId: 11, preserveWorkingTab: true });
+  assert.equal(p.pinnedTabBySession.get("chat-a"), 99);
+  await p.call("dom", { tabId: 11 });
+  assert.equal(p.pinnedTabBySession.get("chat-a"), 11);
 });

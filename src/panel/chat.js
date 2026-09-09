@@ -10401,7 +10401,7 @@
     if (args.tabId != null) {
       const tab = await getTab(Number(args.tabId));
       if (!tab || tab.id == null) return { error: "No tab with id " + args.tabId + " — call browser_tabs for the current list." };
-      if (session) pinnedTabBySession.set(session, tab.id);
+      if (session && !args.preserveWorkingTab) pinnedTabBySession.set(session, tab.id);
       return { tab };
     }
     const pinnedId = session ? pinnedTabBySession.get(session) : null;
@@ -10409,7 +10409,7 @@
     if (!tab || tab.id == null) {
       tab = await activeTab();
       if (!tab || tab.id == null) return { error: "No active browser tab." };
-      if (session) pinnedTabBySession.set(session, tab.id);
+      if (session && !args.preserveWorkingTab) pinnedTabBySession.set(session, tab.id);
     }
     return { tab };
   }
@@ -10430,7 +10430,7 @@
         chrome.tabs.create({ url, active: args.active !== false }, (nt) => resolve(chrome.runtime.lastError ? null : nt));
       });
       if (!t) return opErr("Couldn't open a new tab.");
-      if (session) pinnedTabBySession.set(session, t.id);
+      if (session && !args.preserveWorkingTab) pinnedTabBySession.set(session, t.id);
       return opOk({ tabId: t.id, windowId: t.windowId, url });
     },
     // File-upload staging (no tab needed until commit).
