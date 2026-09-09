@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Lizard Studio — Claude Code & ChatGPT Side Panel",
+  "name": "Lizard Studio \u2014 Claude Code & ChatGPT Side Panel",
   "version": "1.0.12",
   "description": "Claude Code and ChatGPT in your browser side panel. Inspect, measure, and fix the page you're building.",
   "minimum_chrome_version": "116",
@@ -13,7 +13,7 @@
     "128": "icons/icon128.png"
   },
   "action": {
-    "default_title": "Lizard Studio — toggle toolbar (set a shortcut in chrome://extensions/shortcuts)"
+    "default_title": "Lizard Studio \u2014 toggle toolbar (set a shortcut in chrome://extensions/shortcuts)"
   },
   "side_panel": {
     "default_path": "src/panel/panel.html"
@@ -28,7 +28,9 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": [
+        "<all_urls>"
+      ],
       "run_at": "document_idle",
       "js": [
         "src/core.js",
@@ -42,6 +44,17 @@
         "src/tools/responsive.js",
         "src/toolbar.js",
         "src/main.js"
+      ]
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "all_frames": true,
+      "match_about_blank": true,
+      "run_at": "document_idle",
+      "js": [
+        "src/selection.js"
       ]
     }
   ]

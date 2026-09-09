@@ -107,6 +107,56 @@ function sendToPanels(windowId, message) {
   }
   return ports.length;
 }
+// One live selection per browser window. Generations discard late reads after
+// tab switches/navigation; revisions keep a snapshot from overwriting an event.
+const liveSelections = new Map();
+function emitSelection(windowId, state, selection, frameId = null) {
+  state.selection = selection?.text ? {
+    kind: "selection", text: String(selection.text).slice(0, 14000),
+    url: String(selection.url || "").slice(0, 4000),
+    title: String(selection.title || "").slice(0, 500),
+    truncated: !!selection.truncated,
+  } : null;
+  state.frameId = state.selection ? frameId : null;
+  sendToPanels(windowId, { cmd: "liveSelection", selection: state.selection });
+}
+function refreshSelection(windowId, tabId) {
+  if (!panelsForWindow(windowId).length) return;
+  const state = { tabId, revision: 0, selection: null, frameId: null };
+  liveSelections.set(windowId, state);
+  emitSelection(windowId, state, null);
+  chrome.tabs.query({ active: true, windowId }, async ([tab]) => {
+    if (!tab || liveSelections.get(windowId) !== state || (tabId != null && tab.id !== tabId)) return;
+    state.tabId = tab.id;
+    const revision = state.revision;
+    try {
+      // Also covers pages that were open before the extension was updated.
+      await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ["src/selection.js"] });
+      const frames = await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        func: () => window.__rkLiveSelection?.read() || null,
+      });
+      if (liveSelections.get(windowId) !== state || state.revision !== revision) return;
+      const focused = frames.find((f) => f.result?.focused);
+      const source = focused || frames.find((f) => f.result?.text);
+      if (source) emitSelection(windowId, state, source.result, source.frameId);
+    } catch (_) { /* Chrome pages and other restricted surfaces have no selection. */ }
+  });
+}
+function selectionChanged(selection, sender) {
+  const tab = sender.tab;
+  if (!tab || !panelsForWindow(tab.windowId).length || !selection || typeof selection.text !== "string") return;
+  const state = liveSelections.get(tab.windowId);
+  if (!state || state.tabId !== tab.id) return;
+  if (tab.active === false) return;
+  // Chrome supplies the sender tab; the activation listener owns the current
+  // tab identity. Avoid an async query here so rapid range changes stay ordered.
+  if (!selection.text && !selection.focused && state.frameId !== sender.frameId) return;
+  if (selection.text && !selection.focused && state.selection && state.frameId !== sender.frameId) return;
+  ++state.revision;
+  emitSelection(tab.windowId, state, selection, sender.frameId);
+}
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "rk-sidepanel") return;
   panelPorts.set(port, null);
@@ -115,11 +165,15 @@ chrome.runtime.onConnect.addListener((port) => {
     if (!panelPorts.has(port) || panelPorts.get(port) !== null) return;
     panelPorts.set(port, msg.windowId);
     showToolbarOnActiveTab(msg.windowId);
+    refreshSelection(msg.windowId);
   });
   port.onDisconnect.addListener(() => {
     const windowId = panelPorts.get(port);
     panelPorts.delete(port);
-    if (windowId != null && !panelsForWindow(windowId).length) hideToolbarInWindow(windowId);
+    if (windowId != null && !panelsForWindow(windowId).length) {
+      liveSelections.delete(windowId);
+      hideToolbarInWindow(windowId);
+    }
   });
 });
 
@@ -131,7 +185,10 @@ function showToolbarOnActiveTab(windowId) {
 function catchUpActiveTab(tabId, windowId) {
   if (panelsForWindow(windowId).length) sendToTab(tabId, "RK_SHOW_TOOLBAR", true);
 }
-chrome.tabs.onActivated.addListener(({ tabId, windowId }) => catchUpActiveTab(tabId, windowId));
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  catchUpActiveTab(tabId, windowId);
+  refreshSelection(windowId, tabId);
+});
 chrome.windows.onFocusChanged.addListener((windowId) => {
   if (windowId === chrome.windows.WINDOW_ID_NONE) return;
   chrome.tabs.query({ active: true, windowId }, (tabs) => {
@@ -213,15 +270,31 @@ function setResponsiveRule(on, tabId) {
 // closes, crashes, or navigates away while Responsive mode is on, that message
 // never arrives — clean up here so the CSP-stripping rule can't outlive its tab.
 // Both listeners wake the service worker, so this holds across SW recycles.
-chrome.tabs.onRemoved.addListener((tabId) => setResponsiveRule(false, tabId));
+chrome.tabs.onRemoved.addListener((tabId) => {
+  setResponsiveRule(false, tabId);
+  for (const [windowId, state] of liveSelections) {
+    if (state.tabId === tabId) refreshSelection(windowId);
+  }
+});
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   // A top-level navigation resets the content script (tool state is gone).
   if (info.status === "loading") setResponsiveRule(false, tabId);
+  for (const [windowId, state] of liveSelections) {
+    if (state.tabId !== tabId) continue;
+    if (info.status === "loading") {
+      const next = { tabId, revision: 0, selection: null, frameId: null };
+      liveSelections.set(windowId, next);
+      emitSelection(windowId, next, null);
+    } else if (info.status === "complete") refreshSelection(windowId, tabId);
+  }
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
   switch (msg.type) {
+    case "RK_SELECTION_CHANGED":
+      selectionChanged(msg.selection, sender);
+      break;
     case "RK_CLOSE_SIDEPANEL":
       // Unconditional close — used when the toolbar itself is dismissed.
       sendToPanels(sender.tab && sender.tab.windowId, { cmd: "close" });

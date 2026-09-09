@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
-function worker() {
+function worker(executeScript = async () => []) {
   const listeners = {}, tabsSent = [], opened = [], contexts = [];
   const event = (name) => ({ addListener(fn) { (listeners[name] ||= []).push(fn); } });
   const tabs = [{ id: 11, windowId: 101, active: true }, { id: 22, windowId: 202, active: true }];
   const chrome = {
+    scripting: { executeScript },
     runtime: { getManifest: () => ({ content_scripts: [{ js: [] }] }), onInstalled: event("installed"), onConnect: event("connect"), onMessage: event("message"), getContexts: async () => contexts },
     tabs: { query: (query, cb) => cb(tabs.filter((tab) => Object.entries(query).every(([key, value]) => key === "currentWindow" || tab[key] === value))), sendMessage: async (id, msg) => tabsSent.push({ id, ...msg }), onRemoved: event("removed"), onUpdated: event("updated"), onActivated: event("activated") },
     sidePanel: { setPanelBehavior: async () => {}, open: async (opts) => opened.push(opts) },
@@ -22,7 +23,7 @@ function worker() {
     const port = { name: "rk-sidepanel", postMessage: (m) => received.push(m), onMessage: { addListener: (fn) => messages.push(fn) }, onDisconnect: { addListener: (fn) => disconnect.push(fn) } };
     fire("connect", port);
     const identify = (id = windowId) => messages.forEach((fn) => fn({ type: "panelReady", windowId: id }));
-    if (ready) identify();
+    if (ready) { identify(); received.length = 0; }
     return { received, identify, close: () => disconnect.forEach((fn) => fn()) };
   }
   const message = (msg, windowId) => fire("message", msg, { tab: { windowId, id: 11 } }, () => {});
@@ -43,7 +44,7 @@ test("attachments, selected elements, and close only reach the source window", (
 test("unregistered panels receive nothing and cannot change windows after registration", () => {
   const w = worker(), p = w.panel(101, false);
   w.message({ type: "RK_ADD_TO_CHAT" }, 101); assert.equal(p.received.length, 0);
-  p.identify(); p.identify(202);
+  p.identify(); p.received.length = 0; p.identify(202);
   w.message({ type: "RK_ADD_TO_CHAT" }, 202); assert.equal(p.received.length, 0);
   w.message({ type: "RK_ADD_TO_CHAT" }, 101); assert.equal(p.received.length, 1);
 });
@@ -77,4 +78,50 @@ test("the panel identifies its own window on every worker connection", () => {
   assert.equal(sent[0].type, "panelReady"); assert.equal(sent[0].windowId, 202);
   disconnects[0](); callbacks[0]();
   assert.equal(sent.length, 2); assert.equal(sent[1].windowId, 202);
+});
+
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+const selectionEvent = (w, text, tab = w.tabs[0], frameId = 0, focused = true) =>
+  w.fire("message", { type: "RK_SELECTION_CHANGED", selection: { text, focused, url: "https://example.test/" } }, { tab, frameId }, () => {});
+
+test("live ranges stay in the active tab and source window, including clears", async () => {
+  const w = worker(), a = w.panel(101), b = w.panel(202); await tick();
+  selectionEvent(w, "First"); assert.equal(a.received.at(-1).selection.text, "First");
+  assert.ok(!b.received.some((m) => m.selection?.text));
+  selectionEvent(w, "Other tab", { id: 33, windowId: 101, active: false });
+  assert.equal(a.received.at(-1).selection.text, "First");
+  selectionEvent(w, ""); assert.equal(a.received.at(-1).selection, null);
+});
+
+test("frame clears do not erase another frame, but an active frame can clear it", async () => {
+  const w = worker(), p = w.panel(101); await tick();
+  selectionEvent(w, "Child text", w.tabs[0], 7);
+  selectionEvent(w, "", w.tabs[0], 0, false);
+  assert.equal(p.received.at(-1).selection.text, "Child text");
+  selectionEvent(w, "", w.tabs[0], 0, true);
+  assert.equal(p.received.at(-1).selection, null);
+});
+
+test("navigation clears immediately and a late old-tab snapshot cannot revive a range", async () => {
+  let finish;
+  const w = worker(async (args) => args.files ? [] : new Promise((resolve) => { finish = resolve; }));
+  const p = w.panel(101); await tick();
+  selectionEvent(w, "Old range");
+  w.fire("updated", 11, { status: "loading" });
+  assert.equal(p.received.at(-1).selection, null);
+  finish([{ frameId: 0, result: { text: "Late snapshot", focused: true } }]); await tick();
+  assert.equal(p.received.at(-1).selection, null);
+  w.tabs[0] = { id: 33, windowId: 101, active: true };
+  w.fire("activated", { tabId: 33, windowId: 101 });
+  selectionEvent(w, "Old event", { id: 11, windowId: 101, active: true });
+  assert.equal(p.received.at(-1).selection, null);
+});
+
+test("a live event wins over an initial snapshot", async () => {
+  let finish;
+  const w = worker(async (args) => args.files ? [] : new Promise((resolve) => { finish = resolve; }));
+  const p = w.panel(101); await tick();
+  selectionEvent(w, "Latest");
+  finish([{ frameId: 0, result: { text: "Stale", focused: true } }]); await tick();
+  assert.equal(p.received.at(-1).selection.text, "Latest");
 });
