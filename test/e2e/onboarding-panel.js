@@ -6,7 +6,7 @@ window.runOnboardingPanelTests = async function () {
   const scenario = new URLSearchParams(location.search).get("onboarding");
   const check = (name, ok) => { if (!ok) throw new Error(name); checks.push(name); };
   const node = (selector) => document.querySelector(selector);
-  const claude = (ok) => t.emit({ type: "ready", version: 31, ok, home: "/test" });
+  const claude = (ok) => t.emit({ type: "ready", version: 32, ok, home: "/test" });
   const codex = (ok) => t.emit({ type: "agentReady", agent: "codex", version: 6, ok });
   const hidden = () => node("#chat-onboarding").classList.contains("hidden");
   const selected = () => t.storage.rkChatV2.tabs.find((c) => c.id === t.storage.rkChatV2.activeId);

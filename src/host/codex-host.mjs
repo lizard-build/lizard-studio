@@ -48,7 +48,7 @@ const codexSpawner = createCodexSpawner({ hostDir: HOST_DIR, nodePath: process.e
 
 // Bumped on every change the panel needs to know about. Reported in
 // `agentReady`. Claude's own HOST_VERSION is separate and untouched.
-const CODEX_HOST_VERSION = 7;
+const CODEX_HOST_VERSION = 8;
 
 // The browser bridge numbers its requests from here so the router can tell our
 // `browserResult` replies from claude's by value alone, and never has to parse
@@ -635,6 +635,8 @@ function makeSession(id, cwd) {
     effort: null,
     mode: "default",
     threadId: null,
+    resumeId: null,
+    hasSubmittedTurn: false,
     browserSession: "codex-" + randomBytes(16).toString("hex"),
     turnId: null,
     started: false,
@@ -1411,6 +1413,8 @@ async function startSession(msg) {
   openedCwds.add(cwd);
 
   const s = makeSession(id, cwd);
+  s.resumeId = msg.resume || null;
+  s.hasSubmittedTurn = !!msg.resume;
   // A custom model brings its own provider, declared inline on thread/start.
   s.provider = msg.provider && msg.provider.baseUrl ? msg.provider : null;
   s.model = s.provider ? s.provider.model : msg.model || null;
@@ -1446,7 +1450,9 @@ async function startSession(msg) {
       } catch (err) {
         // A failed resume must not silently discard the conversation. Keep
         // the saved thread id so a later retry can restore the same history.
-        throw new Error(`Couldn't resume this chat: ${err && err.message}`);
+        const failure = new Error(`Couldn't resume this chat: ${err && err.message}`);
+        if (/no rollout found for thread id/i.test(err?.message || "")) failure.code = "CHAT_HISTORY_MISSING";
+        throw failure;
       }
     }
     if (!thread) {
@@ -1471,6 +1477,7 @@ async function startSession(msg) {
     }
     s.threadId = (thread && thread.thread && thread.thread.id) || null;
     if (!s.threadId) throw new Error("ChatGPT didn't return a thread id");
+    s.resumeId = s.threadId;
     if (sessions.get(id) !== s) {
       rpc("thread/unsubscribe", { threadId: s.threadId }, 8000).catch(() => {});
       return;
@@ -1481,7 +1488,7 @@ async function startSession(msg) {
   } catch (err) {
     log("thread start failed:", err && err.message);
     s.opening = false;
-    send({ type: "error", id, message: `Couldn't open a ChatGPT session: ${err && err.message}` });
+    send({ type: "error", id, code: err?.code, message: `Couldn't open a ChatGPT session: ${err && err.message}` });
     s.pending.length = 0;
     endTurnWith(s, true, "The session couldn't be opened.");
     send({ type: "exit", agent: "codex", id, code: 1, quiet: true });
@@ -1653,6 +1660,8 @@ async function sendPrompt(msg) {
   }
 
   try {
+    // Once submitted, even an uncertain reply must not let a restart drop history.
+    s.hasSubmittedTurn = true;
     const res = await rpc("turn/start", {
       threadId: s.threadId,
       input,
@@ -1713,7 +1722,9 @@ function closeSession(id, opts) {
 async function restartSession(msg) {
   const s = sessions.get(msg.id);
   if (!s) return;
-  const resume = s.threadId;
+  // Codex cannot resume a thread before its first user message creates storage.
+  // A known empty thread can start fresh; saved or submitted chats keep their ID.
+  const resume = s.hasSubmittedTurn ? s.threadId || s.resumeId : null;
   await startSession({
     type: "start",
     id: msg.id,

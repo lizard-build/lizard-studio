@@ -165,6 +165,12 @@
           }],
         };
       }
+      const resumeRegression = new URLSearchParams(location.search).get("regressions");
+      if (["resume-empty", "resume-missing"].includes(resumeRegression)) store.rkChatV2 = {
+        activeId: "resume-a", lastHarness: "codex",
+        tabs: [{ id: "resume-a", title: "New chat", harness: "codex", model: "test-model", effort: "medium", cwd: "/test/project", mode: "full",
+          sessionId: resumeRegression === "resume-missing" ? "missing-thread" : null, draft: "Keep this draft" }],
+      };
       const sessionFailureRegression = new URLSearchParams(location.search).get("regressions") === "session-failure";
       if (sessionFailureRegression) store.rkChatV2 = {
         activeId: "failure-a", lastHarness: "codex",
@@ -209,6 +215,15 @@
             document.body.appendChild(script);
           });
           window.__test.onboardingResult = await window.runOnboardingPanelTests();
+        }
+        if (["resume-empty", "resume-missing"].includes(resumeRegression)) {
+          const script = document.createElement("script");
+          script.src = "resume-panel.js?t=" + stamp;
+          await new Promise((resolve, reject) => {
+            script.onload = resolve; script.onerror = reject;
+            document.body.appendChild(script);
+          });
+          window.__test.resumeResult = await window.runResumePanelTests(resumeRegression);
         }
         if (sessionFailureRegression) {
           const script = document.createElement("script");

@@ -6,7 +6,7 @@ window.runSessionFailurePanelTests = async function () {
   const emit = (message) => t.emit({ id: "failure-a", ...message });
   const card = () => document.querySelector(".session-failure");
   const greeting = () => document.querySelector("#chat-greeting");
-  t.emit({ type: "ready", version: 31, ok: true, home: "/test", user: "Marianna" });
+  t.emit({ type: "ready", version: 32, ok: true, home: "/test", user: "Marianna" });
   t.emit({ type: "agentReady", agent: "codex", ok: true });
   check("ChatGPT starts with its own permission mode", t.posted("start").at(-1)?.agent === "codex" && t.posted("start").at(-1)?.permissionMode === "workspace");
   check("an unused chat shows the greeting", !greeting().classList.contains("hidden"));

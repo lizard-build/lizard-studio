@@ -476,7 +476,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 31;
+  const EXPECTED_HOST_VERSION = 32;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -648,13 +648,16 @@
     }
   }
   let composerChatId = null;
+  function resumableSessionId(chat) {
+    return chat.harness === "codex" && !chat.codexHasSubmittedTurn ? null : chat.sessionId;
+  }
   function savePrefs() {
     try {
       const owner = chats.get(composerChatId);
       if (owner && els.input) owner.draft = els.input.value;
       const tabs = order.map((id) => {
         const c = chats.get(id);
-        return { id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: c.sessionId, bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, bashMode: c.bashMode };
+        return { id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: resumableSessionId(c), bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, bashMode: c.bashMode };
       });
       chrome.storage.local.set({
         rkChatV2: {
@@ -899,6 +902,8 @@
       effort: opts.effort || lastFor(opts.harness || lastHarness).effort || ((opts.harness || lastHarness) === "codex" ? null : DEFAULT_EFFORT),
       mode: opts.mode || lastFor(opts.harness || lastHarness).mode,
       sessionId: opts.sessionId || null,
+      // Older saved IDs may contain history; never assume they are empty.
+      codexHasSubmittedTurn: !!opts.sessionId,
       slashCommands: [],
       skills: [],
       plugins: [],
@@ -1132,8 +1137,8 @@
     // Remember non-empty conversations so they can be reopened from history.
     // `ts` is when the conversation last moved, not when the tab was shut —
     // closing a chat shouldn't jump it to the top of the menu.
-    if (!chat.empty || chat.sessionId) {
-      history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, harness: chat.harness, model: chat.model, effort: chat.effort, mode: chat.mode, sessionId: chat.sessionId, ts: chat.lastActivityAt || Date.now() });
+    if (!chat.empty || resumableSessionId(chat)) {
+      history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, harness: chat.harness, model: chat.model, effort: chat.effort, mode: chat.mode, sessionId: resumableSessionId(chat), ts: chat.lastActivityAt || Date.now() });
       history = history.slice(0, 40);
     }
     if (chat.started) post({ type: "close", id });
@@ -2300,6 +2305,7 @@
     const routing = code === "AGENT_ROUTING_REQUIRED"
       || (chat.harness === "codex" && /permission-mode[\s\S]*workspace[\s\S]*invalid/i.test(message));
     const invalidMode = code === "INVALID_PERMISSION_MODE";
+    const missingHistory = code === "CHAT_HISTORY_MISSING" || (chat.harness === "codex" && /no rollout found for thread id/i.test(message));
     const label = harnessLabel(chat.harness || DEFAULT_HARNESS);
     clearSessionFailure(chat);
     chat.started = false;
@@ -2310,17 +2316,25 @@
     chat.sessionFailure = card;
     const heading = el("div", "session-failure-heading");
     heading.setAttribute("role", "alert");
-    heading.appendChild(el("strong", "session-failure-title", routing ? "Update the local helper" : `${label} couldn't connect`));
+    heading.appendChild(el("strong", "session-failure-title", missingHistory ? "Chat history unavailable" : routing ? "Update the local helper" : `${label} couldn't connect`));
     heading.appendChild(el("p", "session-failure-description", routing
       ? "This helper sent ChatGPT to the wrong agent. Update it, then reopen this panel."
+      : missingHistory ? "ChatGPT can't find this chat's saved history. Start a new chat with your draft. This chat will stay in the list."
       : invalidMode ? "Choose a supported permission setting, then try again."
       : "The session stopped. You can reconnect and keep this chat."));
     card.appendChild(heading);
     const actions = el("div", "session-failure-actions");
-    const button = el("button", "session-failure-action", routing ? "Update helper" : "Reconnect");
+    const button = el("button", "session-failure-action", missingHistory ? "Start new chat" : routing ? "Update helper" : "Reconnect");
     button.type = "button";
     button.addEventListener("click", () => {
-      if (routing) {
+      if (missingHistory) {
+        const draft = chat.id === activeId ? els.input.value : chat.draft;
+        const fresh = createChat({ cwd: chat.cwd, harness: chat.harness, model: chat.model,
+          effort: chat.effort, mode: chat.mode, draft });
+        fresh.contexts = chat.contexts.slice();
+        fresh.attachments = chat.attachments.slice();
+        syncComposer();
+      } else if (routing) {
         retryHostUpdate();
       } else {
         chat.restartFlush = true;
@@ -5306,7 +5320,7 @@
             }
           } else {
             const message = msg.message || "Host error";
-            if (msg.code === "AGENT_ROUTING_REQUIRED" || msg.code === "INVALID_PERMISSION_MODE"
+            if (msg.code === "AGENT_ROUTING_REQUIRED" || msg.code === "INVALID_PERMISSION_MODE" || msg.code === "CHAT_HISTORY_MISSING"
                 || /permission-mode[\s\S]*invalid|Couldn't (?:start ChatGPT|open a ChatGPT session)|This ChatGPT (?:chat has no session|session isn't running)/i.test(message)) {
               showSessionFailure(chat, message, msg.code);
             } else {
@@ -5360,7 +5374,7 @@
       provider: providerFor(chat),
       effort: selectedEffortFor(chat),
       permissionMode: chat.mode,
-      resume: resume || chat.sessionId || undefined,
+      resume: resume || resumableSessionId(chat) || undefined,
     });
   }
 
@@ -5370,7 +5384,7 @@
   // on-disk JSONL and replay it, once, the first time we have a live host.
   function maybeReplay(chat) {
     if (!chat || chat.replayed) return;
-    if (chat.sessionId) {
+    if (resumableSessionId(chat)) {
       if (!connected || !hostReady) return;
       if (chat.harness === "codex") {
         chat.replayed = true;
@@ -5799,6 +5813,7 @@
     chat.currentAssistantId = null;
     chat.currentAssistantBody = null;
     chat.sessionId = null;
+    chat.codexHasSubmittedTurn = false;
     chat.tabsContextSent = false; // a fresh session re-sends the one-time tab snapshot
     pinnedTabBySession.delete(chat.id);
     chat.empty = true;
@@ -6182,6 +6197,7 @@
       return;
     }
     // The post reached the host — the one-time tab snapshot is now delivered.
+    if (chat.harness === "codex") chat.codexHasSubmittedTurn = true;
     if (tabsBlock) chat.tabsContextSent = true;
     // Kept so an auth-revoked failure can re-send this prompt after re-login.
     chat.lastSentPrompt = { text, attachments: attachments.slice() };
