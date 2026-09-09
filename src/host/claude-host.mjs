@@ -630,6 +630,12 @@ if (CLAUDE_SPEC.prefix.length) log("claude launched via node ->", CLAUDE_SPEC.pr
 // panel sends back a `browserResult`. This is how claude reaches the live tab.
 let bridgePort = 0;
 const browserPending = new Map(); // bid -> { resolve, timer }
+const browserClients = new Map(); // authenticated socket -> chat session
+function cancelBrowserWorkflows(session) {
+  for (const [sock, owner] of browserClients) if (owner === session) {
+    try { sock.write(JSON.stringify({ type: "workflowCancel" }) + "\n"); } catch (_) {}
+  }
+}
 let nextBid = 1;
 
 // Shared secret for the bridge. The server binds to 127.0.0.1, but that alone
@@ -648,6 +654,7 @@ const bridgeServer = net.createServer((sock) => {
       return;
     }
     const reqId = m.reqId;
+    browserClients.set(sock, m.session);
     browserRequest(m.op, m.args, m.session).then((r) => {
       try {
         sock.write(JSON.stringify({ reqId, ...r }) + "\n");
@@ -658,6 +665,7 @@ const bridgeServer = net.createServer((sock) => {
   });
   sock.on("data", feed);
   sock.on("error", () => {});
+  sock.on("close", () => browserClients.delete(sock));
 });
 bridgeServer.on("error", (err) => log("bridge server error", err && err.message));
 bridgeServer.listen(0, "127.0.0.1", () => {
@@ -697,6 +705,7 @@ const BROWSER_HINT =
   "Read/observe: browser_info (url/title/selection — cheap, call first), browser_dom (visible text or HTML, optional CSS selector), browser_snapshot (accessibility tree with stable @refs — the best way to understand a page before acting), " +
   "browser_eval (run JS and read anything — DOM, app state, localStorage, fetch), browser_console (recent logs + exceptions), browser_network (recent requests), browser_screenshot. " +
   "Act: browser_click, browser_type, browser_fill, browser_key, browser_navigate, browser_reload, browser_upload_file (attach a local file to a page's file input or drop zone by absolute path — no need to click the input or deal with the OS file dialog). " +
+  "For known browser sequences prefer browser_run: send one plan with steps {op,args}; the local runner handles actions, wait_for, assert and if branches without model turns between steps. Use selectors across page changes. browser_open_page opens/waits/observes; browser_fill_form fills all fields and can submit with a waitFor postcondition; browser_click_and_observe clicks once, waits and observes. browser_observe returns compact text or mode:changes; request full text or browser_snapshot only when needed. browser_check_pages checks independent URLs with bounded parallelism in new background tabs and closes only its own tabs; it shares the browser profile. Use active tabs for actual clicks/keys when Chrome stalls background input. If a run pauses, browser_resume continues its next unfinished step; browser_run_result reads retained step results; browser_cancel stops future steps. Do not repeat a failed action without checking the page. A workflow needs the same user authorization as its individual actions; do not hide writes in a batch. " +
   "Prefer browser_snapshot to get @refs, then target clicks/typing/fills by ref rather than guessing selectors. " +
   "The FIRST user message of a conversation may be preceded by a one-time '[Open browser tabs]' snapshot listing the tabs open at that moment (title + a SHORTENED URL — query string and #fragment stripped), with a leading → marking the one the user was viewing — that's environment context the extension injected, not something the user typed. It is NOT resent on later turns and it can go stale, so call browser_tabs whenever you need the current list, a tab's full URL, or its numeric tabId. " +
   "Since the snapshot only has title/truncated-URL, when the user refers to \"this page\", \"the open tab\", what they're \"looking at\", or asks you to debug or drive a live site, still call browser_info / browser_dom / browser_snapshot (targeting that tabId if it's not the active one) instead of guessing from the title alone. " +
@@ -1433,6 +1442,7 @@ const recentClaudePids = new Set();
 function killSession(id) {
   const s = sessions.get(id);
   if (!s) return;
+  cancelBrowserWorkflows(id);
   if (s.child && s.child.pid) {
     const pid = s.child.pid;
     recentClaudePids.add(pid);

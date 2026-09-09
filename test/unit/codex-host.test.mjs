@@ -34,7 +34,7 @@ async function host() {
     clearTimeout: (timer) => timers.delete(timer),
   });
   const source = readFileSync(new URL("../../src/host/codex-host.mjs", import.meta.url), "utf8");
-  const module = new SourceTextModule(source + `\nexport { handle, loadSkills, loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, restartSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
+  const module = new SourceTextModule(source + `\nexport { browserClients, cancelBrowserWorkflows, handle, loadSkills, loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, restartSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
   await module.link((name) => {
     const values = imports[name];
     assert.ok(values, `unexpected import: ${name}`);
@@ -357,4 +357,17 @@ test("an uncertain first prompt cannot make a later restart drop its history", a
   await h.api.restartSession({ id: "a", permissionMode: "full" });
   assert.equal(h.requests.filter((r) => r.method === "thread/start").length, 1);
   assert.equal(h.requests.find((r) => r.method === "thread/resume").params.threadId, "submitted-thread");
+});
+
+
+test("stopping or closing a chat cancels only its browser workflows", async () => {
+  const h = await host(), a = h.session("a"), b = h.session("b");
+  const receivedA = [], receivedB = [];
+  h.api.browserClients.set({ write: (line) => receivedA.push(JSON.parse(line)) }, a.browserSession);
+  h.api.browserClients.set({ write: (line) => receivedB.push(JSON.parse(line)) }, b.browserSession);
+  await h.api.interrupt({ id: "a" });
+  assert.equal(receivedA[0].type, "workflowCancel");
+  assert.equal(receivedB.length, 0);
+  h.api.closeSession("b");
+  assert.equal(receivedB[0].type, "workflowCancel");
 });

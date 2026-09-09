@@ -10110,7 +10110,10 @@
   // ===========================================================================
   const CDP_VERSION = "1.3";
   const CDP_IDLE_MS = 3 * 60 * 1000;
+  const BROWSER_STEP_MS = 5000;
+  const PAGE_HELPER_MS = 2500;
   const cdpSessions = new Map(); // tabId -> { console, network, netMap, refs, waiters, idleTimer }
+  const cdpAttaching = new Map(); // tabId -> shared setup promise
   // Per-Claude-session (msg.session, the chat id) pinned tab. Resolved once —
   // the first time a browser_* call omits tabId — then reused, so switching the
   // browser's active tab mid-task doesn't retarget calls that still omit tabId.
@@ -10155,11 +10158,33 @@
     });
   }
   function sendToTab(tabId, payload) {
-    return new Promise((resolve) => {
-      chrome.tabs.sendMessage(tabId, payload, (resp) => {
-        if (chrome.runtime.lastError) return resolve({ ok: false, error: chrome.runtime.lastError.message });
-        resolve(resp || { ok: false, error: "no response" });
-      });
+    return browserStep(tabId, payload.type, (done) => chrome.tabs.sendMessage(tabId, payload, done),
+      payload.type === "RK_PAGE_CONTEXT" ? PAGE_HELPER_MS : 25000)
+      .then((resp) => resp || { ok: false, error: "no response", unreachable: true })
+      .catch((e) => ({ ok: false, error: e.message, unreachable: e.code === "BROWSER_STEP_TIMEOUT" || isNoReceiver(e.message) }));
+  }
+  // Chrome callbacks can stay pending while a tab is loading or unresponsive.
+  // Bound each step so the panel can recover or report the failed step before
+  // the host's 30-second deadline. Never retry a click, upload, or key press.
+  function browserStep(tabId, step, invoke, timeoutMs = BROWSER_STEP_MS, onLate) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        settled = true;
+        const error = new Error(step + " on tab " + tabId + " timed out after " + timeoutMs + " ms. The page may still be loading or unresponsive. For a background tab, call browser_tab_activate, then retry a read. Check the page before repeating an action; it may have already run.");
+        error.code = "BROWSER_STEP_TIMEOUT";
+        reject(error);
+      }, timeoutMs);
+      const done = (result) => {
+        const error = chrome.runtime.lastError;
+        if (settled) { if (!error && onLate) onLate(); return; }
+        settled = true;
+        clearTimeout(timer);
+        if (error) reject(new Error(error.message));
+        else resolve(result);
+      };
+      try { invoke(done); }
+      catch (error) { settled = true; clearTimeout(timer); reject(error); }
     });
   }
   function captureTab(windowId) {
@@ -10170,12 +10195,10 @@
     });
   }
   function dbgSend(tabId, method, params) {
-    return new Promise((resolve, reject) => {
-      chrome.debugger.sendCommand({ tabId }, method, params || {}, (res) => {
-        const e = chrome.runtime.lastError;
-        if (e) reject(new Error(e.message));
-        else resolve(res);
-      });
+    const session = cdpSessions.get(tabId);
+    return browserStep(tabId, method, (done) => chrome.debugger.sendCommand({ tabId }, method, params || {}, done)).catch((error) => {
+      if (error.code === "BROWSER_STEP_TIMEOUT" && cdpSessions.get(tabId) === session) detachCdp(tabId);
+      throw error;
     });
   }
   function cdpArgToStr(a) {
@@ -10269,27 +10292,37 @@
     });
   }
   function ensureAttached(tabId) {
-    return new Promise((resolve, reject) => {
-      ensureCdpListeners();
-      if (cdpSessions.has(tabId)) {
-        bumpIdle(tabId);
-        return resolve();
-      }
-      chrome.debugger.attach({ tabId }, CDP_VERSION, async () => {
-        const e = chrome.runtime.lastError;
-        if (e) return reject(new Error(e.message));
-        cdpSessions.set(tabId, { console: [], network: [], netMap: new Map(), refs: new Map(), waiters: [], idleTimer: null });
-        try {
-          await dbgSend(tabId, "Runtime.enable");
-          await dbgSend(tabId, "Log.enable");
-          await dbgSend(tabId, "Network.enable");
-          await dbgSend(tabId, "Page.enable");
-          await dbgSend(tabId, "DOM.enable");
-        } catch (_) {}
-        bumpIdle(tabId);
-        resolve();
+    ensureCdpListeners();
+    // A session enters the map before its domains are ready. Concurrent
+    // reads must join setup, not treat that entry as a completed attachment.
+    if (cdpAttaching.has(tabId)) return cdpAttaching.get(tabId);
+    if (cdpSessions.has(tabId)) {
+      bumpIdle(tabId);
+      return Promise.resolve();
+    }
+    const setup = (async () => {
+      await browserStep(tabId, "debugger.attach", (done) => chrome.debugger.attach({ tabId }, CDP_VERSION, done), BROWSER_STEP_MS, () => {
+        // An attachment that finished after its deadline must not leave the
+        // debugger banner behind. Do not detach a newer connection attempt.
+        if (!cdpAttaching.has(tabId) && !cdpSessions.has(tabId)) {
+          try { chrome.debugger.detach({ tabId }, () => void chrome.runtime.lastError); } catch (_) {}
+        }
       });
-    });
+      const session = { console: [], network: [], netMap: new Map(), refs: new Map(), waiters: [], idleTimer: null };
+      cdpSessions.set(tabId, session);
+      try {
+        await Promise.all(["Runtime.enable", "Log.enable", "Network.enable", "Page.enable", "DOM.enable"].map((method) => dbgSend(tabId, method)));
+        if (cdpSessions.get(tabId) !== session) throw new Error("Debugger disconnected from tab " + tabId + " during setup.");
+        bumpIdle(tabId);
+      } catch (error) {
+        if (cdpSessions.get(tabId) === session) detachCdp(tabId);
+        throw error;
+      }
+    })();
+    cdpAttaching.set(tabId, setup);
+    const clear = () => { if (cdpAttaching.get(tabId) === setup) cdpAttaching.delete(tabId); };
+    setup.then(clear, clear);
+    return setup;
   }
 
   // ---- browser op dispatch ---------------------------------------------------
@@ -10308,7 +10341,7 @@
     if (args.tabId != null) {
       const tab = await getTab(Number(args.tabId));
       if (!tab || tab.id == null) return { error: "No tab with id " + args.tabId + " — call browser_tabs for the current list." };
-      if (session) pinnedTabBySession.set(session, tab.id);
+      if (session && !args.preserveWorkingTab) pinnedTabBySession.set(session, tab.id);
       return { tab };
     }
     const pinnedId = session ? pinnedTabBySession.get(session) : null;
@@ -10316,7 +10349,7 @@
     if (!tab || tab.id == null) {
       tab = await activeTab();
       if (!tab || tab.id == null) return { error: "No active browser tab." };
-      if (session) pinnedTabBySession.set(session, tab.id);
+      if (session && !args.preserveWorkingTab) pinnedTabBySession.set(session, tab.id);
     }
     return { tab };
   }
@@ -10337,7 +10370,7 @@
         chrome.tabs.create({ url, active: args.active !== false }, (nt) => resolve(chrome.runtime.lastError ? null : nt));
       });
       if (!t) return opErr("Couldn't open a new tab.");
-      if (session) pinnedTabBySession.set(session, t.id);
+      if (session && !args.preserveWorkingTab) pinnedTabBySession.set(session, t.id);
       return opOk({ tabId: t.id, windowId: t.windowId, url });
     },
     // File-upload staging (no tab needed until commit).
@@ -10369,7 +10402,7 @@
   // don't inject into. That's a recoverable condition, not something to surface
   // raw to Claude, so detect it and either fall back to CDP or say it plainly.
   function isNoReceiver(msg) {
-    return typeof msg === "string" && /receiving end does not exist|could not establish connection|message port closed/i.test(msg);
+    return typeof msg === "string" && /receiving end does not exist|could not establish connection|message (?:port|channel) (?:is )?closed|back\/forward cache/i.test(msg);
   }
   function friendlyTabError(msg) {
     if (!msg || isNoReceiver(msg)) {
@@ -10398,27 +10431,20 @@
     return out;
   }
   async function pageContextViaCdp(tab, fmt, selector) {
-    try {
-      await ensureAttached(tab.id);
-    } catch (_) {
-      return null; // restricted / discarded tab — nothing we can attach to
-    }
+    await ensureAttached(tab.id);
     const expr = "(" + pageContextProbe.toString() + ")(" + JSON.stringify(selector || null) + "," + JSON.stringify(fmt) + ")";
-    try {
-      const r = await dbgSend(tab.id, "Runtime.evaluate", { expression: expr, returnByValue: true, timeout: 5000 });
-      if (!r || r.exceptionDetails) return null;
-      return r.result ? r.result.value : null;
-    } catch (_) {
-      return null;
-    }
+    const r = await dbgSend(tab.id, "Runtime.evaluate", { expression: expr, returnByValue: true, timeout: 5000 });
+    if (!r || r.exceptionDetails) throw new Error("Could not read page content on tab " + tab.id + ".");
+    return r.result ? r.result.value : null;
   }
 
   // info and dom share one reader (format decides the payload).
   async function pageContextOp({ op, args, tab }) {
     const format = op === "info" ? "info" : args.format === "html" ? "html" : "text";
     let resp = await sendToTab(tab.id, { type: "RK_PAGE_CONTEXT", format, selector: args.selector });
-    // Content script absent → read the page over CDP instead of hard-failing.
-    if ((!resp || !resp.ok) && isNoReceiver(resp && resp.error)) {
+    // A missing or silent helper can recover through CDP. Page errors (such
+    // as an invalid selector) are answers, not reasons to run the read again.
+    if ((!resp || !resp.ok) && (resp?.unreachable || isNoReceiver(resp && resp.error))) {
       const viaCdp = await pageContextViaCdp(tab, format === "html" ? "html" : "text", args.selector);
       if (viaCdp) resp = viaCdp;
     }
