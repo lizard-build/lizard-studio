@@ -34,7 +34,7 @@ async function host() {
     clearTimeout: (timer) => timers.delete(timer),
   });
   const source = readFileSync(new URL("../../src/host/codex-host.mjs", import.meta.url), "utf8");
-  const module = new SourceTextModule(source + `\nexport { handle, loadSkills, loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
+  const module = new SourceTextModule(source + `\nexport { handle, loadSkills, loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, restartSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
   await module.link((name) => {
     const values = imports[name];
     assert.ok(values, `unexpected import: ${name}`);
@@ -318,4 +318,43 @@ test("config responses echo the request identity even on validation errors", asy
     assert.equal(reply.type, type); assert.equal(reply.requestId, "request-" + type);
     assert.equal(reply.agent, "codex"); assert.equal(reply.cwd, "/test/project"); assert.equal(reply.ok, false);
   }
+});
+
+test("changing settings before the first prompt starts a fresh thread without resume", async () => {
+  const h = await host(); let next = 0;
+  h.respond((r) => r.method === "thread/start" ? { thread: { id: "empty-" + (++next) } } : {});
+  await h.api.startSession({ id: "a", cwd: "/test/project", model: "first-model", permissionMode: "workspace" });
+  assert.equal(h.api.sessions.get("a").hasSubmittedTurn, false);
+  await h.api.restartSession({ id: "a", model: "second-model", permissionMode: "full", effort: "medium" });
+  assert.equal(h.requests.filter((r) => r.method === "thread/resume").length, 0);
+  const starts = h.requests.filter((r) => r.method === "thread/start");
+  assert.equal(starts.length, 2);
+  assert.equal(starts[1].params.model, "second-model");
+  assert.equal(h.api.sessions.get("a").mode, "full");
+  assert.equal(h.api.sessions.get("a").threadId, "empty-2");
+});
+
+test("missing saved history has a distinct error and never starts an empty replacement", async () => {
+  const h = await host();
+  h.respond(() => { throw new Error("no rollout found for thread id saved-thread"); });
+  await h.api.startSession({ id: "a", cwd: "/test/project", resume: "saved-thread" });
+  assert.equal(h.messages.find((m) => m.type === "error").code, "CHAT_HISTORY_MISSING");
+  await h.api.restartSession({ id: "a", permissionMode: "full" });
+  assert.deepEqual(h.requests.map((r) => r.method), ["thread/resume", "thread/resume"]);
+  assert.ok(h.requests.every((r) => r.params.threadId === "saved-thread"));
+});
+
+test("an uncertain first prompt cannot make a later restart drop its history", async () => {
+  const h = await host();
+  h.respond((r) => {
+    if (r.method === "turn/start") throw new Error("request timed out");
+    if (r.method === "thread/start" || r.method === "thread/resume") return { thread: { id: "submitted-thread" } };
+    return {};
+  });
+  await h.api.startSession({ id: "a", cwd: "/test/project" });
+  await h.api.sendPrompt({ id: "a", text: "Keep this message" });
+  assert.equal(h.api.sessions.get("a").hasSubmittedTurn, true);
+  await h.api.restartSession({ id: "a", permissionMode: "full" });
+  assert.equal(h.requests.filter((r) => r.method === "thread/start").length, 1);
+  assert.equal(h.requests.find((r) => r.method === "thread/resume").params.threadId, "submitted-thread");
 });
