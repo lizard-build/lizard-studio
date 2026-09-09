@@ -490,9 +490,6 @@
   let reconnectTimer = null;
   let mounted = false;
   let home = null;
-  // OS user's name, reported by the host in `ready` (v18+) — full name on macOS
-  // when available, else the account username. Personalizes the empty-chat greeting.
-  let hostUser = null;
   // Host protocol version last reported in `ready` (0 until the host connects).
   // Surfaced read-only in the Settings → General tab.
   let hostVersion = 0;
@@ -885,7 +882,7 @@
       chat.messagesEl.appendChild(node);
     }
     if (stick && chat.id === activeId) scrollToBottom(chat);
-    if (chat.id === activeId) updateGreeting();
+    if (chat.id === activeId) updateEmptyMark();
   }
 
   // ---- chat objects ---------------------------------------------------------
@@ -2278,7 +2275,7 @@
       note.classList.add("leaving");
       setTimeout(() => {
         note.remove();
-        if (chat.id === activeId) updateGreeting();
+        if (chat.id === activeId) updateEmptyMark();
       }, 180);
     };
     if (opts.dismissible) {
@@ -4914,10 +4911,8 @@
         syncComposer();
         if (hostReady) prewarmHarnesses();
         home = msg.home || home;
-        hostUser = msg.user || hostUser;
         hostVersion = msg.version || 0;
         refreshSettingsIfOpen();
-        updateGreeting(); // the greeting may have rendered nameless before `ready`
         // The extension updates via git/store, but the native host runs from a
         // copy in ~/.lizard-studio that install.sh seeds — so a stale host is
         // easy to end up with and otherwise fails silently (missing tools,
@@ -5695,7 +5690,7 @@
     const run = { row, bodyEl, outEl, footEl, stopBtn, spin, command, ts, outText: "", running: true };
     chat.bashRuns.set(execId, run);
     append(chat, row);
-    if (chat.id === activeId) updateGreeting(); // bash card lands while `empty` is still true
+    if (chat.id === activeId) updateEmptyMark(); // bash card lands while `empty` is still true
     if (stopBtn) stopBtn.addEventListener("click", () => post({ type: "bashKill", id: chat.id, execId }));
     if (!post({ type: "bashExec", id: chat.id, execId, command, cwd: chat.cwd })) {
       finishBashRun(chat, execId, 1, null, "Host disconnected — command not run.");
@@ -5965,7 +5960,7 @@
     }
     entry.el = renderQueuedBubble(chat, entry);
     updateTabDots(); // a queued prompt keeps the tab's yellow dot alive
-    if (chat.id === activeId) updateGreeting(); // queued bubble lands while `empty` is still true
+    if (chat.id === activeId) updateEmptyMark(); // queued bubble lands while `empty` is still true
   }
 
   // opts.atFront: this entry was unshifted back to the head of the queue (the
@@ -8887,41 +8882,16 @@
     if (!els.setup) return;
     const chat = chats.get(activeId);
     els.setup.classList.toggle("hidden", !(chat && chat.empty && !chat.sessionFailure));
-    updateGreeting();
+    updateEmptyMark();
   }
 
-  // ---- empty-chat greeting ---------------------------------------------------
-  // Gemini-style hero for a blank chat: a time-of-day hello (personalized once
-  // the host reports the OS user's name) plus three fixed starter shortcuts.
-  // The shortcuts are static strings — deliberately no model-generated
-  // suggestions, so an idle empty chat never spends the user's quota.
-  const GREETING_SHORTCUTS = [
-    "Summarize this tab",
-    "Redesign this tab in a dark theme",
-    "Create a vite app and open on localhost",
-  ];
-  function greetFirstName() {
-    const n = (hostUser || "").trim();
-    if (!n) return "";
-    const first = n.split(/\s+/)[0];
-    return first.charAt(0).toUpperCase() + first.slice(1);
-  }
-
-  function updateGreeting() {
-    if (!els.greeting) return;
+  // ---- empty-chat mark -------------------------------------------------------
+  function updateEmptyMark() {
+    if (!els.emptyMark) return;
     const chat = chats.get(activeId);
-    // `empty` alone isn't enough: bash-mode runs and queued bubbles land in
-    // messagesEl while the chat is still technically empty — hide behind those.
+    // Queued and shell messages can appear before the chat loses its empty flag.
     const show = !!(chat && chat.empty && !chat.turnRunning && !chat.messagesEl.childElementCount);
-    els.greeting.classList.toggle("hidden", !show);
-    if (!show) return;
-    const h = new Date().getHours();
-    const word =
-      h >= 5 && h < 12 ? "Good morning" :
-      h >= 12 && h < 18 ? "Good afternoon" :
-      h >= 18 && h < 23 ? "Good evening" : "Up late";
-    const name = greetFirstName();
-    els.greetingHello.textContent = name ? `${word}, ${name}` : word;
+    els.emptyMark.classList.toggle("hidden", !show);
   }
 
   // ---- git branch chip ------------------------------------------------------
@@ -9405,26 +9375,8 @@
     els.tabs = root.querySelector("#chat-tabs");
     els.setup = root.querySelector("#chat-setup");
     els.stack = root.querySelector("#chat-stack");
-    els.greeting = root.querySelector("#chat-greeting");
-    els.greetingHello = root.querySelector("#greeting-hello");
-    els.greetingChips = root.querySelector("#greeting-chips");
-    // Build the fixed shortcuts once — clicking one sends its label as the
-    // prompt (sendPrompt opens the folder picker first when none is set).
-    if (els.greetingChips) {
-      for (const text of GREETING_SHORTCUTS) {
-        const b = el("button", "greeting-chip", text);
-        b.type = "button";
-        b.addEventListener("click", () => {
-          const chat = chats.get(activeId);
-          if (!chat) return;
-          if (chat.bashMode) exitBashMode(chat); // a chip is a prompt, not a shell command
-          els.input.value = text;
-          autosize();
-          sendPrompt();
-        });
-        els.greetingChips.appendChild(b);
-      }
-    }
+    els.emptyMark = root.querySelector("#chat-empty-mark");
+    els.emptyMark.innerHTML = window.RKLizardHTML(64);
     els.input = root.querySelector("#composer-input");
     els.contextChips = root.querySelector("#context-chips");
     els.attachThumbs = root.querySelector("#attach-thumbs");
@@ -9844,12 +9796,6 @@
       }).observe(els.input);
     }
 
-    // Refresh the greeting's time-of-day line every few minutes — it can cross
-    // a boundary while the panel idles open on an empty chat.
-    setInterval(() => {
-      if (els.greeting && !els.greeting.classList.contains("hidden")) updateGreeting();
-    }, 5 * 60 * 1000);
-
     // Pull the model catalog before restoring tabs, so a tab saved on a model
     // that only exists in the remote list still resolves to its real label.
     loadModelCatalog(() => {
@@ -9945,14 +9891,8 @@
         </div>
         <div id="tasks-drawer-body" class="git-diff-drawer-body tasks-drawer-body"></div>
       </div>
-      <!-- Time-of-day greeting + fixed starter shortcuts, shown while the
-           active chat is empty (same lifecycle as the setup chips below the
-           composer). The chips are static labels — no generated content. -->
-      <div id="chat-greeting" class="chat-greeting hidden">
-        <div id="greeting-hello" class="greeting-hello">Hello</div>
-        <div class="greeting-sub">Where should we start?</div>
-        <div id="greeting-chips" class="greeting-chips"></div>
-      </div>
+      <!-- Centered mark, visible only while the active chat has no messages. -->
+      <div id="chat-empty-mark" class="chat-empty-mark hidden" aria-hidden="true"></div>
     </div>
     <div class="composer">
       <div id="slash-menu" class="slash-menu hidden"></div>
