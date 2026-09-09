@@ -116,6 +116,7 @@ function emitSelection(windowId, state, selection, frameId = null) {
     url: String(selection.url || "").slice(0, 4000),
     title: String(selection.title || "").slice(0, 500),
     truncated: !!selection.truncated,
+    favIconUrl: state.favIconUrl || "",
   } : null;
   state.frameId = state.selection ? frameId : null;
   sendToPanels(windowId, { cmd: "liveSelection", selection: state.selection });
@@ -128,6 +129,7 @@ function refreshSelection(windowId, tabId) {
   chrome.tabs.query({ active: true, windowId }, async ([tab]) => {
     if (!tab || liveSelections.get(windowId) !== state || (tabId != null && tab.id !== tabId)) return;
     state.tabId = tab.id;
+    state.favIconUrl = tab.favIconUrl || "";
     const revision = state.revision;
     try {
       // Also covers pages that were open before the extension was updated.
@@ -153,6 +155,7 @@ function selectionChanged(selection, sender) {
   // tab identity. Avoid an async query here so rapid range changes stay ordered.
   if (!selection.text && !selection.focused && state.frameId !== sender.frameId) return;
   if (selection.text && !selection.focused && state.selection && state.frameId !== sender.frameId) return;
+  if (tab.favIconUrl !== undefined) state.favIconUrl = tab.favIconUrl;
   ++state.revision;
   emitSelection(tab.windowId, state, selection, sender.frameId);
 }
@@ -281,6 +284,10 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (info.status === "loading") setResponsiveRule(false, tabId);
   for (const [windowId, state] of liveSelections) {
     if (state.tabId !== tabId) continue;
+    if (info.favIconUrl !== undefined) {
+      state.favIconUrl = info.favIconUrl;
+      if (state.selection) emitSelection(windowId, state, state.selection, state.frameId);
+    }
     if (info.status === "loading") {
       const next = { tabId, revision: 0, selection: null, frameId: null };
       liveSelections.set(windowId, next);

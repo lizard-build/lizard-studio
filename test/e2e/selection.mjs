@@ -12,8 +12,13 @@ const dir = mkdtempSync(join(tmpdir(), 'studio-selection-test-'));
 const session = 'studio-selection-' + process.pid;
 const exec = promisify(execFile);
 const server = createServer((req, res) => {
+  if (req.url === '/favicon.svg') {
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.end('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="7" fill="green"/></svg>');
+    return;
+  }
   res.setHeader('Content-Type', 'text/html');
-  res.end(req.url === '/frame' ? '<p id="child">Child frame passage</p>' : '<!doctype html><title>Selection fixture</title><p id="copy">First selected passage</p><p id="next">Second selected passage</p><input id="field" value="Input selection"><input id="secret" type="password" value="Masked test value"><iframe src="/frame" id="frame"></iframe>');
+  res.end(req.url === '/frame' ? '<p id="child">Child frame passage</p>' : '<!doctype html><title>Selection fixture</title><link rel="icon" href="/favicon.svg"><p id="copy">First selected passage</p><p id="next">Second selected passage</p><input id="field" value="Input selection"><input id="secret" type="password" value="Masked test value"><iframe src="/frame" id="frame"></iframe>');
 });
 const port = await new Promise(r => server.listen(0, '127.0.0.1', () => r(server.address().port)));
 const origin = 'http://127.0.0.1:' + port;
@@ -60,6 +65,8 @@ try {
     await select('copy'); await wait(()=>selectionTest.current()?.text==='First selected passage');
     const chip=document.getElementById('chips');
     if(chip.textContent!=='1 selection'||chip.classList.contains('hidden'))throw Error('Missing selection chip');
+    await wait(()=>chip.querySelector('img.ctx-favicon')?.naturalWidth > 0);
+    if(!chip.querySelector('img.ctx-favicon').src.endsWith('/favicon.svg'))throw Error('Wrong site favicon');
     await selectionTest.queue('Explain this');
     await select('next');await wait(()=>selectionTest.current()?.text==='Second selected passage');
     await selectionTest.queue('And this');
@@ -78,7 +85,7 @@ try {
     await chrome.tabs.update(tab.id,{active:true});await wait(()=>selectionTest.current()?.text==='Child frame passage');
     await chrome.tabs.update(tab.id,{url:${JSON.stringify(origin + '/new')}});await wait(()=>!selectionTest.current());
     await chrome.tabs.remove([tab.id,blank.id]);
-    return {passed:true,queued:queued.map(e=>({text:e.text,selected:e.contexts[0].text,formatted:e.formatted})),checks:['appear','replace','clear','queued snapshot','input','password exclusion','iframe','tab switch','manual attachment','navigation']};
+    return {passed:true,queued:queued.map(e=>({text:e.text,selected:e.contexts[0].text,formatted:e.formatted})),checks:['site favicon','appear','replace','clear','queued snapshot','input','password exclusion','iframe','tab switch','manual attachment','navigation']};
   })()`);
   assert.equal(result.result.passed, true);
   console.log(JSON.stringify(result.result, null, 2));

@@ -3382,6 +3382,13 @@ code.inline.path:focus-visible {
   transition: background 0.12s, color 0.12s;
 }
 .ctx-chip:hover { background: rgba(255, 255, 255, 0.1); color: var(--text-primary); }
+.ctx-favicon {
+  display: block;
+  width: 12px;
+  height: 12px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
 .ctx-chip-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Only element-selector labels (`<div>`, `<button>`) are code. */
 .ctx-chip-label.code { font-family: var(--font-mono); }

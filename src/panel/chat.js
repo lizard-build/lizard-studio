@@ -1603,6 +1603,18 @@
   // `contexts` — attached page/file/element contexts consumed by this message;
   // rendered as a compact read-only chip row so what got sent stays visible
   // after the composer chips clear.
+  function selectionIcon(container, context) {
+    container.innerHTML = ICON("globe", 12);
+    const src = context.favIconUrl;
+    if (typeof src !== "string" || !/^(https?:\/\/|data:image\/)/i.test(src)) return;
+    const img = el("img", "ctx-favicon");
+    img.alt = "";
+    img.referrerPolicy = "no-referrer";
+    img.addEventListener("error", () => { container.innerHTML = ICON("globe", 12); }, { once: true });
+    img.src = src;
+    container.replaceChildren(img);
+  }
+
   function buildBubble(text, attachments, contexts) {
     const bubble = el("div", "bubble");
     if (contexts && contexts.length) {
@@ -1613,7 +1625,7 @@
         let label;
         let code = false;
         if (c.kind === "selection") {
-          ic.innerHTML = ICON("selection", 12);
+          selectionIcon(ic, c);
           label = "1 selection";
           chip.title = [c.title || c.url, c.text].filter(Boolean).join("\n");
         } else if (c.kind === "page") {
@@ -1879,7 +1891,7 @@
       // — it gets the mono font. File names and page titles are plain text.
       let code = false;
       if (c.kind === "selection") {
-        ic.innerHTML = ICON("selection", 12);
+        selectionIcon(ic, c);
         label = "1 selection";
         chip.title = [c.title || c.url, c.text].filter(Boolean).join("\n");
       } else if (c.kind === "page") {
