@@ -110,6 +110,14 @@ import https from "node:https";
 import readline from "node:readline";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+// Old installers point launch.sh at this file. Self-update replaces the host
+// files but preserves that launcher. Enter the router before opening any host
+// pipes or starting Claude; only the router's own child runs the host below.
+if (process.env.LIZARD_STUDIO_ROUTER_PID !== String(process.ppid)
+    && existsSync(join(HERE, "router.mjs"))) {
+  await import("./router.mjs");
+  await new Promise(() => {}); // the router owns stdin and process shutdown
+}
 // Sibling MCP relay that exposes the browser tools to claude (see mcp-browser.mjs).
 const MCP_RELAY = join(HERE, "mcp-browser.mjs");
 
@@ -224,7 +232,7 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v26: ChatGPT labels and launchd startup for the bundled OpenAI host.
 // v27: the OpenAI host sends only supported model effort levels.
 // v28: paged ChatGPT history and lossless history message chunks.
-const HOST_VERSION = 30;
+const HOST_VERSION = 31;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -1169,6 +1177,10 @@ const cwdById = new Map(); // id -> last opened cwd (persists across session kil
 
 function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
   id = id || "default";
+  if (permissionMode && !["default", "manual", "acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"].includes(permissionMode)) {
+    send({ type: "error", id, code: "INVALID_PERMISSION_MODE", message: "This permission setting is not supported by Claude Code." });
+    return;
+  }
   // Remote Control lives in the claude process, so a respawn (model/mode switch,
   // Stop) drops it. Remember it was on and re-arm the new child once it's up —
   // the phone stays attached across a switch instead of going quiet.
@@ -2681,6 +2693,12 @@ function configWrite(id, msg) {
 function handle(msg) {
   if (!msg) return;
   const id = msg.id || "default";
+  // Shared folder/file/shell operations still belong here for either agent.
+  // Agent operations must never fall through to Claude on a legacy install.
+  if (msg.agent && msg.agent !== "claude" && ["start", "restartSession", "prompt", "prewarm", "loadTranscript", "rewind", "interrupt", "permissionResult"].includes(msg.type)) {
+    send({ type: "error", id, code: "AGENT_ROUTING_REQUIRED", message: "Update the local helper to connect ChatGPT to the right agent." });
+    return;
+  }
   switch (msg.type) {
     case "listSkills":
       ensureCommands(id, msg.cwd);
