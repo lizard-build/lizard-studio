@@ -1470,7 +1470,7 @@ button:active > .copy-swap {
   z-index: 2;
   display: grid;
   place-items: center;
-  color: var(--text-tertiary);
+  color: #404040;
   pointer-events: none;
 }
 .chat-empty-mark .lizard-mark {
