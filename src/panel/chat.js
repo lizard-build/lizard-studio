@@ -5942,19 +5942,27 @@
   // Stashes a prompt (plus its context/attachments) on the chat and shows a
   // dimmed bubble with a cancel affordance. Composer is cleared immediately so
   // the user can keep typing further queued messages.
-  function queuePrompt(chat, text) {
-    if (!Array.isArray(chat.queue)) chat.queue = [];
+  function takePrompt(chat, text) {
+    const isCommand = /^\//.test(text);
     const entry = {
       text,
-      contexts: Array.isArray(chat.contexts) ? chat.contexts.slice() : [],
+      contexts: !isCommand && Array.isArray(chat.contexts) ? chat.contexts.slice() : [],
       attachments: Array.isArray(chat.attachments) ? chat.attachments.slice() : [],
     };
-    chat.queue.push(entry);
-    chat.contexts = [];
+    if (!isCommand) chat.contexts = [];
     chat.attachments = [];
     if (chat.id === activeId) {
       renderContextChips();
       renderAttachmentThumbs();
+    }
+    return entry;
+  }
+
+  function queuePrompt(chat, text) {
+    if (!Array.isArray(chat.queue)) chat.queue = [];
+    const entry = takePrompt(chat, text);
+    chat.queue.push(entry);
+    if (chat.id === activeId) {
       els.input.value = "";
       autosize();
     }
@@ -6083,29 +6091,27 @@
     if (chat.queue[0].editing) return;
     const entry = chat.queue.shift();
     if (entry.el && entry.el.parentNode) entry.el.remove();
-    // Merge, don't replace: anything picked/attached WHILE this entry sat in
-    // the queue (Selector picks land in chat.contexts, pastes in
-    // chat.attachments) belongs to it — the user attached it to the message
-    // they could see waiting. Restoring the queue-time snapshot verbatim used
-    // to wipe those late picks and the prompt went out bare.
-    chat.contexts = dedupeContexts(entry.contexts.concat(Array.isArray(chat.contexts) ? chat.contexts : []));
-    chat.attachments = entry.attachments.concat(Array.isArray(chat.attachments) ? chat.attachments : []);
-    if (chat.id === activeId) {
-      renderContextChips();
-      renderAttachmentThumbs();
-    }
-    deliverPrompt(chat, entry.text, { silent: !!entry.silent });
+    // The queued entry owns its files and context; the composer is a new draft.
+    return deliverPrompt(chat, entry.text, { entry, silent: !!entry.silent });
   }
 
   async function deliverPrompt(chat, text, opts) {
     const silent = !!(opts && opts.silent); // a re-send whose bubble is already on screen
+    // Capture a direct send before any await. Queued sends already have a snapshot.
+    const prompt = opts && opts.entry ? opts.entry : takePrompt(chat, text);
+    const contexts = prompt.contexts || [];
+    const attachments = prompt.attachments || [];
     // Long-idle process → its in-memory OAuth token may be rotated away (see
     // sessionLooksStale). Respawn it first so it re-reads the current keychain
     // credentials — resume keeps the conversation — and queue the prompt to go
     // out at the fresh process's init instead of dying with a 401.
     if (sessionLooksStale(chat)) {
       chat.restartFlush = true;
-      queuePrompt(chat, text);
+      if (!Array.isArray(chat.queue)) chat.queue = [];
+      const entry = { text, contexts: contexts.slice(), attachments: attachments.slice(), silent };
+      chat.queue.unshift(entry);
+      entry.el = renderQueuedBubble(chat, entry, { atFront: true });
+      updateTabDots();
       restartSessionNow(chat);
       return;
     }
@@ -6129,8 +6135,7 @@
     // Nothing in flight — drop a stale arm from a probe whose reply never came,
     // so it can't swallow the result of the turn starting here.
     else chat.usageEcho = false;
-    const hasContext = Array.isArray(chat.contexts) && chat.contexts.length > 0;
-    const attachments = Array.isArray(chat.attachments) ? chat.attachments : [];
+    const hasContext = contexts.length > 0;
     if (!chat.started) startChatSession(chat);
     // Slash commands go to the CLI's command parser, not the model — anything
     // after the name is swallowed into <command-args> (/compact would treat an
@@ -6144,11 +6149,11 @@
     // post below actually succeeds, so a failed send doesn't swallow it.
     const tabsBlock = isCommand ? "" : await buildTabsContextBlock(chat);
     // Prepend any attached page/element context as a block, then clear it.
-    const ctx = isCommand ? "" : formatContexts(chat);
+    const ctx = isCommand ? "" : formatContexts({ contexts });
     // Silently fold in any local bash-mode runs the model hasn't seen yet.
     const bashBlock = isCommand ? "" : formatBashContext(chat);
-    const hasPage = hasContext && chat.contexts.some((c) => c.kind === "page");
-    const hasFile = hasContext && chat.contexts.some((c) => c.kind === "file");
+    const hasPage = hasContext && contexts.some((c) => c.kind === "page");
+    const hasFile = hasContext && contexts.some((c) => c.kind === "file");
     const fallback = hasContext
       ? hasPage
         ? "What's on this page?"
@@ -6174,19 +6179,13 @@
     if (!post({ type: "prompt", id: chat.id, text: sentText, images })) {
       const entry = {
         text,
-        contexts: Array.isArray(chat.contexts) ? chat.contexts.slice() : [],
+        contexts: contexts.slice(),
         attachments: attachments.slice(),
         silent,
       };
       if (!Array.isArray(chat.queue)) chat.queue = [];
       chat.queue.unshift(entry); // it was next in line — keep it ahead of later queued prompts
       entry.el = renderQueuedBubble(chat, entry, { atFront: true });
-      chat.contexts = [];
-      chat.attachments = [];
-      if (chat.id === activeId) {
-        renderContextChips();
-        renderAttachmentThumbs();
-      }
       chat.turnRunning = false; // hand the turn back — nothing reached the host
       systemNote(chat, "Host disconnected — message queued until it reconnects.", "warn");
       return;
@@ -6208,16 +6207,10 @@
     if (silent) chat.turnIndexCounter++;
     else userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments, USAGE_CMD_RE.test(text) ? null : {
       real: true,
-      contexts: !isCommand && hasContext ? chat.contexts.slice() : null, // command turns don't consume chips
+      contexts: !isCommand && hasContext ? contexts.slice() : null, // command turns don't consume chips
     });
     if (!isCommand) {
-      chat.contexts = []; // command turns don't consume context chips
       chat.bashPending = []; // the model has now seen these local runs
-    }
-    chat.attachments = [];
-    if (chat.id === activeId) {
-      renderContextChips();
-      renderAttachmentThumbs();
     }
     chat.empty = false;
     chat.turnStatusText = "";
