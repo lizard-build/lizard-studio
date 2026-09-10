@@ -3889,9 +3889,95 @@
     entry.rows.forEach((row, i) => row.classList.toggle("selected", i === entry.selected));
   }
 
+  function elicitationForm(input) {
+    const form = el("form", "perm-detail");
+    form.addEventListener("submit", (e) => e.preventDefault());
+    const fields = [];
+    let supported = true;
+    const unsupported = () => {
+      supported = false;
+      form.appendChild(el("div", "perm-desc", "This request uses a form this version cannot display. You can decline or cancel it."));
+    };
+    if (input.mode === "url") {
+      if (/^https?:\/\//i.test(input.url || "")) {
+        form.appendChild(el("div", "perm-desc", input.url));
+        const open = el("button", "perm-opt", "Open link");
+        open.type = "button";
+        open.addEventListener("click", () => openExternal(input.url));
+        form.appendChild(open);
+      } else unsupported();
+    } else if (input.mode === "form" && input.requestedSchema?.type === "object") {
+      const schema = input.requestedSchema;
+      const required = new Set(schema.required || []);
+      for (const [name, spec] of Object.entries(schema.properties || {})) {
+        const label = el("label", "ask-question");
+        label.appendChild(el("div", null, (spec.title || name) + (required.has(name) ? " *" : "")));
+        if (spec.description) label.appendChild(el("div", "perm-desc", spec.description));
+        const choices = spec.type === "array" ? spec.items : spec;
+        const variants = choices?.oneOf || choices?.anyOf;
+        const options = Array.isArray(choices?.enum)
+          ? choices.enum.map((value, i) => ({ value, label: spec.enumNames?.[i] || value }))
+          : Array.isArray(variants) ? variants.map((o) => ({ value: o.const, label: o.title || o.const })) : null;
+        let field;
+        if (options || spec.type === "boolean") {
+          field = el("select", "ask-other-input");
+          field.multiple = spec.type === "array";
+          if (!field.multiple) field.appendChild(el("option", null, "Choose…"));
+          if (!field.multiple) field.options[0].value = "";
+          const values = options || [{ value: true, label: "Yes" }, { value: false, label: "No" }];
+          for (const option of values) {
+            const item = el("option", null, String(option.label));
+            item.value = String(option.value);
+            item.selected = field.multiple ? (spec.default || []).includes(option.value) : spec.default === option.value;
+            field.appendChild(item);
+          }
+        } else if (["string", "integer", "number"].includes(spec.type)) {
+          field = el("input", "ask-other-input");
+          field.type = spec.type !== "string" ? "number" : spec.format === "email" ? "email" : spec.format === "uri" ? "url" : "text";
+          if (spec.type !== "string") field.step = spec.type === "integer" ? "1" : "any";
+          for (const [key, attr] of [["minimum", "min"], ["maximum", "max"], ["minLength", "minLength"], ["maxLength", "maxLength"]]) {
+            if (spec[key] != null) field[attr] = spec[key];
+          }
+          if (spec.default != null) field.value = String(spec.default);
+        } else {
+          unsupported();
+          continue;
+        }
+        field.required = required.has(name);
+        label.appendChild(field);
+        form.appendChild(label);
+        fields.push({ name, spec, field });
+      }
+      if ([...required].some((name) => !fields.some((f) => f.name === name))) unsupported();
+    } else unsupported();
+    return {
+      el: form, supported,
+      read() {
+        if (!supported) return undefined;
+        if (input.mode === "url") return null;
+        const content = Object.create(null);
+        for (const { name, spec, field } of fields) {
+          field.setCustomValidity("");
+          const value = field.multiple ? Array.from(field.selectedOptions, (o) => o.value) : field.value;
+          if (field.multiple) {
+            if ((spec.minItems != null && value.length < spec.minItems) || (spec.maxItems != null && value.length > spec.maxItems)) {
+              field.setCustomValidity("Choose the requested number of options.");
+            }
+          } else if (value && spec.type === "string") {
+            if ((spec.minLength != null && value.length < spec.minLength) || (spec.maxLength != null && value.length > spec.maxLength)) field.setCustomValidity("Check the length of this answer.");
+            if (["date", "date-time"].includes(spec.format) && Number.isNaN(Date.parse(value))) field.setCustomValidity("Enter a valid date.");
+          }
+          if (value === "" || (field.multiple && !value.length && !field.required)) continue;
+          content[name] = spec.type === "boolean" ? value === "true" : ["number", "integer"].includes(spec.type) ? Number(value) : value;
+        }
+        return form.reportValidity() ? content : undefined;
+      },
+    };
+  }
+
   function showPermission(chat, msg) {
     const requestId = msg.requestId;
-    if (!requestId || chat.permCards.has(requestId)) return;
+    if (requestId == null || chat.permCards.has(requestId)) return;
     const toolName = msg.toolName || "";
     const input = msg.input || {};
 
@@ -3910,18 +3996,23 @@
     const ic = el("span", "perm-title-ic");
     ic.innerHTML = ICON(meta.icon || "code", 14);
     title.appendChild(ic);
-    title.appendChild(el("span", null, permTitle(toolName)));
+    title.appendChild(el("span", null, toolName === "McpElicitation" ? (input.serverName || "MCP server") : permTitle(toolName)));
     card.appendChild(title);
 
     const sub = permSubtitle(chat, toolName, input) || (msg.description ? el("div", "perm-sub", msg.description) : null);
     if (sub) card.appendChild(sub);
-    const detail = permDetail(toolName, input);
+    const elicitation = toolName === "McpElicitation" ? elicitationForm(input) : null;
+    const detail = elicitation ? elicitation.el : permDetail(toolName, input);
     if (detail) card.appendChild(detail);
 
     card.appendChild(el("div", "perm-question", "Do you want to proceed?"));
 
-    const opts = permOptions(toolName, msg.suggestions);
-    const entry = { card, opts, selected: 0, rows: [] };
+    const opts = elicitation ? [
+      ...(elicitation.supported ? [{ label: input.mode === "url" ? "I've completed this step" : "Allow", allow: true }] : []),
+      { label: "Decline", allow: false, interrupt: false },
+      { label: "Cancel", allow: false, interrupt: true },
+    ] : permOptions(toolName, msg.suggestions);
+    const entry = { card, opts, selected: 0, rows: [], elicitation };
     const list = el("div", "perm-opts");
     opts.forEach((opt, i) => {
       const row = el("button", "perm-opt");
@@ -3940,6 +4031,7 @@
     card.appendChild(list);
 
     card.addEventListener("keydown", (e) => {
+      if (elicitation && e.key !== "Escape" && e.target.closest("input, select, textarea, form button")) return;
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
         const d = e.key === "ArrowDown" ? 1 : opts.length - 1;
@@ -3976,16 +4068,22 @@
   function answerPermission(chat, requestId, opt) {
     const entry = chat.permCards.get(requestId);
     if (!entry) return;
+    let content;
+    if (entry.elicitation && opt.allow) {
+      content = entry.elicitation.read();
+      if (content === undefined) return;
+    }
     chat.permCards.delete(requestId);
     entry.card.remove();
     renderTurnStatus(chat);
     updateTabDots(); // blue waiting dot clears once nothing's left to answer
     const out = { type: "permissionResult", id: chat.id, requestId, behavior: opt.allow ? "allow" : "deny" };
+    if (entry.elicitation && opt.allow) out.updatedInput = { content };
     if (opt.allow && opt.updatedPermissions) out.updatedPermissions = opt.updatedPermissions;
     if (!opt.allow) {
       out.message = PERM_DENY_MESSAGE;
       // Matches Claude Code: "No" also stops the turn so the user can redirect.
-      out.interrupt = true;
+      out.interrupt = opt.interrupt !== false;
     }
     post(out);
     const next = chat.permCards.values().next().value;
@@ -4014,7 +4112,7 @@
     const ic = el("span", "perm-title-ic");
     ic.innerHTML = ICON("chat", 14);
     title.appendChild(ic);
-    title.appendChild(el("span", null, "Claude is asking"));
+    title.appendChild(el("span", null, chat.harness === "codex" ? "ChatGPT is asking" : "Claude is asking"));
     const step = el("span", "ask-step");
     title.appendChild(step);
     card.appendChild(title);
