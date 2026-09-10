@@ -280,8 +280,8 @@
   }
 
   // ---- minimize to a bottom handle --------------------------------------
-  // Tucks the whole bar away into a small pill docked bottom-center; tools keep
-  // running. Click the pill — or press any tool hotkey — to bring it back.
+  // Minimizing turns off all tools and shows a handle at the bottom.
+  // Click the handle or press a hotkey to bring the bar back.
   function ensureHandle() {
     if (handleEl) return handleEl;
     handleEl = RK.h("div", { class: "rk-handle", title: "Show Lizard Studio toolbar (9)",
@@ -311,7 +311,7 @@
   // change made in another tab — the latter must not write back to storage.
   function applyMinimized(min, instant) {
     RK.state.minimized = min;
-    if (min) { closePop(); hideTip(); }
+    if (min) { closePop(); clearAll(); hideTip(); }
     setBarCollapsed(min, instant);
     setHandleVisible(min, instant);
   }
