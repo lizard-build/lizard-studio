@@ -273,7 +273,10 @@
   }
 
   function minimizeBtn() {
-    return iconBtn(ICON_CARET_DOWN, "Minimize toolbar", "", (e) => { e.stopPropagation(); minimize(); });
+    const btn = iconBtn(ICON_CARET_DOWN, "Minimize toolbar", "", (e) => { e.stopPropagation(); minimize(); });
+    btn.dataset.hotkey = "9";
+    btn.setAttribute("aria-keyshortcuts", "9");
+    return btn;
   }
 
   // ---- minimize to a bottom handle --------------------------------------
@@ -281,7 +284,7 @@
   // running. Click the pill — or press any tool hotkey — to bring it back.
   function ensureHandle() {
     if (handleEl) return handleEl;
-    handleEl = RK.h("div", { class: "rk-handle", title: "Show Lizard Studio toolbar",
+    handleEl = RK.h("div", { class: "rk-handle", title: "Show Lizard Studio toolbar (9)",
       onclick: (e) => { e.stopPropagation(); restore(); } });
     handleEl.innerHTML = ICON_RESTORE; // bar + caret up = bring the bar back up
     RK.overlay.ui.appendChild(handleEl);
@@ -442,10 +445,10 @@
   function activeCount() { return Object.values(RK.state.active).filter(Boolean).length; }
   function clearAll() { RK.order.forEach((id) => RK.isActive(id) && RK.deactivate(id)); render(); }
 
-  // ---- hotkeys (1..9, 0) -------------------------------------------------
+  // ---- hotkeys (1..8, 0 for tools; 9 minimizes/restores) -------------------
   // Keys map to tools in the exact order they appear on the bar (grouped by
   // GROUPS), so the number shown in a tooltip is the key that toggles it.
-  const HOTKEYS = "1234567890";
+  const HOTKEYS = "123456780";
   function orderedToolIds() {
     const out = [];
     GROUPS.forEach(([gid]) => {
@@ -477,6 +480,14 @@
       // one of our own settings panels (focus lives inside the shadow root).
       if (isTypingTarget(e.target)) return;
       if (RK.overlay && isTypingTarget(RK.overlay.shadow.activeElement)) return;
+      if (e.key === "9") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!e.repeat) {
+          if (RK.state.minimized) restore(); else minimize();
+        }
+        return;
+      }
       const id = toolForHotkey(e.key);
       if (!id) return;
       e.preventDefault();
@@ -503,7 +514,7 @@
     if (!text) return;
     const t = ensureTip();
     t.replaceChildren(RK.h("span", {}, text));
-    const key = target.dataset.tid ? hotkeyForId(target.dataset.tid) : null;
+    const key = target.dataset.hotkey || (target.dataset.tid ? hotkeyForId(target.dataset.tid) : null);
     if (key) t.appendChild(RK.h("span", { class: "rk-kbd" }, key));
     // panelOnClick tools (grid) open settings on left-click, so the right-click
     // hint doesn't apply — only show it for tools that actually use right-click.
