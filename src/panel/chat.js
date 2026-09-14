@@ -1300,21 +1300,20 @@
       const picker = el("div", "tab-bookmark-picker");
       picker.setAttribute("role", "group");
       picker.setAttribute("aria-label", "Bookmark color");
-      picker.appendChild(el("span", "tab-bookmark-label", "Bookmark"));
-      for (const color of [{ id: null, label: "No bookmark" }, ...BOOKMARK_COLORS]) {
+      for (const color of BOOKMARK_COLORS) {
         const button = el("button", "tab-bookmark-choice");
         button.type = "button";
         button.title = color.label;
-        button.setAttribute("aria-label", color.id ? `${color.label} bookmark` : color.label);
+        button.setAttribute("aria-label", `${color.label} bookmark`);
         button.setAttribute("aria-pressed", String(chat.bookmarkColor === color.id));
-        button.dataset.bookmarkColor = color.id || "";
-        if (color.color) button.style.color = color.color;
-        button.innerHTML = color.id ? BOOKMARK_SVG : ICON("x", 12);
+        button.dataset.bookmarkColor = color.id;
+        button.style.color = color.color;
+        button.innerHTML = BOOKMARK_SVG;
         button.addEventListener("click", () => {
-          chat.bookmarkColor = color.id;
+          chat.bookmarkColor = chat.bookmarkColor === color.id ? null : color.id;
           updateTabBookmark(tabEl, chat);
           for (const choice of picker.querySelectorAll("button")) {
-            choice.setAttribute("aria-pressed", String(choice === button));
+            choice.setAttribute("aria-pressed", String(choice.dataset.bookmarkColor === chat.bookmarkColor));
           }
           placeTabInd();
           savePrefs();
@@ -1331,7 +1330,7 @@
       let left = r.left;
       const maxLeft = window.innerWidth - tip.offsetWidth - 8;
       tip.style.left = Math.max(8, Math.min(left, maxLeft)) + "px";
-      if (focusPicker) picker.querySelector('[aria-pressed="true"]').focus();
+      if (focusPicker) (picker.querySelector('[aria-pressed="true"]') || picker.querySelector("button")).focus();
     }, focusPicker ? 0 : 350);
   }
   function hideTabTip() {
