@@ -1,6 +1,5 @@
-// Start Codex outside Chrome's inherited file quarantine on macOS.
-// The socket relay follows the Claude host's launchd path. It uses its own
-// shim, token and job labels so the two hosts cannot replace each other's state.
+// Start local tools outside Chrome's inherited file quarantine on macOS.
+// Hosts and Codex use separate shims, tokens and launchd job labels.
 import { spawn, execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
@@ -69,7 +68,10 @@ function run(ctl, io, spec) {
   };
   let child;
   try {
-    child = spawn(spec.cmd, spec.args, { cwd: spec.cwd, env: spec.env, stdio: ["pipe", "pipe", "pipe"] });
+    // The legacy Claude entry point checks its actual parent's PID. The shim
+    // is the parent when launchd starts a host, rather than the Chrome router.
+    const env = spec.parentPidEnv ? { ...spec.env, [spec.parentPidEnv]: String(process.pid) } : spec.env;
+    child = spawn(spec.cmd, spec.args, { cwd: spec.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
   } catch (err) {
     say({ type: "error", message: String(err && err.message) });
     return setTimeout(bail, 100);
@@ -97,13 +99,17 @@ function run(ctl, io, spec) {
 }
 `;
 
-export function createCodexSpawner({ hostDir, nodePath = process.execPath, redact = () => {} }) {
+export function createHostSpawner(opts) {
+  return createCodexSpawner({ ...opts, namespace: "host", displayName: "Lizard Studio", parentPidEnv: "LIZARD_STUDIO_ROUTER_PID" });
+}
+
+export function createCodexSpawner({ hostDir, nodePath = process.execPath, redact = () => {}, namespace = "codex", displayName = "ChatGPT", parentPidEnv }) {
   if (process.platform !== "darwin") {
     return { spawn: (cmd, args, opts) => spawn(cmd, args, { ...opts, stdio: ["pipe", "pipe", "pipe"] }), close() {} };
   }
   const instanceId = randomBytes(8).toString("hex");
-  const SHIM_PATH = join(hostDir, "codex-spawn-shim.mjs");
-  const SPAWN_TOKEN_FILE = join(hostDir, ".codex-spawn-token-" + instanceId);
+  const SHIM_PATH = join(hostDir, namespace + "-spawn-shim.mjs");
+  const SPAWN_TOKEN_FILE = join(hostDir, "." + namespace + "-spawn-token-" + instanceId);
   const SPAWN_TOKEN = randomBytes(32).toString("hex");
   redact(SPAWN_TOKEN);
   const pendingSpawns = new Map();
@@ -172,8 +178,9 @@ export function createCodexSpawner({ hostDir, nodePath = process.execPath, redac
       this.stderr = new PassThrough();
       this.stdin.on("error", () => {});
       this._spec = { cmd, args, cwd: opts.cwd, env: opts.env };
+      if (parentPidEnv) this._spec.parentPidEnv = parentPidEnv;
       this._spawnId = String(nextSpawnId++);
-      this._label = "com.lizard.codex." + process.pid + "." + instanceId + "." + this._spawnId;
+      this._label = "com.lizard." + namespace + "." + process.pid + "." + instanceId + "." + this._spawnId;
       this._ctl = null;
       this._io = null;
       this._pendingSig = null;
@@ -181,14 +188,14 @@ export function createCodexSpawner({ hostDir, nodePath = process.execPath, redac
       this._exitResult = null;
       this._done = false;
       pendingSpawns.set(this._spawnId, this);
-      this._startupTimer = setTimeout(() => this._fail(new Error("Timed out starting ChatGPT through launchd. Reopen the Studio panel and try again.")), 10000);
+      this._startupTimer = setTimeout(() => this._fail(new Error("Timed out starting " + displayName + " through launchd. Reopen the Lizard Studio panel and try again.")), 10000);
       spawnReady.then(() => {
         if (this._done) return;
         execFile(
           "/bin/launchctl",
           ["submit", "-l", this._label, "--", nodePath, SHIM_PATH, String(spawnPort), SPAWN_TOKEN_FILE, this._spawnId],
           { timeout: 10000 },
-          (err) => { if (err) this._fail(new Error("Could not start ChatGPT through launchd: " + err.message)); }
+          (err) => { if (err) this._fail(new Error("Could not start " + displayName + " through launchd: " + err.message)); }
         );
       }, (err) => this._fail(err));
     }
@@ -206,7 +213,7 @@ export function createCodexSpawner({ hostDir, nodePath = process.execPath, redac
         sock.on("data", feed);
         sock.on("close", () => {
           // ctl gone without an exit message: the shim (or its job) died on us.
-          if (!this._done && !this._exitResult) this._fail(new Error("ChatGPT launch relay closed unexpectedly."));
+          if (!this._done && !this._exitResult) this._fail(new Error(displayName + " launch relay closed unexpectedly."));
         });
       } else if (chan === "io" && !this._io) {
         this._io = sock;
@@ -310,7 +317,7 @@ export function createCodexSpawner({ hostDir, nodePath = process.execPath, redac
 
   return {
     spawn(cmd, args, opts) {
-      if (closed) throw new Error("ChatGPT launcher is closed.");
+      if (closed) throw new Error(displayName + " launcher is closed.");
       return new DetachedCodex(cmd, args, opts);
     },
     close() {

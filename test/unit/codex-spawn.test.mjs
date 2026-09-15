@@ -7,7 +7,7 @@ import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 
-async function harness(platform = "darwin") {
+async function harness(platform = "darwin", kind = "codex") {
   const calls = [], files = new Map(), timers = new Set(), kills = [];
   const direct = {};
   let accept, listen;
@@ -45,8 +45,9 @@ async function harness(platform = "darwin") {
     }, { context });
   });
   await module.evaluate();
-  const launcher = module.namespace.createCodexSpawner({ hostDir: "/host" });
-  const token = [...files].find(([p]) => p.includes(".codex-spawn-token-"));
+  const factory = kind === "host" ? module.namespace.createHostSpawner : module.namespace.createCodexSpawner;
+  const launcher = factory({ hostDir: "/host" });
+  const token = [...files].find(([p]) => p.includes("." + kind + "-spawn-token-"));
   function connect(child, chan, suppliedToken = token?.[1].data) {
     const sock = new EventEmitter();
     sock.writes = [];
@@ -157,3 +158,48 @@ test("Linux keeps direct spawning without macOS files or jobs", async () => {
   assert.equal(h.calls[0].direct[0], "/codex");
   h.launcher.close();
 });
+
+test("hosts use separate launchd state and request the shim's actual parent marker", async () => {
+  const h = await harness("darwin", "host");
+  const child = h.launcher.spawn("/node", ["/host/claude-host.mjs"], opts);
+  child.on("error", assert.fail);
+  child.stdin.write("queued browser message");
+  await h.ready();
+  const submit = h.calls.find(c => c.args?.[0] === "submit");
+  assert.match(submit.args[2], /^com\.lizard\.host\./);
+  assert.ok(h.files.has("/host/host-spawn-shim.mjs"));
+  assert.ok(!h.files.has("/host/codex-spawn-shim.mjs"));
+  const ctl = h.connect(child, "ctl"), io = h.connect(child, "io");
+  const spec = JSON.parse(ctl.writes[0]);
+  assert.equal(spec.parentPidEnv, "LIZARD_STUDIO_ROUTER_PID");
+  assert.equal(spec.env.TEST_SECRET, opts.env.TEST_SECRET);
+  await new Promise(setImmediate);
+  assert.deepEqual(io.writes, ["queued browser message"]);
+  h.launcher.close();
+});
+
+for (const failure of ["submit", "timeout"]) {
+  test(`host ${failure} failure never starts a direct child of Chrome`, async () => {
+    const h = await harness("darwin", "host"), errors = [];
+    const child = h.launcher.spawn("/node", ["/host/claude-host.mjs"], opts);
+    child.on("error", e => errors.push(e.message));
+    await h.ready();
+    if (failure === "submit") h.calls[0].callback(new Error("service unavailable"));
+    else [...h.timers].find(t => t.ms === 10000).fn();
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /Lizard Studio/);
+    assert.equal(h.calls.filter(c => c.direct).length, 0);
+    h.launcher.close();
+  });
+}
+
+for (const platform of ["linux", "win32"]) {
+  test(`${platform} hosts retain the router parent marker without a macOS relay`, async () => {
+    const h = await harness(platform, "host");
+    const env = { LIZARD_STUDIO_ROUTER_PID: "12" };
+    assert.equal(h.launcher.spawn("/node", ["/host/claude-host.mjs"], { ...opts, env }), h.direct);
+    assert.equal(h.calls[0].direct[2].env.LIZARD_STUDIO_ROUTER_PID, "12");
+    assert.equal(h.files.size, 0);
+    h.launcher.close();
+  });
+}

@@ -55,18 +55,18 @@ test('a stale inherited router marker cannot bypass the legacy entry point', asy
 test('router sends ChatGPT workspace requests to Codex and shared folder requests to Claude', async () => {
   const spawned = [], timers = [];
   const proc = new EventEmitter();
-  Object.assign(proc, { pid: 42, execPath: '/test/node', env: { PATH: '/test/bin' }, stdin: new EventEmitter(), stdout: new EventEmitter() });
+  Object.assign(proc, { pid: 42, execPath: '/test/node', cwd: () => '/work', env: { PATH: '/test/bin' }, stdin: new EventEmitter(), stdout: new EventEmitter() });
   proc.stdout.write = () => {};
   const imports = {
-    'node:child_process': { spawn: (bin, args, options) => {
+    './codex-spawn.mjs': { createHostSpawner: () => ({ close() {}, spawn: (bin, args, options) => {
       const child = new EventEmitter();
       Object.assign(child, { stdin: { write: (frame) => child.written.push(JSON.parse(frame.toString())) }, stdout: new EventEmitter(), stderr: new EventEmitter(), written: [] });
       spawned.push({ bin, args, options, child });
       return child;
-    } },
+    } }) },
     'node:fs': { existsSync: () => true },
     'node:path': path,
-    './hostkit.mjs': { HOST_DIR: '/test', makeLog: () => () => {}, frameReader: () => () => {}, frameRaw: (raw) => raw, writeFrame: () => {} },
+    './hostkit.mjs': { HOST_DIR: '/test', makeLog: () => () => {}, frameReader: () => () => {}, frameRaw: (raw) => raw, writeFrame: () => {}, redact() {} },
   };
   const context = createContext({ process: proc, Buffer, setTimeout: (fn) => { timers.push(fn); return { unref() {} }; } });
   const module = new SourceTextModule(readFileSync(new URL('../../src/host/router.mjs', import.meta.url), 'utf8') + '\nexport { route };', { context });
@@ -88,9 +88,12 @@ test('router sends ChatGPT workspace requests to Codex and shared folder request
   assert.equal(codex.args[0], '/test/codex-host.mjs');
   assert.equal(claude.options.env.LIZARD_STUDIO_ROUTER_PID, '42');
   assert.equal(claude.options.env.PATH, '/test/bin');
+  assert.equal(claude.options.cwd, '/work');
   assert.deepEqual(codex.child.written.map((m) => m.type), ['start', 'restartSession']);
   assert.deepEqual(claude.child.written.map((m) => m.type), ['pickFolder']);
   assert.equal(codex.child.written[0].permissionMode, 'workspace');
+  send({ type: 'bashExec', id: 'a', agent: 'codex', execId: 'cmd', command: 'python report.py' });
+  assert.equal(claude.child.written.at(-1).type, 'bashExec');
 });
 
 test('Claude refuses misrouted agent operations without touching sessions', () => {
