@@ -47,6 +47,7 @@
     bg.onMessage.addListener((m) => {
       if (!m) return;
       if (m.cmd === "close") window.close();
+      else if (m.cmd === "liveSelection") window.RKChat?.setLiveSelection(m.selection);
       else if (m.cmd === "pickElement" && window.RKChat && window.RKChat.addContext) {
         window.RKChat.addContext(m.element);
       }
@@ -57,6 +58,7 @@
     bg.onDisconnect.addListener(() => {
       disconnected = true;
       if (activityPort === bg) activityPort = null;
+      window.RKChat?.setLiveSelection(null);
       void chrome.runtime.lastError; // read it, or every SW recycle logs "Unchecked runtime.lastError"
       setTimeout(connectBg, 500);
     });

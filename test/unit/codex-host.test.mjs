@@ -122,6 +122,63 @@ test("questions pause the silence timer and preserve commas in an answer", async
   assert.equal([...h.timers].filter((t) => t.ms === 300000).length, 0);
 });
 
+test("MCP elicitations wait for a user reply, including request id zero", async () => {
+  const h = await host(), s = h.session(), other = h.session("b");
+  const params = { threadId: s.threadId, turnId: s.turnId, serverName: "browser", mode: "form", message: "Allow browser access?", requestedSchema: { type: "object", properties: { decision: { type: "string", enum: ["allow", "deny"] } }, required: ["decision"] } };
+  h.api.handleServerRequest(0, "mcpServer/elicitation/request", params);
+  assert.equal(h.requests.length, 0);
+  assert.equal(s.asks.size, 1); assert.equal(other.asks.size, 0); assert.equal(s.silenceTimer, null);
+  const ask = h.messages.find((m) => m.type === "permission");
+  assert.equal(ask.id, "a"); assert.equal(ask.requestId, 0); assert.equal(ask.toolName, "McpElicitation");
+  assert.deepEqual(ask.input, params);
+  h.api.answerPermission({ id: "b", requestId: 0, behavior: "allow" });
+  assert.equal(h.requests.length, 0);
+  h.api.answerPermission({ id: "a", requestId: 0, behavior: "allow", updatedInput: { content: { decision: "allow" } } });
+  assert.deepEqual(h.requests.at(-1), { id: 0, result: { action: "accept", content: { decision: "allow" }, _meta: null } });
+  assert.equal(s.asks.size, 0); assert.ok(s.silenceTimer);
+});
+
+test("MCP URL confirmation, decline and cancel use distinct protocol responses", async () => {
+  for (const [behavior, interrupt, action] of [["allow", false, "accept"], ["deny", false, "decline"], ["deny", true, "cancel"]]) {
+    const h = await host(), s = h.session();
+    h.api.handleServerRequest("url-ask", "mcpServer/elicitation/request", { threadId: s.threadId, mode: "url", serverName: "browser", message: "Sign in", url: "https://example.com/auth", elicitationId: "auth" });
+    assert.equal(h.requests.length, 0);
+    h.api.answerPermission({ id: "a", requestId: "url-ask", behavior, interrupt });
+    assert.deepEqual(h.requests.at(-1).result, { action, content: null, _meta: null });
+  }
+});
+
+test("resolved server requests remove the card and ignore late clicks", async () => {
+  const h = await host(), s = h.session();
+  h.api.handleServerRequest(0, "mcpServer/elicitation/request", { threadId: s.threadId, mode: "form", serverName: "browser", requestedSchema: { type: "object", properties: {} } });
+  h.api.handleNotification("serverRequest/resolved", { threadId: s.threadId, requestId: 0 });
+  assert.equal(s.asks.size, 0);
+  assert.deepEqual(h.messages.at(-1), { type: "permissionCancel", id: "a", requestId: 0 });
+  h.api.answerPermission({ id: "a", requestId: 0, behavior: "allow" });
+  assert.equal(h.requests.length, 0);
+});
+
+test("Ask keeps approval requests enabled after Full, and command/file requests wait", async () => {
+  const h = await host(), s = h.session();
+  s.mode = "full-access";
+  s.running = false;
+  await h.api.sendPrompt({ id: "a", text: "first" });
+  assert.equal(h.requests.findLast((r) => r.method === "turn/start").params.approvalPolicy, "never");
+  s.mode = "workspace";
+  s.running = false;
+  await h.api.sendPrompt({ id: "a", text: "next" });
+  const turn = h.requests.findLast((r) => r.method === "turn/start");
+  assert.equal(turn.params.approvalPolicy, "on-request");
+  assert.equal(turn.params.sandboxPolicy.type, "workspaceWrite");
+  for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"]) {
+    const before = h.requests.length;
+    h.api.handleServerRequest(method, method, { threadId: s.threadId, command: "ls /Volumes", permissions: { network: { enabled: true } } });
+    assert.equal(h.requests.length, before);
+    assert.equal(h.messages.at(-1).type, "permission");
+    assert.ok(s.asks.has(method));
+  }
+});
+
 test("a failed resume preserves history and never starts an empty thread", async () => {
   const h = await host();
   h.respond(() => { throw new Error("temporary read failure"); });
