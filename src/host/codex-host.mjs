@@ -887,6 +887,12 @@ function handleNotification(method, params) {
   }
 
   switch (method) {
+    case "serverRequest/resolved": {
+      if (!s || !s.asks.delete(params.requestId)) break;
+      send({ type: "permissionCancel", id: s.id, requestId: params.requestId });
+      touchTurn(s);
+      break;
+    }
     // --- turn lifecycle ---
     case "turn/started": {
       if (!s) break;
@@ -1290,8 +1296,12 @@ function handleServerRequest(reqId, method, params) {
       break;
     }
     case "mcpServer/elicitation/request": {
-      // Nothing in the panel asks this yet — decline politely rather than hang.
-      rpcReply(reqId, { action: "decline" });
+      s.asks.set(reqId, { kind: "elicitation", params });
+      send({
+        type: "permission", id: s.id, requestId: reqId,
+        toolName: "McpElicitation", input: params,
+        description: params.message || null,
+      });
       break;
     }
     default:
@@ -1317,6 +1327,13 @@ function answerPermission(msg) {
   const forSession = allow && !!msg.updatedPermissions;
 
   switch (ask.kind) {
+    case "elicitation":
+      rpcReply(msg.requestId, {
+        action: allow ? "accept" : msg.interrupt ? "cancel" : "decline",
+        content: allow && ask.params.mode !== "url" ? (msg.updatedInput?.content || {}) : null,
+        _meta: null,
+      });
+      break;
     case "command":
       rpcReply(msg.requestId, { decision: allow ? (forSession ? "acceptForSession" : "accept") : msg.interrupt ? "cancel" : "decline" });
       break;
