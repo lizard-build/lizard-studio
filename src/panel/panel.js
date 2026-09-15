@@ -4,6 +4,15 @@
 // keep a port open to the service worker so it can ask us to close.
 
 (function () {
+  let activityPort = null;
+  function sendActivity() {
+    if (!activityPort) return;
+    const active = !!window.RKChat?.hasActiveChats?.();
+    try { activityPort.postMessage({ type: "chatActivity", active }); } catch (_) {}
+  }
+  window.addEventListener("rk-chat-activity", sendActivity);
+  // Re-send state and keep the worker connected while a panel owns live chats.
+  setInterval(sendActivity, 20000);
   const chatEl = document.getElementById("view-chat");
   if (chatEl && window.RKChat) {
     window.RKChat.mount(chatEl);
@@ -20,6 +29,7 @@
   function connectBg() {
     if (!(chrome.runtime && chrome.runtime.id)) return; // context invalidated — a reload gets a fresh panel
     let bg;
+    let disconnected = false;
     try {
       bg = chrome.runtime.connect({ name: "rk-sidepanel" });
     } catch (_) {
@@ -27,8 +37,12 @@
       return;
     }
     chrome.windows.getCurrent((win) => {
-      if (chrome.runtime.lastError || !win || !Number.isInteger(win.id)) return;
-      try { bg.postMessage({ type: "panelReady", windowId: win.id }); } catch (_) {}
+      if (disconnected || chrome.runtime.lastError || !win || !Number.isInteger(win.id)) return;
+      try {
+        bg.postMessage({ type: "panelReady", windowId: win.id });
+        activityPort = bg;
+        sendActivity();
+      } catch (_) {}
     });
     bg.onMessage.addListener((m) => {
       if (!m) return;
@@ -41,6 +55,8 @@
       }
     });
     bg.onDisconnect.addListener(() => {
+      disconnected = true;
+      if (activityPort === bg) activityPort = null;
       void chrome.runtime.lastError; // read it, or every SW recycle logs "Unchecked runtime.lastError"
       setTimeout(connectBg, 500);
     });
