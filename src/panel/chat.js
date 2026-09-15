@@ -658,7 +658,7 @@
       });
       chrome.storage.local.set({
         rkChatV2: {
-          tabs, activeId, history: history.slice(0, 40), lastCwd, soundOnDone, usageLabels,
+          tabs, activeId, history, lastCwd, soundOnDone, usageLabels,
           lastBy, lastHarness,
           // Mirrors of the Claude slot under the names older builds look for,
           // so downgrading the extension doesn't lose the settings.
@@ -1136,7 +1136,6 @@
     // closing a chat shouldn't jump it to the top of the menu.
     if (!chat.empty || resumableSessionId(chat)) {
       history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, harness: chat.harness, model: chat.model, effort: chat.effort, mode: chat.mode, sessionId: resumableSessionId(chat), ts: chat.lastActivityAt || Date.now() });
-      history = history.slice(0, 40);
     }
     if (chat.started) post({ type: "close", id });
     chat.messagesEl.remove();
@@ -1446,6 +1445,10 @@
   // chat (.chat-shell.pushed), not of the menu; the menu is only unhidden so
   // there's something to uncover, and hidden again once the chat is back.
   const MENU_SLIDE_MS = 340; // keep in step with .chat-shell's transition
+  const HISTORY_PAGE_SIZE = 40;
+  let historyVisibleLimit = HISTORY_PAGE_SIZE;
+  let historyHasMore = false;
+  let historyLoadFrame = null;
   let chatMenuHideTimer = null;
 
   function chatMenuIsOpen() {
@@ -1463,6 +1466,8 @@
     // corners it rounds off as it goes.
     for (const menu of menuRegistry) closeMenu(menu);
     menuFilter = "";
+    historyVisibleLimit = HISTORY_PAGE_SIZE;
+    els.chatMenuList.scrollTop = 0;
     els.chatMenuSearch.value = "";
     els.chatMenu.classList.remove("hidden");
     els.chatMenuGuard.classList.remove("hidden");
@@ -1521,9 +1526,23 @@
     return "Older";
   }
 
+  function scheduleChatHistoryLoad() {
+    if (historyLoadFrame !== null) return;
+    historyLoadFrame = requestAnimationFrame(() => {
+      historyLoadFrame = null;
+      const list = els.chatMenuList;
+      if (!chatMenuIsOpen() || !historyHasMore || !list || !list.clientHeight) return;
+      if (list.scrollHeight - list.scrollTop - list.clientHeight > 160) return;
+      historyVisibleLimit += HISTORY_PAGE_SIZE;
+      renderChatMenuList();
+    });
+  }
+
   function renderChatMenuList() {
     if (!mounted || !els.chatMenuList || !chatMenuIsOpen()) return;
     const list = els.chatMenuList;
+    const scrollTop = list.scrollTop;
+    historyHasMore = false;
     list.innerHTML = "";
     const q = menuFilter.trim().toLowerCase();
     const all = chatMenuEntries();
@@ -1533,7 +1552,8 @@
       return;
     }
     let bucket = null;
-    for (const entry of rows) {
+    const visibleCount = rows.filter((entry) => entry.open).length + historyVisibleLimit;
+    for (const entry of rows.slice(0, visibleCount)) {
       const b = entry.open ? "Active" : q ? "History" : menuBucket(entry.ts);
       if (b !== bucket) {
         bucket = b;
@@ -1541,6 +1561,10 @@
       }
       list.appendChild(chatMenuRow(entry));
     }
+    list.scrollTop = scrollTop;
+    historyHasMore = rows.length > visibleCount;
+    // Also fill a tall viewport when the first page has no scrollbar yet.
+    if (historyHasMore) scheduleChatHistoryLoad();
   }
 
   function chatMenuRow(entry) {
@@ -9582,8 +9606,12 @@
       toggleChatMenu();
     });
     els.chatMenuGuard.addEventListener("click", closeChatMenu);
+    els.chatMenuList.addEventListener("scroll", scheduleChatHistoryLoad, { passive: true });
+    window.addEventListener("resize", scheduleChatHistoryLoad);
     els.chatMenuSearch.addEventListener("input", () => {
       menuFilter = els.chatMenuSearch.value;
+      historyVisibleLimit = HISTORY_PAGE_SIZE;
+      els.chatMenuList.scrollTop = 0;
       renderChatMenuList();
     });
     els.settingsBtn.addEventListener("click", (e) => {
