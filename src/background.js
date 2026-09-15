@@ -96,6 +96,58 @@ chrome.commands.onCommand.addListener((command) => {
 // A side panel belongs to one browser window. Never route by last focus:
 // another window may become active between selecting content and delivering it.
 const panelPorts = new Map();
+const activePanels = new Set();
+let activeIcon;
+let appliedActivity = null;
+let iconUpdate = Promise.resolve();
+
+function getActiveIcon() {
+  if (!activeIcon) {
+    activeIcon = (async () => {
+      const icons = chrome.runtime.getManifest().icons;
+      const imageData = {};
+      for (const size of [16, 32, 48]) {
+        const response = await fetch(chrome.runtime.getURL(icons[size] || icons[128]));
+        const bitmap = await createImageBitmap(await response.blob());
+        try {
+          const context = new OffscreenCanvas(size, size).getContext("2d");
+          context.drawImage(bitmap, 0, 0, size, size);
+          context.beginPath();
+          context.arc(size * 0.78, size * 0.22, size * 0.17, 0, Math.PI * 2);
+          context.fillStyle = "#fbbf24";
+          context.fill();
+          context.lineWidth = size * 0.055;
+          context.strokeStyle = "#121212";
+          context.stroke();
+          imageData[size] = context.getImageData(0, 0, size, size);
+        } finally {
+          bitmap.close();
+        }
+      }
+      return imageData;
+    })().catch((error) => { activeIcon = null; throw error; });
+  }
+  return activeIcon;
+}
+
+function refreshActionActivity() {
+  // Serialize updates so a slow icon decode cannot overwrite a newer state.
+  iconUpdate = iconUpdate.then(async () => {
+    const active = activePanels.size > 0;
+    if (active === appliedActivity) return;
+    const manifest = chrome.runtime.getManifest();
+    const icon = active ? { imageData: await getActiveIcon() } : {
+      path: Object.fromEntries(Object.entries(manifest.icons).map(([size, path]) => [size, chrome.runtime.getURL(path)])),
+    };
+    if (active !== (activePanels.size > 0)) return;
+    await chrome.action.setIcon(icon);
+    await chrome.action.setTitle({ title: active ? "Lizard Studio — a chat is active" : manifest.action.default_title });
+    appliedActivity = active;
+  }).catch((error) => console.error("[RK] activity icon", error));
+}
+// Clear any icon left by a previous worker. Panels replay their state on reconnect.
+refreshActionActivity();
+
 function panelsForWindow(windowId) {
   if (!Number.isInteger(windowId) || windowId < 0) return [];
   return [...panelPorts].filter(([, id]) => id === windowId).map(([port]) => port);
@@ -111,6 +163,13 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "rk-sidepanel") return;
   panelPorts.set(port, null);
   port.onMessage.addListener((msg) => {
+    if (msg?.type === "chatActivity") {
+      if (panelPorts.get(port) == null || typeof msg.active !== "boolean") return;
+      if (msg.active) activePanels.add(port);
+      else activePanels.delete(port);
+      refreshActionActivity();
+      return;
+    }
     if (msg?.type !== "panelReady" || !Number.isInteger(msg.windowId) || msg.windowId < 0) return;
     if (!panelPorts.has(port) || panelPorts.get(port) !== null) return;
     panelPorts.set(port, msg.windowId);
@@ -119,6 +178,8 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onDisconnect.addListener(() => {
     const windowId = panelPorts.get(port);
     panelPorts.delete(port);
+    activePanels.delete(port);
+    refreshActionActivity();
     if (windowId != null && !panelsForWindow(windowId).length) hideToolbarInWindow(windowId);
   });
 });

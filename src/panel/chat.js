@@ -1267,6 +1267,16 @@
   }
 
   // ---- tab bar --------------------------------------------------------------
+  function hasActiveChats() {
+    return connected && [...chats.values()].some((chat) => tabDotRunning(chat) || tabDotWaiting(chat));
+  }
+  let lastReportedActivity = false;
+  function reportChatActivity() {
+    const active = hasActiveChats();
+    if (active === lastReportedActivity) return;
+    lastReportedActivity = active;
+    window.dispatchEvent(new Event("rk-chat-activity"));
+  }
   // Per-tab activity dot, sharing the close button's slot so the tab never
   // grows: blue while the session is blocked on your input (a pending
   // permission / question ask), yellow while it's running (or has prompts
@@ -1284,6 +1294,7 @@
   // full renderTabs(): turns start and end in background tabs all the time,
   // and a rebuild mid-hover would kill the tooltip (or an in-flight drag).
   function updateTabDots() {
+    reportChatActivity();
     if (!mounted || !els.tabs) return;
     for (const node of els.tabs.children) {
       const chat = chats.get(node.dataset.tabId);
@@ -1305,6 +1316,7 @@
     if (!wasWaiting) playDoneChime();
   }
   function renderTabs() {
+    reportChatActivity();
     hideTabTip();
     // Everything but the indicator: it has to outlive the rebuild, or a switch
     // would hand the fill a brand-new element with nowhere to slide from.
@@ -4787,6 +4799,7 @@
       void chrome.runtime.lastError;
       port = null;
       connected = false;
+      reportChatActivity();
       hostReady = false;
       for (const h of HARNESSES) {
         harnessReady[h.id] = false;
@@ -5320,6 +5333,7 @@
         }
         break;
     }
+    reportChatActivity();
   }
 
   function post(obj) {
@@ -9307,6 +9321,7 @@
       if (hostUpdatePending) return; // self-update in flight — killing the host now would abort it
       hostReady = false;
       connected = false;
+      reportChatActivity();
       try {
         if (port) port.disconnect();
       } catch (_) {}
@@ -10747,5 +10762,5 @@
   // Drop all debugger sessions when the panel goes away so the banner never lingers.
   window.addEventListener("beforeunload", detachAllCdp);
 
-  window.RKChat = { mount, activate, deactivate, addContext, addImage };
+  window.RKChat = { mount, activate, deactivate, addContext, addImage, hasActiveChats };
 })();
