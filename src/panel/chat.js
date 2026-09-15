@@ -658,7 +658,7 @@
       });
       chrome.storage.local.set({
         rkChatV2: {
-          tabs, activeId, history: history.slice(0, 40), lastCwd, soundOnDone, usageLabels,
+          tabs, activeId, history, lastCwd, soundOnDone, usageLabels,
           lastBy, lastHarness,
           // Mirrors of the Claude slot under the names older builds look for,
           // so downgrading the extension doesn't lose the settings.
@@ -1136,7 +1136,6 @@
     // closing a chat shouldn't jump it to the top of the menu.
     if (!chat.empty || resumableSessionId(chat)) {
       history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, harness: chat.harness, model: chat.model, effort: chat.effort, mode: chat.mode, sessionId: resumableSessionId(chat), ts: chat.lastActivityAt || Date.now() });
-      history = history.slice(0, 40);
     }
     if (chat.started) post({ type: "close", id });
     chat.messagesEl.remove();
@@ -1446,6 +1445,8 @@
   // chat (.chat-shell.pushed), not of the menu; the menu is only unhidden so
   // there's something to uncover, and hidden again once the chat is back.
   const MENU_SLIDE_MS = 340; // keep in step with .chat-shell's transition
+  const HISTORY_PAGE_SIZE = 100;
+  let historyVisibleLimit = HISTORY_PAGE_SIZE;
   let chatMenuHideTimer = null;
 
   function chatMenuIsOpen() {
@@ -1463,6 +1464,7 @@
     // corners it rounds off as it goes.
     for (const menu of menuRegistry) closeMenu(menu);
     menuFilter = "";
+    historyVisibleLimit = HISTORY_PAGE_SIZE;
     els.chatMenuSearch.value = "";
     els.chatMenu.classList.remove("hidden");
     els.chatMenuGuard.classList.remove("hidden");
@@ -1533,13 +1535,25 @@
       return;
     }
     let bucket = null;
-    for (const entry of rows) {
+    const visibleCount = rows.filter((entry) => entry.open).length + historyVisibleLimit;
+    for (const entry of rows.slice(0, visibleCount)) {
       const b = entry.open ? "Active" : q ? "History" : menuBucket(entry.ts);
       if (b !== bucket) {
         bucket = b;
         list.appendChild(el("div", "chat-menu-group", b));
       }
       list.appendChild(chatMenuRow(entry));
+    }
+    if (rows.length > visibleCount) {
+      const more = el("button", "chat-menu-foot-btn", `Show more chats (${rows.length - visibleCount})`);
+      more.type = "button";
+      more.addEventListener("click", () => {
+        const scrollTop = list.scrollTop;
+        historyVisibleLimit += HISTORY_PAGE_SIZE;
+        renderChatMenuList();
+        list.scrollTop = scrollTop;
+      });
+      list.appendChild(more);
     }
   }
 
@@ -9584,6 +9598,8 @@
     els.chatMenuGuard.addEventListener("click", closeChatMenu);
     els.chatMenuSearch.addEventListener("input", () => {
       menuFilter = els.chatMenuSearch.value;
+      historyVisibleLimit = HISTORY_PAGE_SIZE;
+      els.chatMenuList.scrollTop = 0;
       renderChatMenuList();
     });
     els.settingsBtn.addEventListener("click", (e) => {
