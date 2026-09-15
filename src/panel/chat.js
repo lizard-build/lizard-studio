@@ -476,7 +476,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 32;
+  const EXPECTED_HOST_VERSION = 33;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -658,7 +658,7 @@
       });
       chrome.storage.local.set({
         rkChatV2: {
-          tabs, activeId, history: history.slice(0, 40), lastCwd, soundOnDone, usageLabels,
+          tabs, activeId, history, lastCwd, soundOnDone, usageLabels,
           lastBy, lastHarness,
           // Mirrors of the Claude slot under the names older builds look for,
           // so downgrading the extension doesn't lose the settings.
@@ -1137,7 +1137,6 @@
     // closing a chat shouldn't jump it to the top of the menu.
     if (!chat.empty || resumableSessionId(chat)) {
       history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, harness: chat.harness, model: chat.model, effort: chat.effort, mode: chat.mode, sessionId: resumableSessionId(chat), ts: chat.lastActivityAt || Date.now(), bookmarkColor: chat.bookmarkColor });
-      history = history.slice(0, 40);
     }
     if (chat.started) post({ type: "close", id });
     chat.messagesEl.remove();
@@ -1351,6 +1350,16 @@
   }
 
   // ---- tab bar --------------------------------------------------------------
+  function hasActiveChats() {
+    return connected && [...chats.values()].some((chat) => tabDotRunning(chat) || tabDotWaiting(chat));
+  }
+  let lastReportedActivity = false;
+  function reportChatActivity() {
+    const active = hasActiveChats();
+    if (active === lastReportedActivity) return;
+    lastReportedActivity = active;
+    window.dispatchEvent(new Event("rk-chat-activity"));
+  }
   // Per-tab activity dot, sharing the close button's slot so the tab never
   // grows: blue while the session is blocked on your input (a pending
   // permission / question ask), yellow while it's running (or has prompts
@@ -1368,6 +1377,7 @@
   // full renderTabs(): turns start and end in background tabs all the time,
   // and a rebuild mid-hover would kill the tooltip (or an in-flight drag).
   function updateTabDots() {
+    reportChatActivity();
     if (!mounted || !els.tabs) return;
     for (const node of els.tabs.children) {
       const chat = chats.get(node.dataset.tabId);
@@ -1389,6 +1399,7 @@
     if (!wasWaiting) playDoneChime();
   }
   function renderTabs() {
+    reportChatActivity();
     hideTabTip();
     // Everything but the indicator: it has to outlive the rebuild, or a switch
     // would hand the fill a brand-new element with nowhere to slide from.
@@ -1522,9 +1533,8 @@
   }
 
   // ---- chat menu (the subbar burger) ----------------------------------------
-  // One list for every conversation there is — the tabs open right now and the
-  // ones already closed — newest first by when each last moved, so the menu
-  // reads as one timeline instead of two piles. Settings sits at its foot.
+  // Open tabs appear under Active in tab order. Closed conversations follow
+  // in date groups, newest first. Settings sits at the bottom.
   //
   // The menu never covers the chat. It lies under it, full height, and opening
   // it slides the chat off to the right to uncover it — the chat stays on
@@ -1532,6 +1542,10 @@
   // chat (.chat-shell.pushed), not of the menu; the menu is only unhidden so
   // there's something to uncover, and hidden again once the chat is back.
   const MENU_SLIDE_MS = 340; // keep in step with .chat-shell's transition
+  const HISTORY_PAGE_SIZE = 40;
+  let historyVisibleLimit = HISTORY_PAGE_SIZE;
+  let historyHasMore = false;
+  let historyLoadFrame = null;
   let chatMenuHideTimer = null;
 
   function chatMenuIsOpen() {
@@ -1549,6 +1563,8 @@
     // corners it rounds off as it goes.
     for (const menu of menuRegistry) closeMenu(menu);
     menuFilter = "";
+    historyVisibleLimit = HISTORY_PAGE_SIZE;
+    els.chatMenuList.scrollTop = 0;
     els.chatMenuSearch.value = "";
     els.chatMenu.classList.remove("hidden");
     els.chatMenuGuard.classList.remove("hidden");
@@ -1576,7 +1592,7 @@
     }, reducedMotion.matches ? 0 : MENU_SLIDE_MS);
   }
 
-  // Open tabs and closed conversations as one sorted run. Open ones carry their
+  // Open tabs come first, followed by history. Open ones carry their
   // live chat so the row can show what the tab shows (activity dot, active
   // highlight); closed ones carry the history entry they'd be reopened from.
   function chatMenuEntries() {
@@ -1586,10 +1602,10 @@
       if (!chat) continue;
       rows.push({ open: true, chat, title: chat.title || DEFAULT_TITLE, cwd: chat.cwd, ts: chat.lastActivityAt || 0 });
     }
-    for (const item of history) {
+    for (const item of [...history].sort((a, b) => (b.ts || 0) - (a.ts || 0))) {
       rows.push({ open: false, item, title: item.title || DEFAULT_TITLE, cwd: item.cwd, ts: item.ts || 0 });
     }
-    return rows.sort((a, b) => b.ts - a.ts);
+    return rows;
   }
 
   // Date headings down the list, so "newest first" is legible without reading
@@ -1607,9 +1623,23 @@
     return "Older";
   }
 
+  function scheduleChatHistoryLoad() {
+    if (historyLoadFrame !== null) return;
+    historyLoadFrame = requestAnimationFrame(() => {
+      historyLoadFrame = null;
+      const list = els.chatMenuList;
+      if (!chatMenuIsOpen() || !historyHasMore || !list || !list.clientHeight) return;
+      if (list.scrollHeight - list.scrollTop - list.clientHeight > 160) return;
+      historyVisibleLimit += HISTORY_PAGE_SIZE;
+      renderChatMenuList();
+    });
+  }
+
   function renderChatMenuList() {
     if (!mounted || !els.chatMenuList || !chatMenuIsOpen()) return;
     const list = els.chatMenuList;
+    const scrollTop = list.scrollTop;
+    historyHasMore = false;
     list.innerHTML = "";
     const q = menuFilter.trim().toLowerCase();
     const all = chatMenuEntries();
@@ -1619,18 +1649,19 @@
       return;
     }
     let bucket = null;
-    for (const entry of rows) {
-      // Headings only when the list is in date order — a search result set is
-      // scored by name, and dated dividers through it just add noise.
-      if (!q) {
-        const b = menuBucket(entry.ts);
-        if (b !== bucket) {
-          bucket = b;
-          list.appendChild(el("div", "chat-menu-group", b));
-        }
+    const visibleCount = rows.filter((entry) => entry.open).length + historyVisibleLimit;
+    for (const entry of rows.slice(0, visibleCount)) {
+      const b = entry.open ? "Active" : q ? "History" : menuBucket(entry.ts);
+      if (b !== bucket) {
+        bucket = b;
+        list.appendChild(el("div", "chat-menu-group", b));
       }
       list.appendChild(chatMenuRow(entry));
     }
+    list.scrollTop = scrollTop;
+    historyHasMore = rows.length > visibleCount;
+    // Also fill a tall viewport when the first page has no scrollbar yet.
+    if (historyHasMore) scheduleChatHistoryLoad();
   }
 
   function chatMenuRow(entry) {
@@ -4891,6 +4922,7 @@
       void chrome.runtime.lastError;
       port = null;
       connected = false;
+      reportChatActivity();
       hostReady = false;
       for (const h of HARNESSES) {
         harnessReady[h.id] = false;
@@ -5424,6 +5456,7 @@
         }
         break;
     }
+    reportChatActivity();
   }
 
   function post(obj) {
@@ -9411,6 +9444,7 @@
       if (hostUpdatePending) return; // self-update in flight — killing the host now would abort it
       hostReady = false;
       connected = false;
+      reportChatActivity();
       try {
         if (port) port.disconnect();
       } catch (_) {}
@@ -9671,8 +9705,12 @@
       toggleChatMenu();
     });
     els.chatMenuGuard.addEventListener("click", closeChatMenu);
+    els.chatMenuList.addEventListener("scroll", scheduleChatHistoryLoad, { passive: true });
+    window.addEventListener("resize", scheduleChatHistoryLoad);
     els.chatMenuSearch.addEventListener("input", () => {
       menuFilter = els.chatMenuSearch.value;
+      historyVisibleLimit = HISTORY_PAGE_SIZE;
+      els.chatMenuList.scrollTop = 0;
       renderChatMenuList();
     });
     els.settingsBtn.addEventListener("click", (e) => {
@@ -9930,10 +9968,8 @@
   }
 
   const TEMPLATE = `
-    <!-- Chat menu: every conversation there is — open tabs and closed ones
-         alike — newest first, with settings parked at the foot. It doesn't
-         cover the chat: it lies underneath, and the chat slides off to the
-         right to uncover it (see .chat-shell.pushed). -->
+    <!-- Open chats under Active, then history by date. The chat slides right
+         to show the menu (see .chat-shell.pushed). -->
     <div id="chat-menu" class="chat-menu hidden">
       <div class="chat-menu-panel" role="dialog" aria-modal="true" aria-label="Chats">
         <!-- No close button: the chat itself is the way back — click the strip
@@ -10853,5 +10889,5 @@
   // Drop all debugger sessions when the panel goes away so the banner never lingers.
   window.addEventListener("beforeunload", detachAllCdp);
 
-  window.RKChat = { mount, activate, deactivate, addContext, addImage };
+  window.RKChat = { mount, activate, deactivate, addContext, addImage, hasActiveChats };
 })();
