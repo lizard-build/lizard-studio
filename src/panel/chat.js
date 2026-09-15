@@ -1425,9 +1425,8 @@
   }
 
   // ---- chat menu (the subbar burger) ----------------------------------------
-  // One list for every conversation there is — the tabs open right now and the
-  // ones already closed — newest first by when each last moved, so the menu
-  // reads as one timeline instead of two piles. Settings sits at its foot.
+  // Open tabs appear under Active in tab order. Closed conversations follow
+  // in date groups, newest first. Settings sits at the bottom.
   //
   // The menu never covers the chat. It lies under it, full height, and opening
   // it slides the chat off to the right to uncover it — the chat stays on
@@ -1479,7 +1478,7 @@
     }, reducedMotion.matches ? 0 : MENU_SLIDE_MS);
   }
 
-  // Open tabs and closed conversations as one sorted run. Open ones carry their
+  // Open tabs come first, followed by history. Open ones carry their
   // live chat so the row can show what the tab shows (activity dot, active
   // highlight); closed ones carry the history entry they'd be reopened from.
   function chatMenuEntries() {
@@ -1489,10 +1488,10 @@
       if (!chat) continue;
       rows.push({ open: true, chat, title: chat.title || DEFAULT_TITLE, cwd: chat.cwd, ts: chat.lastActivityAt || 0 });
     }
-    for (const item of history) {
+    for (const item of [...history].sort((a, b) => (b.ts || 0) - (a.ts || 0))) {
       rows.push({ open: false, item, title: item.title || DEFAULT_TITLE, cwd: item.cwd, ts: item.ts || 0 });
     }
-    return rows.sort((a, b) => b.ts - a.ts);
+    return rows;
   }
 
   // Date headings down the list, so "newest first" is legible without reading
@@ -1523,14 +1522,10 @@
     }
     let bucket = null;
     for (const entry of rows) {
-      // Headings only when the list is in date order — a search result set is
-      // scored by name, and dated dividers through it just add noise.
-      if (!q) {
-        const b = menuBucket(entry.ts);
-        if (b !== bucket) {
-          bucket = b;
-          list.appendChild(el("div", "chat-menu-group", b));
-        }
+      const b = entry.open ? "Active" : q ? "History" : menuBucket(entry.ts);
+      if (b !== bucket) {
+        bucket = b;
+        list.appendChild(el("div", "chat-menu-group", b));
       }
       list.appendChild(chatMenuRow(entry));
     }
@@ -9831,10 +9826,8 @@
   }
 
   const TEMPLATE = `
-    <!-- Chat menu: every conversation there is — open tabs and closed ones
-         alike — newest first, with settings parked at the foot. It doesn't
-         cover the chat: it lies underneath, and the chat slides off to the
-         right to uncover it (see .chat-shell.pushed). -->
+    <!-- Open chats under Active, then history by date. The chat slides right
+         to show the menu (see .chat-shell.pushed). -->
     <div id="chat-menu" class="chat-menu hidden">
       <div class="chat-menu-panel" role="dialog" aria-modal="true" aria-label="Chats">
         <!-- No close button: the chat itself is the way back — click the strip

@@ -1488,11 +1488,9 @@ button:active > .copy-swap {
    and why the chat has to stay opaque, since it's the only thing hiding the
    menu when it's shut. */
 .view {
-  /* How far the chat travels, and how wide the menu is — one value, so the
-     chat lands exactly on the menu's edge. Mostly a share of the panel, so the
-     strip of chat left showing scales with it; the px floor is what keeps that
-     strip clickable when the panel is squeezed narrow. */
-  --chat-menu-w: min(82%, calc(100% - 56px));
+  /* Keep the menu, chat offset, and dismiss area aligned. Leave at least
+     56px of chat visible on narrow panels and cap the menu at 400px. */
+  --chat-menu-w: min(400px, 82%, calc(100% - 56px));
 }
 /* The bed the chat lies on. It carries the menu's colour across the whole
    panel, not just the width the list occupies: the chat rounds its corners off
