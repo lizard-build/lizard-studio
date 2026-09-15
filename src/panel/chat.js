@@ -1232,15 +1232,21 @@
   ];
   const BOOKMARK_SVG = '<svg width="12" height="14" viewBox="0 0 12 14" fill="currentColor" aria-hidden="true"><path d="M3 1h6a1 1 0 0 1 1 1v11L6 10.5 2 13V2a1 1 0 0 1 1-1Z"/></svg>';
   let tabTip = null, tabTipTimer = null, tabTipAnchor = null;
+  function bookmarkMark(color) {
+    const mark = el("span", "tab-bookmark");
+    mark.style.color = color.color;
+    mark.innerHTML = BOOKMARK_SVG;
+    mark.title = `${color.label} bookmark`;
+    mark.setAttribute("role", "img");
+    mark.setAttribute("aria-label", mark.title);
+    return mark;
+  }
   function updateTabBookmark(tab, chat) {
     tab.querySelector(".tab-bookmark")?.remove();
     const color = BOOKMARK_COLORS.find((c) => c.id === chat.bookmarkColor);
     tab.setAttribute("aria-label", chat.title + (color ? `, ${color.label} bookmark` : ""));
     if (!color) return;
-    const mark = el("span", "tab-bookmark");
-    mark.style.color = color.color;
-    mark.innerHTML = BOOKMARK_SVG;
-    tab.prepend(mark);
+    tab.prepend(bookmarkMark(color));
   }
   function ensureTabTip() {
     if (tabTip) return tabTip;
@@ -1316,6 +1322,7 @@
             choice.setAttribute("aria-pressed", String(choice.dataset.bookmarkColor === chat.bookmarkColor));
           }
           placeTabInd();
+          renderChatMenuList();
           savePrefs();
         });
         picker.appendChild(button);
@@ -1639,6 +1646,8 @@
     // glance. A chat with nothing to say still gets one, drawn hollow, so no
     // title starts a step to the left of its neighbours.
     row.appendChild(el("span", "chat-menu-dot"));
+    const bookmark = BOOKMARK_COLORS.find((c) => c.id === (chat || entry.item)?.bookmarkColor);
+    if (bookmark) row.appendChild(bookmarkMark(bookmark));
     row.appendChild(el("div", "chat-menu-row-title", entry.title));
     row.appendChild(el("span", "chat-menu-time", entry.ts ? relTime(entry.ts) : ""));
 
