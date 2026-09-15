@@ -66,14 +66,6 @@ Every session includes the [Lizard Skill](https://github.com/lizard-build/skill)
 
 Tools toggle independently from a draggable toolbar; several run at once. Number keys `1–9` toggle in bar order; right-click a tool for its settings. State is per-page and ephemeral.
 
-## Architecture
-
-No build step — plain JS. `src/core.js` (Shadow-DOM overlay, state, tool registry) + `src/tools/*.js` + `src/toolbar.js` are the content scripts; `src/background.js` is the service worker; `src/panel/` is the side-panel app (`chat.js` is the chat client, `render.js` is XSS-safe markdown). A disabled terminal view (`terminal.js` + vendored xterm) lives in the tree but is excluded from the store build.
-
-`src/host/` contains the local hosts — `router.mjs` routes each chat to its agent, `codex-host.mjs` connects ChatGPT through its CLI, `claude-host.mjs` (spawns `claude` in stream-json mode, one process per tab; bridges permissions + browser tools; replays transcripts; drives `/login` and `/remote-control`), `mcp-browser.mjs` (the `browser_*` MCP relay), `install.mjs` (cross-platform installer). It ships separately on npm as `@lizard-build/lizard-studio-host`. The host's login-shell env-capture is adapted from [21st-dev/1Code](https://github.com/21st-dev/1Code) (Apache-2.0).
-
-The UI follows the Lizard Brand Design System; the accent (emerald by default) is user-configurable via `--rk-accent*`. Roadmap, not yet built: baseline grid, WCAG contrast checker, font inspector, outline-all, palette extractor, smart guides, onion-skin diff.
-
 ## License
 
 MIT © Dragon Labs LLC. See [LICENSE](LICENSE) and [PRIVACY.md](PRIVACY.md).
