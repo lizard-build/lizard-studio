@@ -622,7 +622,7 @@
         if (Array.isArray(p.usageLabels) && p.usageLabels.length) usageLabels = p.usageLabels;
         if (Array.isArray(p.tabs) && p.tabs.length) {
           for (const t of p.tabs) {
-            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt, draft: t.draft, bashMode: t.bashMode });
+            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt, draft: t.draft, bashMode: t.bashMode, bookmarkColor: t.bookmarkColor });
             chats.set(chat.id, chat);
     let lastScrollTop = 0;
     const earlier = () => {
@@ -654,7 +654,7 @@
       if (owner && els.input) owner.draft = els.input.value;
       const tabs = order.map((id) => {
         const c = chats.get(id);
-        return { id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: resumableSessionId(c), bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, bashMode: c.bashMode };
+        return { id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: resumableSessionId(c), bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, bashMode: c.bashMode, bookmarkColor: c.bookmarkColor };
       });
       chrome.storage.local.set({
         rkChatV2: {
@@ -892,6 +892,7 @@
     return {
       id: opts.id || newId(),
       title: opts.title || DEFAULT_TITLE,
+      bookmarkColor: BOOKMARK_COLORS.some((c) => c.id === opts.bookmarkColor) ? opts.bookmarkColor : null,
       cwd: opts.cwd || null,
       harness: opts.harness || lastHarness || DEFAULT_HARNESS,
       model: opts.model || lastFor(opts.harness || lastHarness).model || defaultModelFor(opts.harness || lastHarness),
@@ -1135,7 +1136,7 @@
     // `ts` is when the conversation last moved, not when the tab was shut —
     // closing a chat shouldn't jump it to the top of the menu.
     if (!chat.empty || resumableSessionId(chat)) {
-      history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, harness: chat.harness, model: chat.model, effort: chat.effort, mode: chat.mode, sessionId: resumableSessionId(chat), ts: chat.lastActivityAt || Date.now() });
+      history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, harness: chat.harness, model: chat.model, effort: chat.effort, mode: chat.mode, sessionId: resumableSessionId(chat), ts: chat.lastActivityAt || Date.now(), bookmarkColor: chat.bookmarkColor });
     }
     if (chat.started) post({ type: "close", id });
     chat.messagesEl.remove();
@@ -1222,17 +1223,68 @@
   // A single shared tooltip node, positioned under whichever tab is hovered.
   // Native `title` only shows the (often truncated) label after a long delay,
   // so this surfaces the full title + folder + branch right below the tab.
-  let tabTip = null, tabTipTimer = null;
+  const BOOKMARK_COLORS = [
+    { id: "violet", label: "Violet", color: "#b69aff" },
+    { id: "pink", label: "Pink", color: "#f18ac5" },
+    { id: "coral", label: "Coral", color: "#ff927c" },
+    { id: "white", label: "White", color: "#e9edf4" },
+  ];
+  const BOOKMARK_SVG = '<svg width="12" height="14" viewBox="0 0 12 14" fill="currentColor" aria-hidden="true"><path d="M3 1h6a1 1 0 0 1 1 1v11L6 10.5 2 13V2a1 1 0 0 1 1-1Z"/></svg>';
+  let tabTip = null, tabTipTimer = null, tabTipAnchor = null;
+  function bookmarkMark(color) {
+    const mark = el("span", "tab-bookmark");
+    mark.style.color = color.color;
+    mark.innerHTML = BOOKMARK_SVG;
+    mark.title = `${color.label} bookmark`;
+    mark.setAttribute("role", "img");
+    mark.setAttribute("aria-label", mark.title);
+    return mark;
+  }
+  function updateTabBookmark(tab, chat) {
+    tab.querySelector(".tab-bookmark")?.remove();
+    const color = BOOKMARK_COLORS.find((c) => c.id === chat.bookmarkColor);
+    tab.setAttribute("aria-label", chat.title + (color ? `, ${color.label} bookmark` : ""));
+    if (!color) return;
+    tab.prepend(bookmarkMark(color));
+  }
   function ensureTabTip() {
     if (tabTip) return tabTip;
     tabTip = el("div", "chat-tab-tip");
+    tabTip.id = "chat-tab-details";
+    tabTip.setAttribute("role", "dialog");
+    tabTip.setAttribute("aria-label", "Chat details and bookmark");
+    tabTip.inert = true;
+    tabTip.addEventListener("mouseenter", () => clearTimeout(tabTipTimer));
+    tabTip.addEventListener("mouseleave", scheduleHideTabTip);
+    tabTip.addEventListener("focusin", () => clearTimeout(tabTipTimer));
+    tabTip.addEventListener("focusout", (e) => {
+      if (!tabTip.contains(e.relatedTarget) && e.relatedTarget !== tabTipAnchor) hideTabTip();
+    });
+    document.addEventListener("pointerdown", (e) => {
+      if (!tabTip.contains(e.target) && !tabTipAnchor?.contains(e.target)) hideTabTip();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !tabTip.classList.contains("show")) return;
+      e.preventDefault();
+      const anchor = tabTipAnchor;
+      if (tabTip.contains(document.activeElement)) anchor?.focus();
+      hideTabTip();
+    });
     document.body.appendChild(tabTip);
     return tabTip;
   }
-  function showTabTip(tabEl, chat) {
+  function scheduleHideTabTip() {
+    clearTimeout(tabTipTimer);
+    if (tabTip?.contains(document.activeElement)) return;
+    tabTipTimer = setTimeout(hideTabTip, 180);
+  }
+  function showTabTip(tabEl, chat, focusPicker = false) {
     clearTimeout(tabTipTimer);
     tabTipTimer = setTimeout(() => {
       const tip = ensureTabTip();
+      tabTipAnchor?.setAttribute("aria-expanded", "false");
+      tabTipAnchor = tabEl;
+      tabEl.setAttribute("aria-expanded", "true");
       tip.innerHTML = "";
       // Each icon row is a flex box: a fixed 12px icon slot + gap + text. The
       // title has no icon slot, so it sits flush at the left edge — aligned
@@ -1250,19 +1302,51 @@
       };
       tipLine("chat-tab-tip-title", null, chat.title);
       tipLine("chat-tab-tip-row", "folder", shortPath(chat.cwd) || "No folder selected");
+      const picker = el("div", "tab-bookmark-picker");
+      picker.setAttribute("role", "group");
+      picker.setAttribute("aria-label", "Bookmark color");
+      for (const color of BOOKMARK_COLORS) {
+        const button = el("button", "tab-bookmark-choice");
+        button.type = "button";
+        button.title = color.label;
+        button.setAttribute("aria-label", `${color.label} bookmark`);
+        button.setAttribute("aria-pressed", String(chat.bookmarkColor === color.id));
+        button.dataset.bookmarkColor = color.id;
+        button.style.color = color.color;
+        button.innerHTML = BOOKMARK_SVG;
+        button.addEventListener("click", () => {
+          chat.bookmarkColor = chat.bookmarkColor === color.id ? null : color.id;
+          updateTabBookmark(tabEl, chat);
+          for (const choice of picker.querySelectorAll("button")) {
+            choice.setAttribute("aria-pressed", String(choice.dataset.bookmarkColor === chat.bookmarkColor));
+          }
+          placeTabInd();
+          renderChatMenuList();
+          savePrefs();
+        });
+        picker.appendChild(button);
+      }
+      tip.appendChild(picker);
       if (chat.isRepo && chat.branch) tipLine("chat-tab-tip-row", "git-branch", chat.branch);
       // No context line here — the toolbar ring carries that reading now.
       tip.classList.add("show");
+      tip.inert = false;
       const r = tabEl.getBoundingClientRect();
       tip.style.top = r.bottom + 6 + "px";
       let left = r.left;
       const maxLeft = window.innerWidth - tip.offsetWidth - 8;
       tip.style.left = Math.max(8, Math.min(left, maxLeft)) + "px";
-    }, 350);
+      if (focusPicker) (picker.querySelector('[aria-pressed="true"]') || picker.querySelector("button")).focus();
+    }, focusPicker ? 0 : 350);
   }
   function hideTabTip() {
     clearTimeout(tabTipTimer);
-    if (tabTip) tabTip.classList.remove("show");
+    tabTipAnchor?.setAttribute("aria-expanded", "false");
+    tabTipAnchor = null;
+    if (tabTip) {
+      tabTip.classList.remove("show");
+      tabTip.inert = true;
+    }
   }
 
   // ---- tab bar --------------------------------------------------------------
@@ -1329,9 +1413,22 @@
       const dotCls = waiting ? " dot-wait" : running ? " dot-run" : chat.unseen ? " dot-unseen" : "";
       const tab = el("button", "chat-tab" + (id === activeId ? " active" : "") + dotCls);
       tab.dataset.tabId = id;
+      tab.setAttribute("aria-haspopup", "dialog");
+      tab.setAttribute("aria-controls", "chat-tab-details");
+      tab.setAttribute("aria-expanded", "false");
       tab.addEventListener("mouseenter", () => showTabTip(tab, chat));
-      tab.addEventListener("mouseleave", hideTabTip);
+      tab.addEventListener("mouseleave", scheduleHideTabTip);
+      tab.addEventListener("focus", () => showTabTip(tab, chat));
+      tab.addEventListener("blur", (e) => {
+        if (!tabTip?.contains(e.relatedTarget)) scheduleHideTabTip();
+      });
+      tab.addEventListener("keydown", (e) => {
+        if (e.key !== "ArrowDown") return;
+        e.preventDefault();
+        showTabTip(tab, chat, true);
+      });
       tab.appendChild(el("span", "tab-label", chat.title));
+      updateTabBookmark(tab, chat);
       tab.appendChild(el("span", "tab-dot"));
       const close = el("span", "tab-close");
       close.innerHTML = ICON("x", 12);
@@ -1580,6 +1677,8 @@
     // glance. A chat with nothing to say still gets one, drawn hollow, so no
     // title starts a step to the left of its neighbours.
     row.appendChild(el("span", "chat-menu-dot"));
+    const bookmark = BOOKMARK_COLORS.find((c) => c.id === (chat || entry.item)?.bookmarkColor);
+    if (bookmark) row.appendChild(bookmarkMark(bookmark));
     row.appendChild(el("div", "chat-menu-row-title", entry.title));
     row.appendChild(el("span", "chat-menu-time", entry.ts ? relTime(entry.ts) : ""));
 
@@ -1612,7 +1711,7 @@
     history = history.filter((h) => h !== item);
     // Keep the conversation's own place in the menu — reopening a tab isn't the
     // conversation moving.
-    createChat({ title: item.title, cwd: item.cwd, harness: item.harness, model: item.model, effort: item.effort, mode: item.mode, sessionId: item.sessionId, lastActivityAt: item.ts });
+    createChat({ title: item.title, cwd: item.cwd, harness: item.harness, model: item.model, effort: item.effort, mode: item.mode, sessionId: item.sessionId, lastActivityAt: item.ts, bookmarkColor: item.bookmarkColor });
     savePrefs();
   }
 

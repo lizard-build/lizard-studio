@@ -354,6 +354,25 @@ button:active > .copy-swap {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.tab-bookmark { display: inline-flex; flex: 0 0 12px; }
+.tab-bookmark-picker { display: flex; align-items: center; gap: 4px; margin-top: 8px; }
+.tab-bookmark-choice {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.tab-bookmark-choice:hover { background: rgba(255, 255, 255, 0.08); }
+.tab-bookmark-choice[aria-pressed="true"] { border-color: currentColor; background: rgba(255, 255, 255, 0.06); }
+.tab-bookmark-choice:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; }
 .chat-tab .tab-close {
   display: inline-flex;
   align-items: center;
@@ -408,10 +427,11 @@ button:active > .copy-swap {
   padding: 7px 10px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   opacity: 0;
+  visibility: hidden;
   transform: translateY(-3px);
   transition: opacity 0.12s ease, transform 0.12s ease;
 }
-.chat-tab-tip.show { opacity: 1; transform: translateY(0); }
+.chat-tab-tip.show { opacity: 1; transform: translateY(0); pointer-events: auto; visibility: visible; }
 /* Title and rows share one flex layout: a fixed 12px icon slot + 6px gap +
    text. The title's slot is empty, so its text lands on the exact same left
    line as every icon row below — no hand-tuned padding to drift out of sync. */
