@@ -1445,8 +1445,10 @@
   // chat (.chat-shell.pushed), not of the menu; the menu is only unhidden so
   // there's something to uncover, and hidden again once the chat is back.
   const MENU_SLIDE_MS = 340; // keep in step with .chat-shell's transition
-  const HISTORY_PAGE_SIZE = 100;
+  const HISTORY_PAGE_SIZE = 40;
   let historyVisibleLimit = HISTORY_PAGE_SIZE;
+  let historyHasMore = false;
+  let historyLoadFrame = null;
   let chatMenuHideTimer = null;
 
   function chatMenuIsOpen() {
@@ -1465,6 +1467,7 @@
     for (const menu of menuRegistry) closeMenu(menu);
     menuFilter = "";
     historyVisibleLimit = HISTORY_PAGE_SIZE;
+    els.chatMenuList.scrollTop = 0;
     els.chatMenuSearch.value = "";
     els.chatMenu.classList.remove("hidden");
     els.chatMenuGuard.classList.remove("hidden");
@@ -1523,9 +1526,23 @@
     return "Older";
   }
 
+  function scheduleChatHistoryLoad() {
+    if (historyLoadFrame !== null) return;
+    historyLoadFrame = requestAnimationFrame(() => {
+      historyLoadFrame = null;
+      const list = els.chatMenuList;
+      if (!chatMenuIsOpen() || !historyHasMore || !list || !list.clientHeight) return;
+      if (list.scrollHeight - list.scrollTop - list.clientHeight > 160) return;
+      historyVisibleLimit += HISTORY_PAGE_SIZE;
+      renderChatMenuList();
+    });
+  }
+
   function renderChatMenuList() {
     if (!mounted || !els.chatMenuList || !chatMenuIsOpen()) return;
     const list = els.chatMenuList;
+    const scrollTop = list.scrollTop;
+    historyHasMore = false;
     list.innerHTML = "";
     const q = menuFilter.trim().toLowerCase();
     const all = chatMenuEntries();
@@ -1544,17 +1561,10 @@
       }
       list.appendChild(chatMenuRow(entry));
     }
-    if (rows.length > visibleCount) {
-      const more = el("button", "chat-menu-foot-btn", `Show more chats (${rows.length - visibleCount})`);
-      more.type = "button";
-      more.addEventListener("click", () => {
-        const scrollTop = list.scrollTop;
-        historyVisibleLimit += HISTORY_PAGE_SIZE;
-        renderChatMenuList();
-        list.scrollTop = scrollTop;
-      });
-      list.appendChild(more);
-    }
+    list.scrollTop = scrollTop;
+    historyHasMore = rows.length > visibleCount;
+    // Also fill a tall viewport when the first page has no scrollbar yet.
+    if (historyHasMore) scheduleChatHistoryLoad();
   }
 
   function chatMenuRow(entry) {
@@ -9596,6 +9606,8 @@
       toggleChatMenu();
     });
     els.chatMenuGuard.addEventListener("click", closeChatMenu);
+    els.chatMenuList.addEventListener("scroll", scheduleChatHistoryLoad, { passive: true });
+    window.addEventListener("resize", scheduleChatHistoryLoad);
     els.chatMenuSearch.addEventListener("input", () => {
       menuFilter = els.chatMenuSearch.value;
       historyVisibleLimit = HISTORY_PAGE_SIZE;
