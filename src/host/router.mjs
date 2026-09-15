@@ -7,8 +7,9 @@
 //   Chrome  <->  router.mjs  <->  claude-host.mjs   (agent: "claude", default)
 //                           <->  codex-host.mjs    (agent: "codex")
 //
-// The children are spawned as ordinary child processes with piped stdio, and
-// they speak Chrome's own wire format on it — a 4-byte little-endian length
+// On macOS, launchd starts both hosts so every tool they run and file they
+// create stays outside Chrome's inherited quarantine context. Other systems
+// use direct child processes. Both paths speak Chrome's wire format — a length
 // prefix plus JSON. That is exactly the format Chrome would have written to
 // them directly, so `claude-host.mjs` needs no change at all: it cannot tell
 // the difference between the browser and this process.
@@ -33,17 +34,18 @@
 //   panel -> any:     { ..., agent }                   pick the host explicitly
 //   router -> panel:  { type:"agentExit", agent, code } a non-claude host died
 
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { HOST_DIR, makeLog, frameReader, frameRaw, writeFrame } from "./hostkit.mjs";
+import { HOST_DIR, makeLog, frameReader, frameRaw, writeFrame, redact } from "./hostkit.mjs";
+import { createHostSpawner } from "./codex-spawn.mjs";
 
 const log = makeLog("router");
+const hostSpawner = createHostSpawner({ hostDir: HOST_DIR, redact });
 
 // Bumped on every router change the panel needs to know about. Reported inside
 // the `agentReady` message each non-claude host sends; claude's own `ready`
 // (and the HOST_VERSION in it) passes through untouched.
-const ROUTER_VERSION = 1;
+const ROUTER_VERSION = 2;
 
 // The browser bridge correlates requests by `bid`, and each host numbers its
 // own from scratch. Rather than rewrite ids in flight — which would mean
@@ -105,8 +107,8 @@ function spawnAgent(name) {
 
   let proc;
   try {
-    proc = spawn(process.execPath, [path], {
-      stdio: ["pipe", "pipe", "pipe"],
+    proc = hostSpawner.spawn(process.execPath, [path], {
+      cwd: process.cwd(),
       env: { ...process.env, LIZARD_STUDIO_ROUTER_PID: String(process.pid) },
     });
   } catch (err) {
@@ -241,7 +243,10 @@ function shutdown(code) {
     try { child.proc.kill("SIGTERM"); } catch { /* ignore */ }
   }
   // Give the children a moment to stop their own trees, then go.
-  setTimeout(() => process.exit(code), 200).unref();
+  setTimeout(() => {
+    hostSpawner.close();
+    process.exit(code);
+  }, 200).unref();
 }
 
 process.on("uncaughtException", (err) => {
