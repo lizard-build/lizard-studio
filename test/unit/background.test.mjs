@@ -4,21 +4,21 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 function worker(options = {}) {
-  const { writeBadge, executeScript = async () => [] } = typeof options === "function" ? { executeScript: options } : options;
+  const { writeBadge, executeScript = async () => [], setPanelBehavior = async () => {}, timer = setTimeout, log = console } = typeof options === "function" ? { executeScript: options } : options;
   const listeners = {}, tabsSent = [], opened = [], contexts = [], icons = [], titles = [], badges = [], backgrounds = [], textColors = [];
   const event = (name) => ({ addListener(fn) { (listeners[name] ||= []).push(fn); } });
   const tabs = [{ id: 11, windowId: 101, active: true }, { id: 22, windowId: 202, active: true }];
   const chrome = {
     scripting: { executeScript },
-    runtime: { getManifest: () => ({ content_scripts: [{ js: [] }], icons: { 16: "icons/icon16.png", 48: "icons/icon48.png", 128: "icons/icon128.png" }, action: { default_title: "Studio idle" } }), getURL: (path) => `chrome-extension://test/${path}`, onInstalled: event("installed"), onConnect: event("connect"), onMessage: event("message"), getContexts: async () => contexts },
+    runtime: { getManifest: () => ({ content_scripts: [{ js: [] }], icons: { 16: "icons/icon16.png", 48: "icons/icon48.png", 128: "icons/icon128.png" }, action: { default_title: "Studio idle" } }), getURL: (path) => `chrome-extension://test/${path}`, onInstalled: event("installed"), onStartup: event("startup"), onConnect: event("connect"), onMessage: event("message"), getContexts: async () => contexts },
     tabs: { query: (query, cb) => cb(tabs.filter((tab) => Object.entries(query).every(([key, value]) => key === "currentWindow" || tab[key] === value))), sendMessage: async (id, msg) => tabsSent.push({ id, ...msg }), onRemoved: event("removed"), onUpdated: event("updated"), onActivated: event("activated") },
-    sidePanel: { setPanelBehavior: async () => {}, open: async (opts) => opened.push(opts) },
+    sidePanel: { setPanelBehavior, open: async (opts) => opened.push(opts) },
     action: { onClicked: event("clicked"), setIcon: async (icon) => icons.push(icon), setTitle: async ({ title }) => titles.push(title), setBadgeText: async ({ text }) => { if (writeBadge) await writeBadge(text); badges.push(text); }, setBadgeBackgroundColor: async ({ color }) => backgrounds.push(color), setBadgeTextColor: async ({ color }) => textColors.push(color) }, commands: { onCommand: event("command") },
     windows: { WINDOW_ID_CURRENT: -2, WINDOW_ID_NONE: -1, onFocusChanged: event("focus") },
     declarativeNetRequest: { updateSessionRules: async () => {} },
   };
   vm.runInNewContext(readFileSync(new URL("../../src/background.js", import.meta.url), "utf8"), {
-    chrome, console, setTimeout, clearTimeout,
+    chrome, console: log, setTimeout: timer, clearTimeout,
   });
   const fire = (name, ...args) => (listeners[name] || []).map((fn) => fn(...args));
   function panel(windowId, ready = true) {
@@ -214,4 +214,57 @@ test("a live event wins over an initial snapshot", async () => {
   selectionEvent(w, "Latest");
   finish([{ frameId: 0, result: { text: "Stale", focused: true } }]); await tick();
   assert.equal(p.received.at(-1).selection.text, "Latest");
+});
+
+test("No SW retries setup without blocking clicks or starting duplicate attempts", async () => {
+  let calls = 0;
+  const timers = [], errors = [];
+  const w = worker({
+    setPanelBehavior: async (opts) => {
+      assert.equal(opts.openPanelOnActionClick, true);
+      if (++calls === 1) throw new Error("No SW");
+    },
+    timer: (fn, delay) => timers.push({ fn, delay }), log: { error: (...args) => errors.push(args) },
+  });
+  await flush();
+  assert.equal(timers[0].delay, 250);
+  w.fire("startup"); w.fire("installed"); w.fire("clicked", w.tabs[0]);
+  await flush();
+  assert.equal(calls, 1); assert.equal(w.opened.length, 1);
+  timers[0].fn(); await flush();
+  assert.equal(calls, 2); assert.equal(errors.length, 0);
+  w.fire("startup"); w.fire("installed"); await flush();
+  assert.equal(calls, 2);
+});
+
+test("persistent No SW is bounded, reported, and can recover on a later startup event", async () => {
+  let calls = 0, broken = true;
+  const timers = [], errors = [];
+  const w = worker({
+    setPanelBehavior: async () => { calls++; if (broken) throw new Error("No SW"); },
+    timer: (fn, delay) => timers.push({ fn, delay }), log: { error: (...args) => errors.push(args) },
+  });
+  await flush();
+  for (let i = 0; i < 3; i++) { timers[i].fn(); await flush(); }
+  assert.deepEqual(timers.map(t => t.delay), [250, 1000, 3000]);
+  assert.equal(calls, 4); assert.equal(errors.length, 1);
+  broken = false; w.fire("startup"); await flush();
+  assert.equal(calls, 5); assert.equal(errors.length, 1);
+});
+
+test("other API errors are reported immediately without repeated setup calls", async () => {
+  for (const synchronous of [false, true]) {
+    const timers = [], errors = [];
+    worker({
+      setPanelBehavior: () => {
+        const error = new Error("Permission denied");
+        if (synchronous) throw error;
+        return Promise.reject(error);
+      },
+      timer: (fn, delay) => timers.push({ fn, delay }), log: { error: (...args) => errors.push(args) },
+    });
+    await flush();
+    assert.equal(timers.length, 0); assert.equal(errors.length, 1);
+    assert.equal(errors[0][1].message, "Permission denied");
+  }
 });

@@ -64,21 +64,42 @@ function toggleStudio(tab) {
   toggleSidePanel(tab);
 }
 
-// Open the side panel via Chrome's native action-click behavior. This makes the
-// panel document load INSTANTLY on icon click, with no dependency on the service
-// worker — critical because an idle MV3 worker cold-starts on the first click,
-// and routing sidePanel.open() through that cold start left the panel frame blank
-// for seconds ("sometimes a big delay"). With this set, Chrome also toggles the
-// panel closed on the next click for free. The toolbar is brought up separately
-// when the panel connects its port (see onConnect below), keeping the two tied.
-chrome.sidePanel
-  .setPanelBehavior({ openPanelOnActionClick: true })
-  .catch((err) => console.error("[RK] setPanelBehavior", err));
+// Let Chrome handle icon clicks without waiting for the worker to start.
+// Chrome can reject an API call with "No SW" while the worker is stopping.
+// Retry that specific failure, then keep the fallback and report persistent
+// failures. A fresh worker also runs this setup if shutdown cancels the timer.
+let panelBehaviorReady = false;
+let panelBehaviorTask = null;
+function ensurePanelBehavior() {
+  if (panelBehaviorReady) return Promise.resolve();
+  if (panelBehaviorTask) return panelBehaviorTask;
+  panelBehaviorTask = (async () => {
+    const delays = [250, 1000, 3000];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+        panelBehaviorReady = true;
+        return;
+      } catch (error) {
+        if (error?.message !== "No SW" || attempt === delays.length) throw error;
+        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      }
+    }
+  })().catch((error) => console.error("[RK] setPanelBehavior", error))
+    .finally(() => { panelBehaviorTask = null; });
+  return panelBehaviorTask;
+}
+ensurePanelBehavior();
+chrome.runtime.onInstalled.addListener(ensurePanelBehavior);
+chrome.runtime.onStartup.addListener(ensurePanelBehavior);
 
 // Fallback for the rare case setPanelBehavior isn't honored: onClicked only fires
 // when Chrome ISN'T handling the click itself, so this never double-fires with the
 // native behavior above. It still carries the user gesture sidePanel.open() needs.
-chrome.action.onClicked.addListener((tab) => toggleStudio(tab));
+chrome.action.onClicked.addListener((tab) => {
+  toggleStudio(tab);
+  ensurePanelBehavior();
+});
 
 chrome.commands.onCommand.addListener((command) => {
   if (command !== "toggle-toolbar") return;
