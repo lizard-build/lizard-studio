@@ -355,7 +355,7 @@ button:active > .copy-swap {
   white-space: nowrap;
 }
 .tab-bookmark { display: inline-flex; flex: 0 0 12px; }
-.tab-bookmark-picker { display: flex; align-items: center; gap: 4px; margin-top: 8px; }
+.tab-bookmark-picker { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; }
 .tab-bookmark-choice {
   display: inline-flex;
   align-items: center;
