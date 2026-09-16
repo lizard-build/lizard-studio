@@ -1677,6 +1677,12 @@ body.chat-menu-open .la-layer {
   transition: background 0.12s;
 }
 .chat-menu-item:hover { background: rgba(255, 255, 255, 0.05); }
+.chat-menu-item.is-open { cursor: grab; }
+.chat-menu-item.is-open.dragging { opacity: 0.45; cursor: grabbing; }
+.chat-menu-item.drop-before { box-shadow: inset 0 2px var(--control-primary); }
+.chat-menu-item.drop-after { box-shadow: inset 0 -2px var(--control-primary); }
+.chat-menu-item.is-open:focus-visible { outline: 1px solid var(--control-primary); outline-offset: -1px; }
+
 .chat-menu-row-title {
   flex: 1 1 auto;
   min-width: 0;
