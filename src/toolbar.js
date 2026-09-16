@@ -608,6 +608,9 @@
       // Orphaned content script (extension was reloaded) — do nothing rather than
       // build a bar wired to a dead context. A page reload injects a fresh script.
       if (!RK.alive()) return;
+      // SVG/XML documents do not create HTML elements with createElement().
+      // Keep page-context messaging available, but do not mount HTML controls.
+      if (document.contentType !== "text/html") return;
       RK.ensureOverlay();
       const justBuilt = !root;
       if (justBuilt) build();
