@@ -1553,6 +1553,53 @@
   function chatMenuIsOpen() {
     return Boolean(els.chatShell) && els.chatShell.classList.contains("pushed");
   }
+  function chatMenuWheelHasScroller(event, root) {
+    // Keep the whole gesture with a nested scroller, even at either edge.
+    // composedPath also reaches scrollers inside an open shadow root.
+    for (const node of event.composedPath()) {
+      if (node.nodeType === 1) {
+        if (node.matches("input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='slider']")) return true;
+        if (node.scrollWidth > node.clientWidth + 1 && /^(auto|scroll|overlay)$/.test(getComputedStyle(node).overflowX)) return true;
+        if (node.matches("dialog, [role='dialog']") && !els.chatMenu.contains(node)) return true;
+      }
+      if (node === root) break;
+    }
+    return false;
+  }
+
+  function createChatMenuWheelHandler(root) {
+    const PAUSE_MS = 240, THRESHOLD = 60;
+    let lastAt = -Infinity, distance = 0, direction = 0, blocked = false, handled = false;
+    return (event) => {
+      if (event.timeStamp - lastAt > PAUSE_MS) {
+        distance = 0; direction = 0; blocked = false; handled = false;
+      }
+      lastAt = event.timeStamp;
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || chatMenuDragId || chatMenuWheelHasScroller(event, root)) {
+        blocked = true;
+      }
+      if (blocked) return;
+      // Shift+wheel supports mice; trackpads supply deltaX directly.
+      const x = event.deltaX || (event.shiftKey ? event.deltaY : 0);
+      const y = event.shiftKey && !event.deltaX ? 0 : event.deltaY;
+      if (!x && !y) return;
+      if (Math.abs(x) <= Math.abs(y) * 1.5) { blocked = true; return; }
+      // Consume momentum after a toggle, so a small rebound cannot toggle back.
+      if (handled) { event.preventDefault(); return; }
+      const sign = Math.sign(x);
+      if (sign !== (chatMenuIsOpen() ? 1 : -1)) { blocked = true; return; }
+      event.preventDefault();
+      if (direction !== sign) distance = 0;
+      direction = sign;
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? root.clientWidth : 1;
+      distance += Math.abs(x) * unit;
+      if (distance < THRESHOLD) return;
+      handled = true;
+      if (sign < 0) openChatMenu();
+      else closeChatMenu();
+    };
+  }
+
   function toggleChatMenu() {
     if (chatMenuIsOpen()) closeChatMenu();
     else openChatMenu();
@@ -9912,6 +9959,7 @@
       toggleChatMenu();
     });
     els.chatMenuGuard.addEventListener("click", closeChatMenu);
+    root.addEventListener("wheel", createChatMenuWheelHandler(root), { passive: false });
     els.chatMenuList.addEventListener("scroll", scheduleChatHistoryLoad, { passive: true });
     window.addEventListener("resize", scheduleChatHistoryLoad);
     els.chatMenuSearch.addEventListener("input", () => {
