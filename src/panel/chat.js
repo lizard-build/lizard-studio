@@ -9946,7 +9946,7 @@
   }
 
   // ---- mount / lifecycle ----------------------------------------------------
-  function mount(root) {
+  function mount(root, onReady) {
     els.root = root;
     // The panel owns the host port, so it's the page that can act on a click on
     // a file path — tell the renderer to mark them up (see openClickedPath).
@@ -10400,6 +10400,7 @@
         for (const id of order) els.stack.appendChild(chats.get(id).messagesEl);
         renderTabs();
         setActive(activeId);
+        onReady?.();
       });
       });
     });
