@@ -96,56 +96,32 @@ chrome.commands.onCommand.addListener((command) => {
 // A side panel belongs to one browser window. Never route by last focus:
 // another window may become active between selecting content and delivering it.
 const panelPorts = new Map();
-const activePanels = new Set();
-let activeIcon;
-let appliedActivity = null;
-let iconUpdate = Promise.resolve();
-
-function getActiveIcon() {
-  if (!activeIcon) {
-    activeIcon = (async () => {
-      const icons = chrome.runtime.getManifest().icons;
-      const imageData = {};
-      for (const size of [16, 32, 48]) {
-        const response = await fetch(chrome.runtime.getURL(icons[size] || icons[128]));
-        const bitmap = await createImageBitmap(await response.blob());
-        try {
-          const context = new OffscreenCanvas(size, size).getContext("2d");
-          context.drawImage(bitmap, 0, 0, size, size);
-          context.beginPath();
-          context.arc(size * 0.78, size * 0.22, size * 0.17, 0, Math.PI * 2);
-          context.fillStyle = "#fbbf24";
-          context.fill();
-          context.lineWidth = size * 0.055;
-          context.strokeStyle = "#121212";
-          context.stroke();
-          imageData[size] = context.getImageData(0, 0, size, size);
-        } finally {
-          bitmap.close();
-        }
-      }
-      return imageData;
-    })().catch((error) => { activeIcon = null; throw error; });
-  }
-  return activeIcon;
-}
+const runningCounts = new Map();
+let appliedCount = null;
+let badgeUpdate = Promise.resolve();
 
 function refreshActionActivity() {
-  // Serialize updates so a slow icon decode cannot overwrite a newer state.
-  iconUpdate = iconUpdate.then(async () => {
-    const active = activePanels.size > 0;
-    if (active === appliedActivity) return;
+  // Keep badge writes ordered when sessions start or finish in quick succession.
+  badgeUpdate = badgeUpdate.then(async () => {
     const manifest = chrome.runtime.getManifest();
-    const icon = active ? { imageData: await getActiveIcon() } : {
-      path: Object.fromEntries(Object.entries(manifest.icons).map(([size, path]) => [size, chrome.runtime.getURL(path)])),
-    };
-    if (active !== (activePanels.size > 0)) return;
-    await chrome.action.setIcon(icon);
-    await chrome.action.setTitle({ title: active ? "Lizard Studio — a chat is active" : manifest.action.default_title });
-    appliedActivity = active;
-  }).catch((error) => console.error("[RK] activity icon", error));
+    if (appliedCount === null) {
+      // Restore the plain logo, including after upgrading from the activity dot.
+      await chrome.action.setIcon({
+        path: Object.fromEntries(Object.entries(manifest.icons).map(([size, path]) => [size, chrome.runtime.getURL(path)])),
+      });
+      await chrome.action.setBadgeBackgroundColor({ color: "#fbbf24" });
+      await chrome.action.setBadgeTextColor({ color: "#121212" });
+    }
+    const count = [...runningCounts.values()].reduce((total, value) => total + value, 0);
+    if (count === appliedCount) return;
+    await chrome.action.setBadgeText({ text: count ? (count > 999 ? "999+" : String(count)) : "" });
+    await chrome.action.setTitle({ title: count
+      ? `Lizard Studio — ${count} ${count === 1 ? "session" : "sessions"} running`
+      : manifest.action.default_title });
+    appliedCount = count;
+  }).catch((error) => console.error("[RK] session badge", error));
 }
-// Clear any icon left by a previous worker. Panels replay their state on reconnect.
+// Panels replay their counts on reconnect; clear stale state until they do.
 refreshActionActivity();
 
 function panelsForWindow(windowId) {
@@ -217,9 +193,9 @@ chrome.runtime.onConnect.addListener((port) => {
   panelPorts.set(port, null);
   port.onMessage.addListener((msg) => {
     if (msg?.type === "chatActivity") {
-      if (panelPorts.get(port) == null || typeof msg.active !== "boolean") return;
-      if (msg.active) activePanels.add(port);
-      else activePanels.delete(port);
+      if (panelPorts.get(port) == null || !Number.isSafeInteger(msg.count) || msg.count < 0) return;
+      if (msg.count) runningCounts.set(port, msg.count);
+      else runningCounts.delete(port);
       refreshActionActivity();
       return;
     }
@@ -232,7 +208,7 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onDisconnect.addListener(() => {
     const windowId = panelPorts.get(port);
     panelPorts.delete(port);
-    activePanels.delete(port);
+    runningCounts.delete(port);
     refreshActionActivity();
     if (windowId != null && !panelsForWindow(windowId).length) {
       liveSelections.delete(windowId);

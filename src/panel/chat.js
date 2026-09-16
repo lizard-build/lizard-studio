@@ -1350,14 +1350,15 @@
   }
 
   // ---- tab bar --------------------------------------------------------------
-  function hasActiveChats() {
-    return connected && [...chats.values()].some((chat) => tabDotRunning(chat) || tabDotWaiting(chat));
+  function getRunningChatCount() {
+    if (!connected) return 0;
+    return [...chats.values()].filter((chat) => tabDotRunning(chat) && !tabDotWaiting(chat)).length;
   }
-  let lastReportedActivity = false;
+  let lastReportedActivity = 0;
   function reportChatActivity() {
-    const active = hasActiveChats();
-    if (active === lastReportedActivity) return;
-    lastReportedActivity = active;
+    const count = getRunningChatCount();
+    if (count === lastReportedActivity) return;
+    lastReportedActivity = count;
     window.dispatchEvent(new Event("rk-chat-activity"));
   }
   // Per-tab activity dot, sharing the close button's slot so the tab never
@@ -11021,5 +11022,5 @@
   // Drop all debugger sessions when the panel goes away so the banner never lingers.
   window.addEventListener("beforeunload", detachAllCdp);
 
-  window.RKChat = { mount, activate, deactivate, addContext, addImage, hasActiveChats, setLiveSelection };
+  window.RKChat = { mount, activate, deactivate, addContext, addImage, getRunningChatCount, setLiveSelection };
 })();
