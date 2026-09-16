@@ -1300,8 +1300,6 @@
         tip.appendChild(row);
         return row;
       };
-      tipLine("chat-tab-tip-title", null, chat.title);
-      tipLine("chat-tab-tip-row", "folder", shortPath(chat.cwd) || "No folder selected");
       const picker = el("div", "tab-bookmark-picker");
       picker.setAttribute("role", "group");
       picker.setAttribute("aria-label", "Bookmark color");
@@ -1327,6 +1325,8 @@
         picker.appendChild(button);
       }
       tip.appendChild(picker);
+      tipLine("chat-tab-tip-title", null, chat.title);
+      tipLine("chat-tab-tip-row", "folder", shortPath(chat.cwd) || "No folder selected");
       if (chat.isRepo && chat.branch) tipLine("chat-tab-tip-row", "git-branch", chat.branch);
       // No context line here — the toolbar ring carries that reading now.
       tip.classList.add("show");
