@@ -1563,6 +1563,16 @@ button:active > .copy-swap {
     0 0 0 1px var(--border-primary),
     -20px 0 44px -10px rgba(0, 0, 0, 0.8);
 }
+/* Direct trackpad motion must not lag behind a CSS transition. The fraction
+   keeps the shell and guard aligned when the panel width changes. */
+.view.chat-menu-swiping .chat-shell {
+  transform: translateX(calc(var(--chat-menu-w) * var(--chat-menu-progress)));
+  transition: none;
+  will-change: transform;
+}
+.view.chat-menu-swiping .chat-menu-guard {
+  left: calc(var(--chat-menu-w) * var(--chat-menu-progress));
+}
 /* The strip of chat still showing — click anywhere on it to come back. It
    covers exactly what the pushed chat occupies, and lives outside the shell so
    the shell can go inert without it. */

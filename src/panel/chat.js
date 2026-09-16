@@ -1552,6 +1552,7 @@
   let chatMenuDragId = null;
   let chatMenuDragFinish = null;
   let chatMenuRename = null;
+  let chatMenuWheelReset = null;
 
   function chatMenuIsOpen() {
     return Boolean(els.chatShell) && els.chatShell.classList.contains("pushed");
@@ -1571,35 +1572,93 @@
   }
 
   function createChatMenuWheelHandler(root) {
-    const PAUSE_MS = 240, THRESHOLD = 60;
-    let lastAt = -Infinity, distance = 0, direction = 0, blocked = false, handled = false;
+    // WheelEvent has no gesture-end signal. Follow every frame, then snap
+    // after a short quiet period; momentum remains part of the same gesture.
+    const IDLE_MS = 120, AXIS_SLOP = 8;
+    let lastAt = -Infinity, pendingX = 0, pendingY = 0, blocked = false;
+    let gesture = null, idleTimer = null;
+    const menuWidth = () => els.chatMenu.querySelector(".chat-menu-panel").getBoundingClientRect().width;
+    const paint = () => {
+      root.style.setProperty("--chat-menu-progress", String(gesture.progress));
+      root.classList.add("chat-menu-swiping");
+    };
+    chatMenuWheelReset = () => {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+      if (gesture) blocked = true;
+      gesture = null;
+      root.classList.remove("chat-menu-swiping");
+      root.style.removeProperty("--chat-menu-progress");
+    };
+    const settle = () => {
+      if (!gesture) return;
+      const width = menuWidth();
+      const { progress, samples, startProgress } = gesture;
+      const duration = samples.reduce((sum, sample) => sum + sample.dt, 0);
+      const velocity = duration ? samples.reduce((sum, sample) => sum + sample.dx, 0) / duration : 0;
+      // A short flick can finish the slide. Slow motion settles at the nearest
+      // edge, and the final direction lets the user reverse or cancel a swipe.
+      const flick = Math.abs(velocity) >= 0.45 && Math.abs(progress - startProgress) * width >= 24;
+      const projected = progress + (flick && width ? velocity * 180 / width : 0);
+      const open = projected >= 0.5;
+      chatMenuWheelReset();
+      if (open) {
+        openChatMenu();
+        if (!els.chatMenu.contains(document.activeElement)) els.chatMenuSearch.focus({ preventScroll: true });
+      } else closeChatMenu();
+    };
     return (event) => {
-      if (event.timeStamp - lastAt > PAUSE_MS) {
-        distance = 0; direction = 0; blocked = false; handled = false;
+      const elapsed = event.timeStamp - lastAt;
+      if (elapsed > IDLE_MS) {
+        settle();
+        pendingX = 0; pendingY = 0; blocked = false;
       }
       lastAt = event.timeStamp;
-      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || chatMenuDragId || chatMenuWheelHasScroller(event, root)) {
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || chatMenuDragId || chatMenuRename) {
+        settle();
         blocked = true;
       }
       if (blocked) return;
-      // Shift+wheel supports mice; trackpads supply deltaX directly.
-      const x = event.deltaX || (event.shiftKey ? event.deltaY : 0);
-      const y = event.shiftKey && !event.deltaX ? 0 : event.deltaY;
-      if (!x && !y) return;
-      if (Math.abs(x) <= Math.abs(y) * 1.5) { blocked = true; return; }
-      // Consume momentum after a toggle, so a small rebound cannot toggle back.
-      if (handled) { event.preventDefault(); return; }
-      const sign = Math.sign(x);
-      if (sign !== (chatMenuIsOpen() ? 1 : -1)) { blocked = true; return; }
-      event.preventDefault();
-      if (direction !== sign) distance = 0;
-      direction = sign;
+      // Decide ownership only before the slide starts. Moving the shell can
+      // expose a search field or another element underneath the pointer.
+      if (!gesture && chatMenuWheelHasScroller(event, root)) { blocked = true; return; }
       const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? root.clientWidth : 1;
-      distance += Math.abs(x) * unit;
-      if (distance < THRESHOLD) return;
-      handled = true;
-      if (sign < 0) openChatMenu();
-      else closeChatMenu();
+      const x = (event.deltaX || (event.shiftKey ? event.deltaY : 0)) * unit;
+      const y = (event.shiftKey && !event.deltaX ? 0 : event.deltaY) * unit;
+      if (!x && !y) return;
+      let movement = x;
+      if (!gesture) {
+        pendingX += x;
+        pendingY += y;
+        if (Math.max(Math.abs(pendingX), Math.abs(pendingY)) < AXIS_SLOP) return;
+        if (Math.abs(pendingX) <= Math.abs(pendingY) * 1.15) { blocked = true; return; }
+        // Read the current visual position so a new swipe can interrupt a snap.
+        const transform = getComputedStyle(els.chatShell).transform;
+        const offset = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m41;
+        const wasHidden = els.chatMenu.classList.contains("hidden");
+        els.chatMenu.classList.remove("hidden");
+        const width = menuWidth();
+        if (wasHidden) els.chatMenu.classList.add("hidden");
+        const progress = width ? Math.max(0, Math.min(1, offset / width)) : 0;
+        if (!width || (progress <= 0 && pendingX > 0) || (progress >= 1 && pendingX < 0)) {
+          blocked = true;
+          return;
+        }
+        openChatMenu({ focusSearch: false });
+        gesture = { progress, startProgress: progress, samples: [] };
+        movement = pendingX;
+      }
+      event.preventDefault();
+      const width = menuWidth();
+      if (!width) { settle(); return; }
+      const next = Math.max(0, Math.min(1, gesture.progress - movement / width));
+      const dt = elapsed <= IDLE_MS ? Math.max(1, elapsed) : 16;
+      gesture.samples.push({ dx: (next - gesture.progress) * width, dt, at: event.timeStamp });
+      gesture.samples = gesture.samples.filter(sample => event.timeStamp - sample.at <= 80);
+      gesture.progress = next;
+      paint();
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(settle, IDLE_MS);
     };
   }
 
@@ -1607,7 +1666,8 @@
     if (chatMenuIsOpen()) closeChatMenu();
     else openChatMenu();
   }
-  function openChatMenu() {
+  function openChatMenu({ focusSearch = true } = {}) {
+    chatMenuWheelReset?.();
     if (!els.chatMenu || chatMenuIsOpen()) return;
     clearTimeout(chatMenuHideTimer);
     chatMenuHideTimer = null;
@@ -1625,9 +1685,10 @@
     document.body.classList.add("chat-menu-open"); // stands the activity pod down
     els.menuBtn.setAttribute("aria-expanded", "true");
     renderChatMenuList();
-    els.chatMenuSearch.focus();
+    if (focusSearch) els.chatMenuSearch.focus();
   }
   function closeChatMenu() {
+    chatMenuWheelReset?.();
     if (!chatMenuIsOpen()) return;
     if (chatMenuDragId) finishChatMenuDrag();
     finishChatMenuRename(true);
