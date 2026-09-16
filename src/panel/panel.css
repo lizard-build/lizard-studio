@@ -1679,9 +1679,21 @@ body.chat-menu-open .la-layer {
 .chat-menu-item + .chat-menu-item { margin-top: 2px; }
 .chat-menu-item:hover { background: rgba(255, 255, 255, 0.05); }
 .chat-menu-item.is-open { cursor: grab; }
-.chat-menu-item.is-open.dragging { opacity: 0.45; cursor: grabbing; }
-.chat-menu-item.drop-before { box-shadow: inset 0 2px var(--control-primary); }
-.chat-menu-item.drop-after { box-shadow: inset 0 -2px var(--control-primary); }
+.chat-menu-list.reordering { cursor: grabbing; user-select: none; }
+.chat-menu-list.reordering .chat-menu-item.is-open {
+  position: relative;
+  transition: transform 0.16s ease, background 0.12s;
+}
+.chat-menu-list.reordering .chat-menu-item.dragging {
+  z-index: 2;
+  cursor: grabbing;
+  background: var(--bg-tertiary, #242424);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-menu-list.reordering .chat-menu-item.is-open { transition: none; }
+}
 .chat-menu-item.is-open:focus-visible { outline: 1px solid var(--control-primary); outline-offset: -1px; }
 
 .chat-menu-row-title {
