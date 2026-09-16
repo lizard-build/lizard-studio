@@ -7,8 +7,8 @@
   let activityPort = null;
   function sendActivity() {
     if (!activityPort) return;
-    const active = !!window.RKChat?.hasActiveChats?.();
-    try { activityPort.postMessage({ type: "chatActivity", active }); } catch (_) {}
+    const count = window.RKChat?.getRunningChatCount?.() || 0;
+    try { activityPort.postMessage({ type: "chatActivity", count }); } catch (_) {}
   }
   window.addEventListener("rk-chat-activity", sendActivity);
   // Re-send state and keep the worker connected while a panel owns live chats.

@@ -4,8 +4,8 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 function worker(options = {}) {
-  const { decode, executeScript = async () => [] } = typeof options === "function" ? { executeScript: options } : options;
-  const listeners = {}, tabsSent = [], opened = [], contexts = [], icons = [], titles = [];
+  const { writeBadge, executeScript = async () => [] } = typeof options === "function" ? { executeScript: options } : options;
+  const listeners = {}, tabsSent = [], opened = [], contexts = [], icons = [], titles = [], badges = [], backgrounds = [], textColors = [];
   const event = (name) => ({ addListener(fn) { (listeners[name] ||= []).push(fn); } });
   const tabs = [{ id: 11, windowId: 101, active: true }, { id: 22, windowId: 202, active: true }];
   const chrome = {
@@ -13,18 +13,12 @@ function worker(options = {}) {
     runtime: { getManifest: () => ({ content_scripts: [{ js: [] }], icons: { 16: "icons/icon16.png", 48: "icons/icon48.png", 128: "icons/icon128.png" }, action: { default_title: "Studio idle" } }), getURL: (path) => `chrome-extension://test/${path}`, onInstalled: event("installed"), onConnect: event("connect"), onMessage: event("message"), getContexts: async () => contexts },
     tabs: { query: (query, cb) => cb(tabs.filter((tab) => Object.entries(query).every(([key, value]) => key === "currentWindow" || tab[key] === value))), sendMessage: async (id, msg) => tabsSent.push({ id, ...msg }), onRemoved: event("removed"), onUpdated: event("updated"), onActivated: event("activated") },
     sidePanel: { setPanelBehavior: async () => {}, open: async (opts) => opened.push(opts) },
-    action: { onClicked: event("clicked"), setIcon: async (icon) => icons.push(icon), setTitle: async ({ title }) => titles.push(title) }, commands: { onCommand: event("command") },
+    action: { onClicked: event("clicked"), setIcon: async (icon) => icons.push(icon), setTitle: async ({ title }) => titles.push(title), setBadgeText: async ({ text }) => { if (writeBadge) await writeBadge(text); badges.push(text); }, setBadgeBackgroundColor: async ({ color }) => backgrounds.push(color), setBadgeTextColor: async ({ color }) => textColors.push(color) }, commands: { onCommand: event("command") },
     windows: { WINDOW_ID_CURRENT: -2, WINDOW_ID_NONE: -1, onFocusChanged: event("focus") },
     declarativeNetRequest: { updateSessionRules: async () => {} },
   };
-  const canvas = class {
-    constructor(width, height) { this.size = { width, height }; }
-    getContext() { return { drawImage() {}, beginPath() {}, arc() {}, fill() {}, stroke() {}, getImageData: () => this.size }; }
-  };
   vm.runInNewContext(readFileSync(new URL("../../src/background.js", import.meta.url), "utf8"), {
-    chrome, console, setTimeout, clearTimeout, OffscreenCanvas: canvas,
-    fetch: async () => ({ blob: async () => ({}) }),
-    createImageBitmap: async () => { if (decode) await decode(); return { close() {} }; },
+    chrome, console, setTimeout, clearTimeout,
   });
   const fire = (name, ...args) => (listeners[name] || []).map((fn) => fn(...args));
   function panel(windowId, ready = true) {
@@ -33,10 +27,10 @@ function worker(options = {}) {
     fire("connect", port);
     const identify = (id = windowId) => messages.forEach((fn) => fn({ type: "panelReady", windowId: id }));
     if (ready) { identify(); received.length = 0; }
-    return { received, identify, activity: (active) => messages.forEach((fn) => fn({ type: "chatActivity", active })), close: () => disconnect.forEach((fn) => fn()) };
+    return { received, identify, activity: (count) => messages.forEach((fn) => fn({ type: "chatActivity", count })), close: () => disconnect.forEach((fn) => fn()) };
   }
   const message = (msg, windowId) => fire("message", msg, { tab: { windowId, id: 11 } }, () => {});
-  return { panel, message, fire, tabsSent, opened, tabs, contexts, icons, titles };
+  return { panel, message, fire, tabsSent, opened, tabs, contexts, icons, titles, badges, backgrounds, textColors };
 }
 
 test("attachments, selected elements, and close only reach the source window", () => {
@@ -91,65 +85,89 @@ test("the panel identifies its own window on every worker connection", () => {
 
 const flush = () => new Promise(setImmediate);
 
-test("the activity icon covers all panels and clears only after the last active panel", async () => {
+test("the yellow badge sums running sessions across panels and clears at zero", async () => {
   const w = worker(), a = w.panel(101), b = w.panel(202);
-  await flush(); assert.equal(w.icons.at(-1).path[16], "chrome-extension://test/icons/icon16.png");
-  a.activity(true); await flush();
-  assert.deepEqual(Object.keys(w.icons.at(-1).imageData), ["16", "32", "48"]);
-  assert.match(w.titles.at(-1), /a chat is active/);
-  const count = w.icons.length;
-  b.activity(true); a.activity(false); await flush(); assert.equal(w.icons.length, count);
-  b.close(); await flush(); assert.ok(w.icons.at(-1).path); assert.equal(w.titles.at(-1), "Studio idle");
+  await flush();
+  assert.equal(w.icons.at(-1).path[16], "chrome-extension://test/icons/icon16.png");
+  assert.equal(w.badges.at(-1), "");
+  assert.equal(w.backgrounds.at(-1), "#fbbf24");
+  assert.equal(w.textColors.at(-1), "#121212");
+  a.activity(2); b.activity(3); await flush();
+  assert.equal(w.badges.at(-1), "5");
+  assert.equal(w.titles.at(-1), "Lizard Studio — 5 sessions running");
+  a.activity(1); await flush(); assert.equal(w.badges.at(-1), "4");
+  b.close(); await flush(); assert.equal(w.badges.at(-1), "1");
+  assert.equal(w.titles.at(-1), "Lizard Studio — 1 session running");
+  const writes = w.badges.length;
+  a.activity(1); await flush(); assert.equal(w.badges.length, writes);
+  a.activity(0); await flush();
+  assert.equal(w.badges.at(-1), ""); assert.equal(w.titles.at(-1), "Studio idle");
+  assert.equal(w.icons.length, 1);
 });
 
-test("unregistered, disconnected, and malformed activity reports cannot light the icon", async () => {
+test("unregistered, disconnected, and invalid count reports cannot set the badge", async () => {
   const w = worker(), p = w.panel(101, false);
-  p.activity(true); await flush(); assert.ok(w.icons.at(-1).path);
-  p.identify(); p.activity("true"); await flush(); assert.ok(w.icons.at(-1).path);
-  p.close(); p.activity(true); await flush(); assert.ok(w.icons.at(-1).path);
+  p.activity(2); await flush(); assert.equal(w.badges.at(-1), "");
+  p.identify(); p.activity(2); await flush();
+  for (const invalid of [true, "3", -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    p.activity(invalid); await flush(); assert.equal(w.badges.at(-1), "2");
+  }
+  p.close(); p.activity(3); await flush(); assert.equal(w.badges.at(-1), "");
 });
 
-test("finishing while the active icon decodes cannot leave a stale dot", async () => {
+test("finishing during a delayed badge write cannot leave a stale count", async () => {
   let release;
   const pending = new Promise((resolve) => { release = resolve; });
-  const w = worker({ decode: () => pending }), p = w.panel(101);
-  await flush(); p.activity(true); await flush(); p.activity(false); release();
-  await flush(); assert.ok(w.icons.at(-1).path);
-  assert.equal(w.icons.filter((icon) => icon.imageData).length, 0);
+  const w = worker({ writeBadge: (text) => text === "2" ? pending : undefined }), p = w.panel(101);
+  await flush(); p.activity(2); await flush(); p.activity(0); release();
+  await flush(); assert.equal(w.badges.at(-1), "");
+  assert.equal(w.titles.at(-1), "Studio idle");
 });
 
-test("the panel replays current activity after reconnect and reports later changes", () => {
+test("large counts fit the badge while the tooltip keeps the exact total", async () => {
+  const w = worker(), p = w.panel(101);
+  p.activity(1200); await flush();
+  assert.equal(w.badges.at(-1), "999+");
+  assert.equal(w.titles.at(-1), "Lizard Studio — 1200 sessions running");
+});
+
+test("the panel replays its count after reconnect and reports changes above zero", () => {
   const sent = [], retries = [], intervals = [], events = {}, disconnects = [], selections = [];
-  let active = true;
+  let count = 2;
   const chrome = {
     runtime: { id: "test", connect: () => ({ postMessage: (m) => sent.push(m), onMessage: { addListener() {} }, onDisconnect: { addListener: (fn) => disconnects.push(fn) } }) },
     windows: { getCurrent: (cb) => cb({ id: 101 }) },
   };
   vm.runInNewContext(readFileSync(new URL("../../src/panel/panel.js", import.meta.url), "utf8"), {
     chrome, document: { getElementById: () => null },
-    window: { RKChat: { hasActiveChats: () => active, setLiveSelection: (selection) => selections.push(selection) }, addEventListener: (name, fn) => { events[name] = fn; } },
+    window: { RKChat: { getRunningChatCount: () => count, setLiveSelection: (selection) => selections.push(selection) }, addEventListener: (name, fn) => { events[name] = fn; } },
     setTimeout: (fn) => retries.push(fn), setInterval: (fn) => intervals.push(fn),
   });
-  assert.equal(sent.at(-1).active, true);
-  active = false; events["rk-chat-activity"](); assert.equal(sent.at(-1).active, false);
-  disconnects[0](); assert.deepEqual(selections, [null]); const count = sent.length; active = true; intervals[0](); assert.equal(sent.length, count);
-  retries[0](); assert.equal(sent.at(-2).type, "panelReady"); assert.equal(sent.at(-1).active, true);
-  active = false; intervals[0](); assert.equal(sent.at(-1).active, false);
+  assert.equal(sent.at(-1).count, 2);
+  count = 3; events["rk-chat-activity"](); assert.equal(sent.at(-1).count, 3);
+  disconnects[0](); assert.deepEqual(selections, [null]);
+  const messages = sent.length; count = 1; intervals[0](); assert.equal(sent.length, messages);
+  retries[0](); assert.equal(sent.at(-2).type, "panelReady"); assert.equal(sent.at(-1).count, 1);
+  count = 0; intervals[0](); assert.equal(sent.at(-1).count, 0);
 });
 
-test("chat activity includes background and queued work but excludes idle and disconnected chats", () => {
+test("the running count follows yellow tab states, excluding waiting, idle and disconnected chats", () => {
   const source = readFileSync(new URL("../../src/panel/chat.js", import.meta.url), "utf8");
-  const functions = source.slice(source.indexOf("  function hasActiveChats()"), source.indexOf("  // Retargets the dot classes"));
+  const functions = source.slice(source.indexOf("  function getRunningChatCount()"), source.indexOf("  // Retargets the dot classes"));
   const events = [], chats = new Map([["idle", {}], ["background", { turnRunning: true }]]);
   const scope = { chats, connected: true, Event: class {}, window: { dispatchEvent: (e) => events.push(e) } };
   vm.createContext(scope); vm.runInContext(functions, scope);
+  assert.equal(scope.getRunningChatCount(), 1);
   scope.reportChatActivity(); scope.reportChatActivity(); assert.equal(events.length, 1);
-  chats.get("background").turnRunning = false; assert.equal(scope.hasActiveChats(), false);
-  chats.get("background").queue = [{}]; assert.equal(scope.hasActiveChats(), true);
-  scope.connected = false; assert.equal(scope.hasActiveChats(), false);
+  chats.set("second", { turnRunning: true, queue: [{}] });
+  assert.equal(scope.getRunningChatCount(), 2);
   scope.reportChatActivity(); assert.equal(events.length, 2);
-  scope.connected = true; chats.clear(); chats.set("waiting", { permCards: new Map([["ask", {}]]) });
-  assert.equal(scope.hasActiveChats(), true);
+  chats.get("background").permCards = new Map([["ask", {}]]);
+  assert.equal(scope.getRunningChatCount(), 1);
+  chats.delete("second"); assert.equal(scope.getRunningChatCount(), 0);
+  chats.set("queued", { queue: [{}] }); assert.equal(scope.getRunningChatCount(), 1);
+  scope.connected = false; assert.equal(scope.getRunningChatCount(), 0);
+  scope.reportChatActivity(); assert.equal(events.length, 3);
 });
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
