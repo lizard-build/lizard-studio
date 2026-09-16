@@ -10385,12 +10385,16 @@
 
     // Pull the model catalog before restoring tabs, so a tab saved on a model
     // that only exists in the remote list still resolves to its real label.
+    globalThis.RKPanelStartup?.mark("catalog-cache");
     loadModelCatalog(() => {
       // Custom models are part of the catalog for label-resolution purposes, so
       // they have to land before tabs are restored too.
+      globalThis.RKPanelStartup?.mark("custom-models-cache");
       loadCustomModels(() => {
       // Restore tabs (or open a first one), then render.
+      globalThis.RKPanelStartup?.mark("saved-chats");
       loadPrefs(() => {
+        globalThis.RKPanelStartup?.mark("render-chats");
         if (!order.length) {
           const first = makeChat({ cwd: lastCwd });
           chats.set(first.id, first);

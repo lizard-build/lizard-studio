@@ -40,6 +40,11 @@
   window.RKPanelStartup = {
     mark,
     fail,
+    // Read from a same-extension diagnostic page without attaching DevTools
+    // (which changes worker lifetime). Contains no chat text or settings.
+    snapshot() {
+      return { timeOrigin: performance.timeOrigin, stage, finished, failed, timings: { ...timings } };
+    },
     ready() {
       if (finished || failed) return;
       const viewport = document.getElementById("chat-menu-viewport");
@@ -67,7 +72,10 @@
       const node = document.createElement(tag);
       if (tag === "link") { node.rel = "stylesheet"; node.href = path; }
       else { node.src = path; }
-      node.onload = resolve;
+      node.onload = () => {
+        timings[path + ":loaded"] = Math.round(performance.now());
+        resolve();
+      };
       node.onerror = () => reject(new Error("Could not load " + path));
       document.head.appendChild(node);
     });
