@@ -13,11 +13,6 @@
   window.addEventListener("rk-chat-activity", sendActivity);
   // Re-send state and keep the worker connected while a panel owns live chats.
   setInterval(sendActivity, 20000);
-  const chatEl = document.getElementById("view-chat");
-  if (chatEl && window.RKChat) {
-    window.RKChat.mount(chatEl);
-    if (window.RKChat.activate) window.RKChat.activate();
-  }
 
   // ---- service-worker bridge ------------------------------------------------
   // Keep a port open so the worker knows this panel is alive and can ask us to
@@ -64,4 +59,20 @@
     });
   }
   connectBg();
+  // Keep closing/reconnecting available even if restoring the UI fails.
+  try {
+    const chatEl = document.getElementById("view-chat");
+    if (!chatEl || !window.RKChat) throw new Error("Chat interface missing");
+    window.RKPanelStartup?.mark("restore");
+    window.RKChat.mount(chatEl, () => {
+      try {
+        if (window.RKChat.activate) window.RKChat.activate();
+        window.RKPanelStartup?.ready();
+      } catch (error) {
+        window.RKPanelStartup?.fail(error);
+      }
+    });
+  } catch (error) {
+    window.RKPanelStartup?.fail(error);
+  }
 })();
