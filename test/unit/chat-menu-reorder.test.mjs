@@ -27,7 +27,7 @@ function setup() {
   let menuRenders = 0;
   const scope = {
     order: ['a', 'b', 'c', 'd'], chats: new Map(['a','b','c','d'].map(id => [id, { id }])),
-    history: [{ id: 'old', title: 'Old chat', ts: 10 }], activeId: 'b', chatMenuDragId: null, chatMenuDragFinish: null,
+    history: [{ id: 'old', title: 'Old chat', ts: 10 }], activeId: 'b', chatMenuDragId: null, chatMenuDragFinish: null, chatMenuRename: null,
     document: eventTarget, window: eventTarget,
     requestAnimationFrame: fn => { frames.set(++nextFrame, fn); return nextFrame; }, cancelAnimationFrame: id => frames.delete(id),
     els: { chatMenuList: list }, BOOKMARK_COLORS: [],

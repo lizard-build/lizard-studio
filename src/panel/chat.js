@@ -622,7 +622,7 @@
         if (Array.isArray(p.usageLabels) && p.usageLabels.length) usageLabels = p.usageLabels;
         if (Array.isArray(p.tabs) && p.tabs.length) {
           for (const t of p.tabs) {
-            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt, draft: t.draft, bashMode: t.bashMode, bookmarkColor: t.bookmarkColor });
+            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt, draft: t.draft, bashMode: t.bashMode, bookmarkColor: t.bookmarkColor, titleEdited: t.titleEdited });
             chats.set(chat.id, chat);
     let lastScrollTop = 0;
     const earlier = () => {
@@ -654,7 +654,7 @@
       if (owner && els.input) owner.draft = els.input.value;
       const tabs = order.map((id) => {
         const c = chats.get(id);
-        return { id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: resumableSessionId(c), bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, bashMode: c.bashMode, bookmarkColor: c.bookmarkColor };
+        return { id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: resumableSessionId(c), bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, bashMode: c.bashMode, bookmarkColor: c.bookmarkColor, titleEdited: c.titleEdited };
       });
       chrome.storage.local.set({
         rkChatV2: {
@@ -892,6 +892,7 @@
     return {
       id: opts.id || newId(),
       title: opts.title || DEFAULT_TITLE,
+      titleEdited: !!opts.titleEdited,
       bookmarkColor: BOOKMARK_COLORS.some((c) => c.id === opts.bookmarkColor) ? opts.bookmarkColor : null,
       cwd: opts.cwd || null,
       harness: opts.harness || lastHarness || DEFAULT_HARNESS,
@@ -1136,7 +1137,7 @@
     // `ts` is when the conversation last moved, not when the tab was shut —
     // closing a chat shouldn't jump it to the top of the menu.
     if (!chat.empty || resumableSessionId(chat)) {
-      history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, harness: chat.harness, model: chat.model, effort: chat.effort, mode: chat.mode, sessionId: resumableSessionId(chat), ts: chat.lastActivityAt || Date.now(), bookmarkColor: chat.bookmarkColor });
+      history.unshift({ id: chat.id, title: chat.title, cwd: chat.cwd, harness: chat.harness, model: chat.model, effort: chat.effort, mode: chat.mode, sessionId: resumableSessionId(chat), ts: chat.lastActivityAt || Date.now(), bookmarkColor: chat.bookmarkColor, titleEdited: chat.titleEdited });
     }
     if (chat.started) post({ type: "close", id });
     chat.messagesEl.remove();
@@ -1550,6 +1551,7 @@
   let chatMenuHideTimer = null;
   let chatMenuDragId = null;
   let chatMenuDragFinish = null;
+  let chatMenuRename = null;
 
   function chatMenuIsOpen() {
     return Boolean(els.chatShell) && els.chatShell.classList.contains("pushed");
@@ -1628,6 +1630,7 @@
   function closeChatMenu() {
     if (!chatMenuIsOpen()) return;
     if (chatMenuDragId) finishChatMenuDrag();
+    finishChatMenuRename(true);
     els.chatShell.classList.remove("pushed");
     els.chatShell.inert = false;
     document.body.classList.remove("chat-menu-open");
@@ -1688,6 +1691,8 @@
 
   function renderChatMenuList() {
     if (!mounted || !els.chatMenuList || !chatMenuIsOpen() || chatMenuDragId) return;
+    if (chatMenuRename && chatMenuRenameTarget(chatMenuRename.entry)) return;
+    chatMenuRename = null;
     const list = els.chatMenuList;
     const scrollTop = list.scrollTop;
     historyHasMore = false;
@@ -1745,7 +1750,7 @@
     }, true);
     row.addEventListener("dragstart", (e) => e.preventDefault());
     row.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0 || e.isPrimary === false || e.pointerType === "touch" || e.target.closest("button")) return;
+      if (e.button !== 0 || e.isPrimary === false || e.pointerType === "touch" || chatMenuRename || e.target.closest("button, input")) return;
       finishChatMenuDrag(true);
       e.preventDefault();
       const list = els.chatMenuList;
@@ -1852,6 +1857,60 @@
     });
   }
 
+  function chatMenuRenameTarget(entry) {
+    return entry.open ? chats.get(entry.chat.id) : history.includes(entry.item) ? entry.item : null;
+  }
+  function renameChatMenuEntry(entry, value) {
+    const target = chatMenuRenameTarget(entry);
+    const title = value.replace(/\s+/g, " ").trim().slice(0, 200);
+    if (!target || !title || (target.title === title && target.titleEdited)) return false;
+    target.title = title;
+    target.titleEdited = true;
+    savePrefs();
+    return true;
+  }
+  function finishChatMenuRename(commit, render = true) {
+    const edit = chatMenuRename;
+    if (!edit) return;
+    chatMenuRename = null;
+    if (commit) renameChatMenuEntry(edit.entry, edit.input.value);
+    const target = chatMenuRenameTarget(edit.entry);
+    edit.input.replaceWith(el("div", "chat-menu-row-title", target?.title || edit.entry.title));
+    edit.row.classList.remove("editing");
+    edit.row.title = edit.entry.cwd ? (target?.title || edit.entry.title) + "\n" + shortPath(edit.entry.cwd) : target?.title || edit.entry.title;
+    if (render) renderTabs();
+  }
+  function beginChatMenuRename(row, entry) {
+    finishChatMenuRename(true, false);
+    const target = chatMenuRenameTarget(entry);
+    if (!target) return;
+    const input = el("input", "chat-menu-rename-input");
+    input.type = "text";
+    input.value = target.title || DEFAULT_TITLE;
+    input.maxLength = 200;
+    input.setAttribute("aria-label", "Chat name");
+    const edit = { row, entry, input };
+    chatMenuRename = edit;
+    row.classList.add("editing");
+    row.removeAttribute("title");
+    row.querySelector(".chat-menu-row-title").replaceWith(input);
+    input.addEventListener("click", (e) => e.stopPropagation());
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.isComposing || !["Enter", "Escape"].includes(e.key)) return;
+      e.preventDefault();
+      finishChatMenuRename(e.key === "Enter");
+      els.chatMenuSearch.focus();
+    });
+    input.addEventListener("blur", () => {
+      // Let another row action run before rebuilding the list beneath it.
+      setTimeout(() => { if (chatMenuRename === edit) finishChatMenuRename(true); }, 0);
+    });
+    renderTabs(); // Update a previous rename without replacing this editor.
+    input.focus();
+    input.select();
+  }
+
   function chatMenuRow(entry) {
     const chat = entry.chat;
     const waiting = chat ? tabDotWaiting(chat) : false;
@@ -1871,6 +1930,17 @@
     row.appendChild(el("div", "chat-menu-row-title", entry.title));
     row.appendChild(el("span", "chat-menu-time", entry.ts ? relTime(entry.ts) : ""));
 
+    const rename = el("button", "chat-menu-rename");
+    rename.type = "button";
+    rename.title = "Rename chat";
+    rename.setAttribute("aria-label", "Rename chat");
+    rename.innerHTML = ICON("edit", 13);
+    rename.addEventListener("click", (e) => {
+      e.stopPropagation();
+      beginChatMenuRename(row, entry);
+    });
+    row.appendChild(rename);
+
     // Same slot, two jobs: an open tab is closed (it lands back in this list a
     // row down), a closed one is forgotten for good.
     const del = el("button", "chat-menu-del");
@@ -1889,7 +1959,7 @@
     row.appendChild(del);
 
     row.addEventListener("click", () => {
-      if (chatMenuDragId) return;
+      if (chatMenuDragId || row.classList.contains("editing")) return;
       closeChatMenu();
       if (entry.open) setActive(chat.id);
       else reopenFromHistory(entry.item);
@@ -1901,7 +1971,7 @@
     history = history.filter((h) => h !== item);
     // Keep the conversation's own place in the menu — reopening a tab isn't the
     // conversation moving.
-    createChat({ title: item.title, cwd: item.cwd, harness: item.harness, model: item.model, effort: item.effort, mode: item.mode, sessionId: item.sessionId, lastActivityAt: item.ts, bookmarkColor: item.bookmarkColor });
+    createChat({ title: item.title, cwd: item.cwd, harness: item.harness, model: item.model, effort: item.effort, mode: item.mode, sessionId: item.sessionId, lastActivityAt: item.ts, bookmarkColor: item.bookmarkColor, titleEdited: item.titleEdited });
     savePrefs();
   }
 
@@ -6686,7 +6756,7 @@
     chat.streamBlocks.clear();
     chat.streamMsgId = null;
     // First message becomes the tab title.
-    if (chat.title === DEFAULT_TITLE) {
+    if (!chat.titleEdited && chat.title === DEFAULT_TITLE) {
       chat.title = (text || "New chat").replace(/\s+/g, " ").slice(0, 40);
       renderTabs();
     }
