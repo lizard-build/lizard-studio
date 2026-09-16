@@ -1732,9 +1732,11 @@ body.chat-menu-open .la-layer {
   color: var(--text-tertiary);
   white-space: nowrap;
 }
-.chat-menu-item:hover .chat-menu-time { display: none; }
+.chat-menu-item:hover .chat-menu-time,
+.chat-menu-item:focus-within .chat-menu-time { display: none; }
 /* The hover action sits in the slot the time just left, so nothing shifts —
    its box matches the title's line so the row can't change height either. */
+.chat-menu-rename,
 .chat-menu-del {
   display: none;
   align-items: center;
@@ -1751,7 +1753,29 @@ body.chat-menu-open .la-layer {
   cursor: pointer;
   transition: color 0.12s, background 0.12s;
 }
-.chat-menu-item:hover .chat-menu-del { display: inline-flex; }
+.chat-menu-item:hover .chat-menu-del,
+.chat-menu-item:focus-within .chat-menu-del,
+.chat-menu-item:hover .chat-menu-rename,
+.chat-menu-item:focus-within .chat-menu-rename { display: inline-flex; }
+.chat-menu-rename:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.08); }
+.chat-menu-item.editing { cursor: default; }
+.chat-menu-item.editing .chat-menu-rename { display: none; }
+.chat-menu-rename-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 0;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 2px;
+  outline: 1px solid var(--border-primary);
+  outline-offset: 3px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 18px;
+}
 .chat-menu-del:hover { color: var(--other-red); background: rgba(239, 68, 68, 0.12); }
 
 .chat-menu-foot {
