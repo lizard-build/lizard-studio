@@ -65,6 +65,9 @@ html,
 body {
   margin: 0;
   height: 100%;
+  width: 100%;
+  overflow: clip;
+  overscroll-behavior: none;
   background: var(--bg-primary);
   color: var(--text-primary);
   font-family: var(--font-family);
@@ -636,12 +639,8 @@ button:active > .copy-swap {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  /* The chat slides a screen's width to the right to uncover the chat menu, so
-     it hangs well past this edge. Clip it off here, or the panel picks up a
-     horizontal scrollbar and the whole thing can be dragged sideways.
-     `clip`, not `hidden`: hidden would still leave this a scroll container —
-     no scrollbar, but a sideways flick or a scroll-into-view could shove the
-     panel off its axis with no way back. Clip has no scroll position to shove. */
+  /* The inner menu viewport owns horizontal scrolling. Keep modal overlays
+     outside it and clip content at the panel edge. */
   overflow: clip;
 }
 
@@ -1450,6 +1449,7 @@ button:active > .copy-swap {
   background: linear-gradient(to top, var(--bg-primary), transparent);
 }
 .chat-messages {
+  overscroll-behavior-y: contain;
   position: absolute;
   inset: 0;
   overflow-y: auto;
@@ -1512,78 +1512,69 @@ button:active > .copy-swap {
      56px of chat visible on narrow panels and cap the menu at 400px. */
   --chat-menu-w: min(400px, 82%, calc(100% - 56px));
 }
-/* The bed the chat lies on. It carries the menu's colour across the whole
-   panel, not just the width the list occupies: the chat rounds its corners off
-   as it goes, and those cut-outs sit past the list's right edge — left unpainted
-   they'd show the near-black body through, as two notches in the wrong colour. */
-.chat-menu {
+.chat-menu-viewport {
   position: absolute;
   inset: 0;
-  z-index: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  overscroll-behavior: none;
+  overflow-anchor: none;
+  scrollbar-width: none;
+  visibility: hidden;
+}
+.chat-menu-viewport.ready { visibility: visible; }
+.chat-menu-viewport::-webkit-scrollbar { display: none; }
+.chat-menu-track {
+  position: relative;
   display: flex;
+  width: 100%;
+  height: 100%;
   background: var(--bg-secondary);
 }
+.chat-menu {
+  position: relative;
+  flex: 0 0 var(--chat-menu-w);
+  min-width: 0;
+  height: 100%;
+  scroll-snap-align: start;
+  background: var(--bg-secondary);
+}
+.chat-menu[aria-hidden="true"] { visibility: hidden; }
 .chat-menu-panel {
   position: relative;
   display: flex;
   flex-direction: column;
-  width: var(--chat-menu-w);
+  width: 100%;
   height: 100%;
 }
-/* The chat, as one travelling object. Opaque and above the menu, so with the
-   menu shut there's nothing to see through. */
 .chat-shell {
   position: relative;
   z-index: 1;
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
+  flex: 0 0 100%;
+  min-width: 0;
   min-height: 0;
+  height: 100%;
+  scroll-snap-align: start;
   background: var(--bg-primary);
-  /* Most of the distance up front, then a coast — the menus' curve, over a
-     longer beat because the whole chat is what's moving. The edge below comes
-     up on the same beat, so it's drawn on by the move rather than switched on. */
-  transition: transform 0.34s cubic-bezier(0.33, 1, 0.68, 1),
-    border-radius 0.34s cubic-bezier(0.33, 1, 0.68, 1),
-    box-shadow 0.34s cubic-bezier(0.33, 1, 0.68, 1);
 }
 .chat-shell.pushed {
-  transform: translateX(var(--chat-menu-w));
-  /* Off its edge the chat reads as a card laid over the menu. Both surfaces
-     are near-black, so the split has to be drawn: a hairline round the corners
-     to say where one ends, and a shadow falling from it onto the menu to say
-     which is on top. The hairline is the panel's standard stroke — the same
-     one every card and menu here is cut with.
-
-     Clipping is only on while it's out there: a fixed-position child (the tab
-     tooltip's kin) must not be trapped by it the rest of the time. */
   border-radius: 16px 0 0 16px;
   overflow: hidden;
   box-shadow:
     0 0 0 1px var(--border-primary),
     -20px 0 44px -10px rgba(0, 0, 0, 0.8);
 }
-/* During direct manipulation only transforms change, once per frame. The
-   guard moves with the shell without changing layout or inherited styles. */
-.view.chat-menu-swiping .chat-shell {
-  transition: none;
-  will-change: transform;
-}
-.view.chat-menu-swiping .chat-menu-guard {
-  left: 0;
-  right: auto;
-  width: 100%;
-  will-change: transform;
-}
-/* The strip of chat still showing — click anywhere on it to come back. It
-   covers exactly what the pushed chat occupies, and lives outside the shell so
-   the shell can go inert without it. */
+/* This guard shares the chat's native scroll position. It stays outside the
+   inert shell so clicking the visible strip can always close the menu. */
 .chat-menu-guard {
   position: absolute;
   top: 0;
   bottom: 0;
   left: var(--chat-menu-w);
-  right: 0;
+  width: 100%;
   z-index: 2;
   appearance: none;
   border: none;
@@ -1645,6 +1636,7 @@ body.chat-menu-open .la-layer {
 }
 .chat-menu-search-input::placeholder { color: var(--text-tertiary); }
 .chat-menu-list {
+  overscroll-behavior-y: contain;
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;

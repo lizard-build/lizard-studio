@@ -1538,248 +1538,166 @@
   // Open tabs appear under Active in tab order. Closed conversations follow
   // in date groups, newest first. Settings sits at the bottom.
   //
-  // The menu never covers the chat. It lies under it, full height, and opening
-  // it slides the chat off to the right to uncover it — the chat stays on
-  // screen as a strip you can click to come back. So "open" is a state of the
-  // chat (.chat-shell.pushed), not of the menu; the menu is only unhidden so
-  // there's something to uncover, and hidden again once the chat is back.
-  const MENU_SLIDE_MS = 340; // keep in step with .chat-shell's transition
+  // Two native scroll-snap positions: the menu at scrollLeft 0, and the
+  // chat at the menu's width. Chrome owns trackpad motion and release timing.
   const HISTORY_PAGE_SIZE = 40;
   let historyVisibleLimit = HISTORY_PAGE_SIZE;
   let historyHasMore = false;
   let historyLoadFrame = null;
-  let chatMenuHideTimer = null;
   let chatMenuDragId = null;
   let chatMenuDragFinish = null;
   let chatMenuRename = null;
-  let chatMenuWheelReset = null;
+  let chatMenuScroller = null;
   let chatMenuMoving = false;
   let chatMenuRenderPending = false;
 
   function chatMenuIsOpen() {
     return Boolean(els.chatShell) && els.chatShell.classList.contains("pushed");
   }
-  function chatMenuWheelHasScroller(event, root) {
-    // Keep the whole gesture with a nested scroller, even at either edge.
-    // composedPath also reaches scrollers inside an open shadow root.
-    for (const node of event.composedPath()) {
-      if (node.nodeType === 1) {
-        if (node.matches("input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='slider']")) return true;
-        if (node.scrollWidth > node.clientWidth + 1 && /^(auto|scroll|overlay)$/.test(getComputedStyle(node).overflowX)) return true;
-        if (node.matches("dialog, [role='dialog']") && !els.chatMenu.contains(node)) return true;
-      }
-      if (node === root) break;
-    }
-    return false;
-  }
 
-  function createChatMenuWheelHandler(root) {
-    // Chrome exposes wheel deltas, but no trackpad touch-end or momentum phase.
-    // Keep input ownership for the burst and infer release from idle or decay.
-    const IDLE_MS = 80, BURST_MS = 180, AXIS_SLOP = 4;
-    let lastAt = -Infinity, pendingX = 0, pendingY = 0, blocked = false, owned = false;
-    let motion = null, frame = null, idleTimer = null;
-    let direction = 0, tailSpeed = 0, reverseDistance = 0;
-    const widthOfMenu = () => els.chatMenu.querySelector(".chat-menu-panel").getBoundingClientRect().width;
-    const scheduleFrame = () => { if (frame === null) frame = requestAnimationFrame(paint); };
-    const clearMotion = () => {
-      clearTimeout(idleTimer);
-      idleTimer = null;
-      if (frame !== null) cancelAnimationFrame(frame);
-      frame = null;
-      motion = null;
-      chatMenuMoving = false;
-      root.classList.remove("chat-menu-swiping");
-      els.chatShell.style.removeProperty("transform");
-      els.chatMenuGuard.style.removeProperty("transform");
-      if (chatMenuRenderPending) {
-        chatMenuRenderPending = false;
-        requestAnimationFrame(() => renderChatMenuList());
-      }
-    };
-    chatMenuWheelReset = clearMotion;
-    const finish = (open) => {
-      clearMotion();
-      if (open) {
-        openChatMenu();
-        if (!els.chatMenu.contains(document.activeElement)) els.chatMenuSearch.focus({ preventScroll: true });
-      } else closeChatMenu({ animate: false });
-    };
-    function paint(now) {
-      frame = null;
-      if (!motion) return;
-      if (motion.complete !== undefined) { finish(motion.complete); return; }
-      if (motion.spring) {
-        const spring = motion.spring;
-        const t = Math.max(0, (now - spring.at) / 1000), omega = 28;
-        const displacement = spring.x - spring.target;
-        const decay = Math.exp(-omega * t);
-        const b = spring.velocity + omega * displacement;
-        motion.x = Math.max(0, Math.min(motion.width, spring.target + (displacement + b * t) * decay));
-        if (Math.abs(motion.x - spring.target) < 0.3 || t > 0.45) {
-          // Paint the endpoint before removing inline transforms next frame.
-          // Otherwise CSS would replay its button transition from the old frame.
-          motion.x = spring.target;
-          motion.complete = spring.target > 0;
-        }
-      }
-      // Only these two composited transforms change during a frame. No layout
-      // reads, inherited CSS variables, or list rebuilds in the input loop.
-      const transform = `translate3d(${motion.x}px, 0, 0)`;
-      els.chatShell.style.transform = transform;
-      els.chatMenuGuard.style.transform = transform;
-      if (motion.spring) scheduleFrame();
-    }
-    const settle = () => {
-      clearTimeout(idleTimer);
-      idleTimer = null;
-      if (!motion || motion.spring) return;
-      const distance = motion.x - motion.startX;
-      const projected = motion.x + (Math.abs(distance) >= 24 ? motion.velocity * 160 : 0);
-      const open = projected >= motion.width / 2;
-      if (reducedMotion.matches) { finish(open); return; }
-      motion.spring = { x: motion.x, target: open ? motion.width : 0,
-        velocity: Math.max(-2400, Math.min(2400, motion.velocity * 1000)), at: performance.now() };
-      scheduleFrame();
-    };
-    const begin = (movement) => {
-      // Read geometry only once when taking ownership, or on an actual resize.
-      const transform = getComputedStyle(els.chatShell).transform;
-      const x = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m41;
-      const wasHidden = els.chatMenu.classList.contains("hidden");
-      els.chatMenu.classList.remove("hidden");
-      const width = widthOfMenu();
-      if (wasHidden) els.chatMenu.classList.add("hidden");
-      if (!width || (x <= 0 && movement > 0) || (x >= width && movement < 0)) return false;
-      openChatMenu({ focusSearch: false });
-      motion = { x, startX: x, width, velocity: 0, samples: [], peak: 0, decays: 0, spring: null };
-      chatMenuMoving = true;
-      root.classList.add("chat-menu-swiping");
-      // Freeze a button-triggered transition at its visible position before
-      // the next animation frame, so grabbing an unfinished slide never jumps.
-      els.chatShell.style.transform = `translate3d(${x}px, 0, 0)`;
-      els.chatMenuGuard.style.transform = `translate3d(${x}px, 0, 0)`;
-      return true;
-    };
-    new ResizeObserver(() => {
-      if (!motion) return;
-      const width = widthOfMenu();
-      if (!width) { finish(chatMenuIsOpen()); return; }
-      const ratio = width / motion.width;
-      motion.x *= ratio;
-      motion.startX *= ratio;
-      if (motion.spring) {
-        motion.spring.x *= ratio;
-        motion.spring.target *= ratio;
-        motion.spring.velocity *= ratio;
-      }
-      motion.width = width;
-      scheduleFrame();
-    }).observe(root);
-    return (event) => {
-      const elapsed = event.timeStamp - lastAt;
-      const fresh = elapsed > BURST_MS;
-      if (fresh) {
-        pendingX = 0; pendingY = 0; blocked = false; owned = false; reverseDistance = 0;
-      }
-      lastAt = event.timeStamp;
-      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || chatMenuDragId || chatMenuRename) {
-        settle();
-        blocked = true;
-      }
-      if (blocked) return;
-      if (!owned && chatMenuWheelHasScroller(event, root)) { blocked = true; return; }
-      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? root.clientWidth : 1;
-      const x = (event.deltaX || (event.shiftKey ? event.deltaY : 0)) * unit;
-      const y = (event.shiftKey && !event.deltaX ? 0 : event.deltaY) * unit;
-      if (!x && !y) return;
-      let movement = x;
-      if (!owned) {
-        pendingX += x; pendingY += y;
-        if (Math.max(Math.abs(pendingX), Math.abs(pendingY)) < AXIS_SLOP) return;
-        if (Math.abs(pendingX) <= Math.abs(pendingY) * 1.15) { blocked = true; return; }
-        movement = pendingX;
-        if (!begin(movement)) { pendingX = 0; pendingY = 0; return; }
-        owned = true;
-      } else if (!motion || motion.spring) {
-        // Consume a decaying tail without restarting the snap. A deliberate
-        // reversal or renewed acceleration grabs the panel at its current spot.
-        reverseDistance = Math.sign(x) !== direction ? reverseDistance + x : 0;
-        const resumed = elapsed > IDLE_MS || Math.abs(reverseDistance) >= 6 || Math.abs(x) > Math.max(4, tailSpeed * 1.4);
-        tailSpeed = Math.abs(x);
-        event.preventDefault();
-        if (!resumed) return;
-        movement = Math.abs(reverseDistance) >= 6 ? reverseDistance : x;
-        if (!begin(movement)) return;
-        reverseDistance = 0;
-      }
-      event.preventDefault();
-      const dt = elapsed <= BURST_MS ? Math.max(1, elapsed) : 16;
-      const sign = Math.sign(movement), speed = Math.abs(movement);
-      if (sign && sign !== direction) { motion.samples = []; motion.peak = 0; motion.decays = 0; }
-      motion.decays = speed < tailSpeed * 0.98 ? motion.decays + 1 : 0;
-      motion.peak = Math.max(motion.peak, speed);
-      direction = sign || direction;
-      tailSpeed = speed;
-      const next = Math.max(0, Math.min(motion.width, motion.x - movement));
-      motion.samples.push({ dx: next - motion.x, dt, at: event.timeStamp });
-      motion.samples = motion.samples.filter(sample => event.timeStamp - sample.at <= 60);
-      const duration = motion.samples.reduce((sum, sample) => sum + sample.dt, 0);
-      motion.velocity = motion.samples.reduce((sum, sample) => sum + sample.dx, 0) / duration;
-      motion.x = next;
-      scheduleFrame();
-      clearTimeout(idleTimer);
-      // Do not wait through the long macOS momentum tail at an endpoint or
-      // after several shrinking deltas. The spring carries the release speed.
-      if (next === 0 || next === motion.width ||
-          (motion.decays >= 3 && speed < motion.peak * 0.5 && Math.abs(next - motion.startX) >= 24)) settle();
-      else idleTimer = setTimeout(settle, IDLE_MS);
-    };
-  }
-
-  function toggleChatMenu() {
-    if (chatMenuIsOpen()) closeChatMenu();
-    else openChatMenu();
-  }
-  function openChatMenu({ focusSearch = true } = {}) {
-    chatMenuWheelReset?.();
-    if (!els.chatMenu || chatMenuIsOpen()) return;
-    clearTimeout(chatMenuHideTimer);
-    chatMenuHideTimer = null;
-    // A picker left open would ride along with the chat and get clipped by the
-    // corners it rounds off as it goes.
+  function prepareChatMenu() {
+    if (chatMenuIsOpen()) return;
     for (const menu of menuRegistry) closeMenu(menu);
     menuFilter = "";
     historyVisibleLimit = HISTORY_PAGE_SIZE;
     els.chatMenuList.scrollTop = 0;
     els.chatMenuSearch.value = "";
-    els.chatMenu.classList.remove("hidden");
+    els.chatMenu.inert = false;
+    els.chatMenu.setAttribute("aria-hidden", "false");
     els.chatMenuGuard.classList.remove("hidden");
     els.chatShell.classList.add("pushed");
-    els.chatShell.inert = true; // nothing behind the strip is reachable
-    document.body.classList.add("chat-menu-open"); // stands the activity pod down
+    els.chatShell.inert = true;
+    document.body.classList.add("chat-menu-open");
     els.menuBtn.setAttribute("aria-expanded", "true");
     renderChatMenuList();
-    if (focusSearch) els.chatMenuSearch.focus();
+  }
+
+  function finishChatMenuScroll(open, focusSearch = false) {
+    chatMenuMoving = false;
+    if (open) {
+      prepareChatMenu();
+      if (focusSearch && !els.chatMenu.contains(document.activeElement)) els.chatMenuSearch.focus({ preventScroll: true });
+    } else {
+      els.chatShell.classList.remove("pushed");
+      els.chatShell.inert = false;
+      if (els.chatMenu.contains(document.activeElement)) els.menuBtn.focus({ preventScroll: true });
+      els.chatMenu.inert = true;
+      els.chatMenu.setAttribute("aria-hidden", "true");
+      els.chatMenuGuard.classList.add("hidden");
+      document.body.classList.remove("chat-menu-open");
+      els.menuBtn.setAttribute("aria-expanded", "false");
+    }
+    if (chatMenuRenderPending) {
+      chatMenuRenderPending = false;
+      renderChatMenuList();
+    }
+  }
+
+  function setupChatMenuScroller(viewport) {
+    let width = 0, ready = false, settledOpen = false, targetOpen = null, focusSearch = false;
+    let lastWheelAt = -Infinity, owner = null;
+    const atClosed = () => viewport.scrollLeft >= width - 0.5;
+    const settle = (event) => {
+      if (event && event.target !== viewport) return;
+      // scrollend runs after the native gesture AND snap complete. Never infer
+      // finger release from a timer, velocity, or a run of shrinking deltas.
+      if (!ready) return;
+      settledOpen = viewport.scrollLeft < width / 2;
+      targetOpen = null;
+      finishChatMenuScroll(settledOpen, focusSearch);
+      focusSearch = false;
+    };
+    viewport.addEventListener("scroll", () => {
+      if (!ready) return;
+      if (!atClosed()) prepareChatMenu();
+      chatMenuMoving = true;
+    }, { passive: true });
+    viewport.addEventListener("scrollend", settle);
+    const resize = () => {
+      const nextWidth = els.chatMenu.getBoundingClientRect().width;
+      if (!nextWidth) return;
+      width = nextWidth;
+      if (!ready) {
+        viewport.scrollTo({ left: width, behavior: "instant" });
+        ready = true;
+        viewport.classList.add("ready");
+        finishChatMenuScroll(false);
+      } else if (!chatMenuMoving) {
+        viewport.scrollTo({ left: settledOpen ? 0 : width, behavior: "instant" });
+      }
+      // During a gesture CSS Scroll Snap preserves its target after a resize.
+      // Do not write scrollLeft while the user is controlling it.
+    };
+    resize();
+    new ResizeObserver(resize).observe(viewport);
+    return {
+      get targetOpen() { return targetOpen; },
+      to(open, { animate = true, focus = false } = {}) {
+        if (open) prepareChatMenu();
+        targetOpen = open;
+        focusSearch = focus;
+        const left = open ? 0 : width;
+        if (Math.abs(viewport.scrollLeft - left) <= 0.5) {
+          // Cancel an in-flight native smooth scroll, even at its first frame.
+          viewport.scrollTo({ left, behavior: "instant" });
+          settle();
+          return;
+        }
+        chatMenuMoving = true;
+        viewport.scrollTo({ left, behavior: animate && !reducedMotion.matches ? "smooth" : "instant" });
+      },
+      onWheel(event) {
+        if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+        const x = event.deltaX || (event.shiftKey ? event.deltaY : 0);
+        if (!x || (!event.shiftKey && Math.abs(event.deltaY) > Math.abs(x))) return;
+        const fresh = event.timeStamp - lastWheelAt > 180;
+        lastWheelAt = event.timeStamp;
+        const path = event.composedPath();
+        if (fresh) {
+          owner = null;
+          for (const node of path) {
+            if (node === viewport) break;
+            if (node.nodeType !== 1) continue;
+            if (node.matches("input, textarea, select, [contenteditable]:not([contenteditable='false']), [role='slider'], dialog, [role='dialog']:not(.chat-menu-panel)")) {
+              owner = { node, control: true };
+              break;
+            }
+            if (node.scrollWidth > node.clientWidth + 1 && /^(auto|scroll|overlay)$/.test(getComputedStyle(node).overflowX)) {
+              // Keep the browser's own scrolling inside this element at both
+              // edges, rather than handing the rest of the gesture to the menu.
+              node.style.overscrollBehaviorX = "contain";
+              owner = { node, control: false };
+              break;
+            }
+          }
+        }
+        if (owner) {
+          const node = owner.node;
+          const canScroll = !owner.control && path.includes(node) &&
+            (x < 0 ? node.scrollLeft > 0 : node.scrollLeft < node.scrollWidth - node.clientWidth - 1);
+          if (!canScroll) event.preventDefault();
+          return;
+        }
+        if (chatMenuDragId || chatMenuRename) { event.preventDefault(); return; }
+        // The default browser action owns all position, momentum and snapping.
+        // No scrollTo, transforms, animation frames, or release timers here.
+        targetOpen = null;
+        focusSearch = false;
+      },
+    };
+  }
+
+  function toggleChatMenu() {
+    if (chatMenuScroller?.targetOpen ?? chatMenuIsOpen()) closeChatMenu();
+    else openChatMenu();
+  }
+  function openChatMenu({ focusSearch = true } = {}) {
+    chatMenuScroller?.to(true, { focus: focusSearch });
   }
   function closeChatMenu({ animate = true } = {}) {
-    chatMenuWheelReset?.();
-    if (!chatMenuIsOpen()) return;
     if (chatMenuDragId) finishChatMenuDrag();
     finishChatMenuRename(true);
-    els.chatShell.classList.remove("pushed");
-    els.chatShell.inert = false;
-    document.body.classList.remove("chat-menu-open");
-    els.chatMenuGuard.classList.add("hidden");
-    els.menuBtn.setAttribute("aria-expanded", "false");
-    // Hand focus back only if it's still in the menu — a click elsewhere has
-    // already moved it, and yanking it back would fight the user.
-    if (els.chatMenu.contains(document.activeElement)) els.menuBtn.focus();
-    // Keep the menu around until the chat has finished sliding back over it.
-    chatMenuHideTimer = setTimeout(() => {
-      chatMenuHideTimer = null;
-      els.chatMenu.classList.add("hidden");
-    }, !animate || reducedMotion.matches ? 0 : MENU_SLIDE_MS);
+    chatMenuScroller?.to(false, { animate });
   }
 
   // Open tabs come first, followed by history. Open ones carry their
@@ -10069,6 +9987,7 @@
     els.newChat = root.querySelector("#new-chat-btn");
     els.menuBtn = root.querySelector("#menu-btn");
     els.chatShell = root.querySelector("#chat-shell");
+    els.chatMenuViewport = root.querySelector("#chat-menu-viewport");
     els.chatMenu = root.querySelector("#chat-menu");
     els.chatMenuGuard = root.querySelector("#chat-menu-guard");
     els.chatMenuSearch = root.querySelector("#chat-menu-search");
@@ -10234,7 +10153,8 @@
       toggleChatMenu();
     });
     els.chatMenuGuard.addEventListener("click", closeChatMenu);
-    root.addEventListener("wheel", createChatMenuWheelHandler(root), { passive: false });
+    chatMenuScroller = setupChatMenuScroller(els.chatMenuViewport);
+    els.chatMenuViewport.addEventListener("wheel", chatMenuScroller.onWheel, { passive: false });
     els.chatMenuList.addEventListener("scroll", scheduleChatHistoryLoad, { passive: true });
     window.addEventListener("resize", scheduleChatHistoryLoad);
     els.chatMenuSearch.addEventListener("input", () => {
@@ -10498,9 +10418,11 @@
   }
 
   const TEMPLATE = `
-    <!-- Open chats under Active, then history by date. The chat slides right
-         to show the menu (see .chat-shell.pushed). -->
-    <div id="chat-menu" class="chat-menu hidden">
+    <!-- Native horizontal scroll-snap: menu first, then the full-width chat.
+         Modal overlays below stay outside the scrolling viewport. -->
+    <div id="chat-menu-viewport" class="chat-menu-viewport" tabindex="-1">
+    <div class="chat-menu-track">
+    <div id="chat-menu" class="chat-menu" inert aria-hidden="true">
       <div class="chat-menu-panel" role="dialog" aria-modal="true" aria-label="Chats">
         <!-- No close button: the chat itself is the way back — click the strip
              of it still showing, or press Escape. -->
@@ -10676,6 +10598,8 @@
          sits outside the shell so the shell can go inert while the menu is
          open without taking this with it. -->
     <button id="chat-menu-guard" class="chat-menu-guard hidden" aria-label="Back to the chat"></button>
+    </div>
+    </div>
 
     <!-- Settings: a modal overlaying the whole panel, with a tab strip up top.
          Hidden until the Settings row at the foot of the chat menu opens it. -->
