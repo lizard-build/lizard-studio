@@ -1549,6 +1549,7 @@
   let historyLoadFrame = null;
   let chatMenuHideTimer = null;
   let chatMenuDragId = null;
+  let chatMenuDragFinish = null;
 
   function chatMenuIsOpen() {
     return Boolean(els.chatShell) && els.chatShell.classList.contains("pushed");
@@ -1714,7 +1715,7 @@
     if (historyHasMore) scheduleChatHistoryLoad();
   }
 
-  function moveOpenChat(id, targetId, after) {
+  function moveOpenChat(id, targetId, after, persist = true) {
     if (id === targetId || !chats.has(id) || !chats.has(targetId)) return false;
     const from = order.indexOf(id);
     const target = order.indexOf(targetId);
@@ -1724,54 +1725,121 @@
     order.splice(from, 1);
     order.splice(to, 0, id);
     renderTabs();
-    savePrefs();
+    if (persist) savePrefs();
     return true;
   }
 
-  function clearChatMenuDropTarget() {
-    for (const row of els.chatMenuList.querySelectorAll(".drop-before, .drop-after")) {
-      row.classList.remove("drop-before", "drop-after");
-    }
-  }
-  function finishChatMenuDrag() {
-    chatMenuDragId = null;
-    clearChatMenuDropTarget();
-    renderChatMenuList();
+  function finishChatMenuDrag(cancel = false) {
+    chatMenuDragFinish?.(cancel);
   }
   function makeChatMenuRowReorderable(row, id) {
     row.dataset.chatId = id;
-    row.draggable = true;
     row.tabIndex = 0;
     row.setAttribute("aria-keyshortcuts", "Alt+ArrowUp Alt+ArrowDown");
-    let canDrag = true;
-    row.addEventListener("mousedown", (e) => { canDrag = !e.target.closest("button"); });
-    row.addEventListener("dragstart", (e) => {
-      if (!canDrag || !chats.has(id)) { e.preventDefault(); return; }
-      chatMenuDragId = id;
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData("text/plain", id);
-      row.classList.add("dragging");
-    });
-    row.addEventListener("dragover", (e) => {
-      if (!chatMenuDragId || chatMenuDragId === id || !chats.has(id)) return;
+    let suppressClick = false;
+    row.addEventListener("click", (e) => {
+      if (!suppressClick) return;
+      suppressClick = false;
       e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-      clearChatMenuDropTarget();
-      const rect = row.getBoundingClientRect();
-      row.classList.add(e.clientY < rect.top + rect.height / 2 ? "drop-before" : "drop-after");
-    });
-    row.addEventListener("dragleave", (e) => {
-      if (!row.contains(e.relatedTarget)) row.classList.remove("drop-before", "drop-after");
-    });
-    row.addEventListener("drop", (e) => {
-      if (!chatMenuDragId) return;
+      e.stopImmediatePropagation();
+    }, true);
+    row.addEventListener("dragstart", (e) => e.preventDefault());
+    row.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || e.isPrimary === false || e.pointerType === "touch" || e.target.closest("button")) return;
+      finishChatMenuDrag(true);
       e.preventDefault();
-      const rect = row.getBoundingClientRect();
-      moveOpenChat(chatMenuDragId, id, e.clientY >= rect.top + rect.height / 2);
-      finishChatMenuDrag();
-    });
-    row.addEventListener("dragend", () => {
-      if (chatMenuDragId) finishChatMenuDrag();
+      const list = els.chatMenuList;
+      const nodes = [...list.querySelectorAll(".chat-menu-item.is-open")];
+      const listRect = list.getBoundingClientRect();
+      const startScroll = list.scrollTop, startY = e.clientY;
+      const originalOrder = order.slice();
+      const slots = nodes.map((node) => {
+        const rect = node.getBoundingClientRect();
+        return { id: node.dataset.chatId, top: rect.top - listRect.top + startScroll, height: rect.height, node };
+      });
+      const source = slots.find((slot) => slot.id === id);
+      if (!source) return;
+      const others = slots.filter((slot) => slot.id !== id);
+      let dragging = false, reordered = false, clientY = startY, frame = null, lastFrame = 0;
+      const finish = (cancel = false) => {
+        document.removeEventListener("pointermove", onMove);
+        document.removeEventListener("pointerup", onUp);
+        document.removeEventListener("pointercancel", onCancel);
+        document.removeEventListener("keydown", onKey, true);
+        window.removeEventListener("blur", onCancel);
+        if (frame !== null) cancelAnimationFrame(frame);
+        chatMenuDragFinish = null;
+        chatMenuDragId = null;
+        if (row.hasPointerCapture(e.pointerId)) row.releasePointerCapture(e.pointerId);
+        if (!dragging) return;
+        suppressClick = true;
+        if (cancel) {
+          // Restore surviving chats without dropping chats added during the drag.
+          const restored = originalOrder.filter((key) => order.includes(key));
+          order = order.map((key) => originalOrder.includes(key) ? restored.shift() : key);
+        }
+        list.classList.remove("reordering");
+        for (const slot of slots) slot.node.style.transform = "";
+        row.classList.remove("dragging");
+        renderTabs();
+        if (reordered) savePrefs();
+      };
+      const update = () => {
+        const top = Math.max(slots[0].top, Math.min(
+          slots.at(-1).top + slots.at(-1).height - source.height,
+          source.top + clientY - startY + list.scrollTop - startScroll));
+        const center = top + source.height / 2;
+        const index = others.filter((slot) => slot.top + slot.height / 2 < center).length;
+        const target = index ? others[index - 1] : others[0];
+        if (target && moveOpenChat(id, target.id, index > 0, false)) reordered = true;
+        const visible = order.filter((key) => slots.some((slot) => slot.id === key));
+        for (const slot of slots) {
+          const next = slots[visible.indexOf(slot.id)];
+          if (next) slot.node.style.transform = `translateY(${(slot.id === id ? top : next.top) - slot.top}px)`;
+        }
+      };
+      const autoScroll = (time) => {
+        if (!chats.has(id) || !row.isConnected) { finish(true); return; }
+        const rect = list.getBoundingClientRect();
+        const speed = clientY < rect.top + 32 ? -Math.min(12, (rect.top + 32 - clientY) / 3)
+          : clientY > rect.bottom - 32 ? Math.min(12, (clientY - rect.bottom + 32) / 3) : 0;
+        const step = lastFrame ? Math.min(2, (time - lastFrame) / 16) : 1;
+        lastFrame = time;
+        const maxScroll = Math.max(0, slots.at(-1).top + slots.at(-1).height - list.clientHeight);
+        if (speed) list.scrollTop = Math.max(0, Math.min(maxScroll, list.scrollTop + speed * step));
+        update();
+        frame = requestAnimationFrame(autoScroll);
+      };
+      const onMove = (ev) => {
+        if (ev.pointerId !== e.pointerId) return;
+        clientY = ev.clientY;
+        if (!dragging) {
+          if (Math.abs(clientY - startY) < 4) return;
+          if (!row.isConnected || !chats.has(id)) { finish(true); return; }
+          dragging = true;
+          chatMenuDragId = id;
+          list.classList.add("reordering");
+          row.classList.add("dragging");
+          row.setPointerCapture(e.pointerId);
+          frame = requestAnimationFrame(autoScroll);
+        }
+        ev.preventDefault();
+        update();
+      };
+      const onUp = (ev) => { if (ev.pointerId === e.pointerId) finish(); };
+      const onCancel = () => finish(true);
+      const onKey = (ev) => {
+        if (ev.key !== "Escape") return;
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
+        finish(true);
+      };
+      chatMenuDragFinish = finish;
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", onUp);
+      document.addEventListener("pointercancel", onCancel);
+      document.addEventListener("keydown", onKey, true);
+      window.addEventListener("blur", onCancel);
     });
     row.addEventListener("keydown", (e) => {
       if (e.target !== row || !e.altKey || !["ArrowUp", "ArrowDown"].includes(e.key)) return;
