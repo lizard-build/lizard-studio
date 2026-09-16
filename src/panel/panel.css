@@ -1676,6 +1676,7 @@ body.chat-menu-open .la-layer {
   cursor: pointer;
   transition: background 0.12s;
 }
+.chat-menu-item + .chat-menu-item { margin-top: 2px; }
 .chat-menu-item:hover { background: rgba(255, 255, 255, 0.05); }
 .chat-menu-item.is-open { cursor: grab; }
 .chat-menu-item.is-open.dragging { opacity: 0.45; cursor: grabbing; }
