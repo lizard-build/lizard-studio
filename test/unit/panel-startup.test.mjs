@@ -25,7 +25,7 @@ function setup({ complete = false, viewportReady = true } = {}) {
       addEventListener: (type, fn) => events.set(type, fn),
       removeEventListener: type => events.delete(type),
     },
-    performance: { now: () => 25 }, console: { warn: (...args) => reports.push(args) },
+    performance: { now: () => 25, timeOrigin: 1000 }, console: { warn: (...args) => reports.push(args) },
     location: { reload: () => reloads++ },
     setTimeout: (fn, delay) => { timers.set(++nextTimer, { fn, delay }); return nextTimer; },
     clearTimeout: id => timers.delete(id),
@@ -101,6 +101,24 @@ test('a panel mounted at zero width waits for layout without requiring animation
   assert.equal(p.events.has('error'), false);
   assert.equal(p.events.has('unhandledrejection'), false);
   p.tick(10000); assert.equal(p.nodes.get('panel-startup-retry').hidden, true);
+});
+
+test('startup diagnostics distinguish pending resources from restoration and return a copy', async () => {
+  const p = setup({ complete: true }); p.tick(0);
+  assert.equal(p.api.snapshot().stage, 'styles');
+  assert.equal(p.api.snapshot().timings['panel.css:loaded'], undefined);
+  await p.loaded();
+  assert.equal(p.api.snapshot().timings['panel.css:loaded'], 25);
+  p.api.mark('saved-chats');
+  const snapshot = p.api.snapshot();
+  assert.equal(snapshot.stage, 'saved-chats');
+  assert.equal(snapshot.timeOrigin, 1000);
+  assert.equal(snapshot.finished, false);
+  snapshot.timings.document = -1;
+  assert.equal(p.api.snapshot().timings.document, 25);
+  p.api.ready();
+  assert.equal(p.api.snapshot().stage, 'ready');
+  assert.equal(p.api.snapshot().finished, true);
 });
 
 function shell({ broken = false } = {}) {

@@ -66,6 +66,7 @@
     window.RKPanelStartup?.mark("restore");
     window.RKChat.mount(chatEl, () => {
       try {
+        window.RKPanelStartup?.mark("restored");
         if (window.RKChat.activate) window.RKChat.activate();
         window.RKPanelStartup?.ready();
       } catch (error) {
