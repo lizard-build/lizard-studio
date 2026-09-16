@@ -1548,6 +1548,7 @@
   let historyHasMore = false;
   let historyLoadFrame = null;
   let chatMenuHideTimer = null;
+  let chatMenuDragId = null;
 
   function chatMenuIsOpen() {
     return Boolean(els.chatShell) && els.chatShell.classList.contains("pushed");
@@ -1578,6 +1579,7 @@
   }
   function closeChatMenu() {
     if (!chatMenuIsOpen()) return;
+    if (chatMenuDragId) finishChatMenuDrag();
     els.chatShell.classList.remove("pushed");
     els.chatShell.inert = false;
     document.body.classList.remove("chat-menu-open");
@@ -1637,7 +1639,7 @@
   }
 
   function renderChatMenuList() {
-    if (!mounted || !els.chatMenuList || !chatMenuIsOpen()) return;
+    if (!mounted || !els.chatMenuList || !chatMenuIsOpen() || chatMenuDragId) return;
     const list = els.chatMenuList;
     const scrollTop = list.scrollTop;
     historyHasMore = false;
@@ -1665,6 +1667,76 @@
     if (historyHasMore) scheduleChatHistoryLoad();
   }
 
+  function moveOpenChat(id, targetId, after) {
+    if (id === targetId || !chats.has(id) || !chats.has(targetId)) return false;
+    const from = order.indexOf(id);
+    const target = order.indexOf(targetId);
+    if (from < 0 || target < 0) return false;
+    const to = target + (after ? 1 : 0) - (from < target ? 1 : 0);
+    if (from === to) return false;
+    order.splice(from, 1);
+    order.splice(to, 0, id);
+    renderTabs();
+    savePrefs();
+    return true;
+  }
+
+  function clearChatMenuDropTarget() {
+    for (const row of els.chatMenuList.querySelectorAll(".drop-before, .drop-after")) {
+      row.classList.remove("drop-before", "drop-after");
+    }
+  }
+  function finishChatMenuDrag() {
+    chatMenuDragId = null;
+    clearChatMenuDropTarget();
+    renderChatMenuList();
+  }
+  function makeChatMenuRowReorderable(row, id) {
+    row.dataset.chatId = id;
+    row.draggable = true;
+    row.tabIndex = 0;
+    row.setAttribute("aria-keyshortcuts", "Alt+ArrowUp Alt+ArrowDown");
+    let canDrag = true;
+    row.addEventListener("mousedown", (e) => { canDrag = !e.target.closest("button"); });
+    row.addEventListener("dragstart", (e) => {
+      if (!canDrag || !chats.has(id)) { e.preventDefault(); return; }
+      chatMenuDragId = id;
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", id);
+      row.classList.add("dragging");
+    });
+    row.addEventListener("dragover", (e) => {
+      if (!chatMenuDragId || chatMenuDragId === id || !chats.has(id)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      clearChatMenuDropTarget();
+      const rect = row.getBoundingClientRect();
+      row.classList.add(e.clientY < rect.top + rect.height / 2 ? "drop-before" : "drop-after");
+    });
+    row.addEventListener("dragleave", (e) => {
+      if (!row.contains(e.relatedTarget)) row.classList.remove("drop-before", "drop-after");
+    });
+    row.addEventListener("drop", (e) => {
+      if (!chatMenuDragId) return;
+      e.preventDefault();
+      const rect = row.getBoundingClientRect();
+      moveOpenChat(chatMenuDragId, id, e.clientY >= rect.top + rect.height / 2);
+      finishChatMenuDrag();
+    });
+    row.addEventListener("dragend", () => {
+      if (chatMenuDragId) finishChatMenuDrag();
+    });
+    row.addEventListener("keydown", (e) => {
+      if (e.target !== row || !e.altKey || !["ArrowUp", "ArrowDown"].includes(e.key)) return;
+      e.preventDefault();
+      const after = e.key === "ArrowDown";
+      const targetId = order[order.indexOf(id) + (after ? 1 : -1)];
+      if (moveOpenChat(id, targetId, after)) {
+        [...els.chatMenuList.children].find((node) => node.dataset.chatId === id)?.focus();
+      }
+    });
+  }
+
   function chatMenuRow(entry) {
     const chat = entry.chat;
     const waiting = chat ? tabDotWaiting(chat) : false;
@@ -1672,6 +1744,7 @@
     const dotCls = waiting ? " dot-wait" : running ? " dot-run" : chat && chat.unseen ? " dot-unseen" : "";
     const active = chat && chat.id === activeId;
     const row = el("div", "chat-menu-item" + (entry.open ? " is-open" : "") + (active ? " active" : "") + dotCls);
+    if (entry.open) makeChatMenuRowReorderable(row, chat.id);
     row.title = entry.cwd ? entry.title + "\n" + shortPath(entry.cwd) : entry.title;
 
     // The dot leads the row, so the column of them reads down the list at a
@@ -1701,6 +1774,7 @@
     row.appendChild(del);
 
     row.addEventListener("click", () => {
+      if (chatMenuDragId) return;
       closeChatMenu();
       if (entry.open) setActive(chat.id);
       else reopenFromHistory(entry.item);
