@@ -1553,6 +1553,8 @@
   let chatMenuDragFinish = null;
   let chatMenuRename = null;
   let chatMenuWheelReset = null;
+  let chatMenuMoving = false;
+  let chatMenuRenderPending = false;
 
   function chatMenuIsOpen() {
     return Boolean(els.chatShell) && els.chatShell.classList.contains("pushed");
@@ -1572,46 +1574,113 @@
   }
 
   function createChatMenuWheelHandler(root) {
-    // WheelEvent has no gesture-end signal. Follow every frame, then snap
-    // after a short quiet period; momentum remains part of the same gesture.
-    const IDLE_MS = 120, AXIS_SLOP = 8;
-    let lastAt = -Infinity, pendingX = 0, pendingY = 0, blocked = false;
-    let gesture = null, idleTimer = null;
-    const menuWidth = () => els.chatMenu.querySelector(".chat-menu-panel").getBoundingClientRect().width;
-    const paint = () => {
-      root.style.setProperty("--chat-menu-progress", String(gesture.progress));
-      root.classList.add("chat-menu-swiping");
-    };
-    chatMenuWheelReset = () => {
+    // Chrome exposes wheel deltas, but no trackpad touch-end or momentum phase.
+    // Keep input ownership for the burst and infer release from idle or decay.
+    const IDLE_MS = 80, BURST_MS = 180, AXIS_SLOP = 4;
+    let lastAt = -Infinity, pendingX = 0, pendingY = 0, blocked = false, owned = false;
+    let motion = null, frame = null, idleTimer = null;
+    let direction = 0, tailSpeed = 0, reverseDistance = 0;
+    const widthOfMenu = () => els.chatMenu.querySelector(".chat-menu-panel").getBoundingClientRect().width;
+    const scheduleFrame = () => { if (frame === null) frame = requestAnimationFrame(paint); };
+    const clearMotion = () => {
       clearTimeout(idleTimer);
       idleTimer = null;
-      if (gesture) blocked = true;
-      gesture = null;
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = null;
+      motion = null;
+      chatMenuMoving = false;
       root.classList.remove("chat-menu-swiping");
-      root.style.removeProperty("--chat-menu-progress");
+      els.chatShell.style.removeProperty("transform");
+      els.chatMenuGuard.style.removeProperty("transform");
+      if (chatMenuRenderPending) {
+        chatMenuRenderPending = false;
+        requestAnimationFrame(() => renderChatMenuList());
+      }
     };
-    const settle = () => {
-      if (!gesture) return;
-      const width = menuWidth();
-      const { progress, samples, startProgress } = gesture;
-      const duration = samples.reduce((sum, sample) => sum + sample.dt, 0);
-      const velocity = duration ? samples.reduce((sum, sample) => sum + sample.dx, 0) / duration : 0;
-      // A short flick can finish the slide. Slow motion settles at the nearest
-      // edge, and the final direction lets the user reverse or cancel a swipe.
-      const flick = Math.abs(velocity) >= 0.45 && Math.abs(progress - startProgress) * width >= 24;
-      const projected = progress + (flick && width ? velocity * 180 / width : 0);
-      const open = projected >= 0.5;
-      chatMenuWheelReset();
+    chatMenuWheelReset = clearMotion;
+    const finish = (open) => {
+      clearMotion();
       if (open) {
         openChatMenu();
         if (!els.chatMenu.contains(document.activeElement)) els.chatMenuSearch.focus({ preventScroll: true });
-      } else closeChatMenu();
+      } else closeChatMenu({ animate: false });
     };
+    function paint(now) {
+      frame = null;
+      if (!motion) return;
+      if (motion.complete !== undefined) { finish(motion.complete); return; }
+      if (motion.spring) {
+        const spring = motion.spring;
+        const t = Math.max(0, (now - spring.at) / 1000), omega = 28;
+        const displacement = spring.x - spring.target;
+        const decay = Math.exp(-omega * t);
+        const b = spring.velocity + omega * displacement;
+        motion.x = Math.max(0, Math.min(motion.width, spring.target + (displacement + b * t) * decay));
+        if (Math.abs(motion.x - spring.target) < 0.3 || t > 0.45) {
+          // Paint the endpoint before removing inline transforms next frame.
+          // Otherwise CSS would replay its button transition from the old frame.
+          motion.x = spring.target;
+          motion.complete = spring.target > 0;
+        }
+      }
+      // Only these two composited transforms change during a frame. No layout
+      // reads, inherited CSS variables, or list rebuilds in the input loop.
+      const transform = `translate3d(${motion.x}px, 0, 0)`;
+      els.chatShell.style.transform = transform;
+      els.chatMenuGuard.style.transform = transform;
+      if (motion.spring) scheduleFrame();
+    }
+    const settle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+      if (!motion || motion.spring) return;
+      const distance = motion.x - motion.startX;
+      const projected = motion.x + (Math.abs(distance) >= 24 ? motion.velocity * 160 : 0);
+      const open = projected >= motion.width / 2;
+      if (reducedMotion.matches) { finish(open); return; }
+      motion.spring = { x: motion.x, target: open ? motion.width : 0,
+        velocity: Math.max(-2400, Math.min(2400, motion.velocity * 1000)), at: performance.now() };
+      scheduleFrame();
+    };
+    const begin = (movement) => {
+      // Read geometry only once when taking ownership, or on an actual resize.
+      const transform = getComputedStyle(els.chatShell).transform;
+      const x = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m41;
+      const wasHidden = els.chatMenu.classList.contains("hidden");
+      els.chatMenu.classList.remove("hidden");
+      const width = widthOfMenu();
+      if (wasHidden) els.chatMenu.classList.add("hidden");
+      if (!width || (x <= 0 && movement > 0) || (x >= width && movement < 0)) return false;
+      openChatMenu({ focusSearch: false });
+      motion = { x, startX: x, width, velocity: 0, samples: [], peak: 0, decays: 0, spring: null };
+      chatMenuMoving = true;
+      root.classList.add("chat-menu-swiping");
+      // Freeze a button-triggered transition at its visible position before
+      // the next animation frame, so grabbing an unfinished slide never jumps.
+      els.chatShell.style.transform = `translate3d(${x}px, 0, 0)`;
+      els.chatMenuGuard.style.transform = `translate3d(${x}px, 0, 0)`;
+      return true;
+    };
+    new ResizeObserver(() => {
+      if (!motion) return;
+      const width = widthOfMenu();
+      if (!width) { finish(chatMenuIsOpen()); return; }
+      const ratio = width / motion.width;
+      motion.x *= ratio;
+      motion.startX *= ratio;
+      if (motion.spring) {
+        motion.spring.x *= ratio;
+        motion.spring.target *= ratio;
+        motion.spring.velocity *= ratio;
+      }
+      motion.width = width;
+      scheduleFrame();
+    }).observe(root);
     return (event) => {
       const elapsed = event.timeStamp - lastAt;
-      if (elapsed > IDLE_MS) {
-        settle();
-        pendingX = 0; pendingY = 0; blocked = false;
+      const fresh = elapsed > BURST_MS;
+      if (fresh) {
+        pendingX = 0; pendingY = 0; blocked = false; owned = false; reverseDistance = 0;
       }
       lastAt = event.timeStamp;
       if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || chatMenuDragId || chatMenuRename) {
@@ -1619,46 +1688,52 @@
         blocked = true;
       }
       if (blocked) return;
-      // Decide ownership only before the slide starts. Moving the shell can
-      // expose a search field or another element underneath the pointer.
-      if (!gesture && chatMenuWheelHasScroller(event, root)) { blocked = true; return; }
+      if (!owned && chatMenuWheelHasScroller(event, root)) { blocked = true; return; }
       const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? root.clientWidth : 1;
       const x = (event.deltaX || (event.shiftKey ? event.deltaY : 0)) * unit;
       const y = (event.shiftKey && !event.deltaX ? 0 : event.deltaY) * unit;
       if (!x && !y) return;
       let movement = x;
-      if (!gesture) {
-        pendingX += x;
-        pendingY += y;
+      if (!owned) {
+        pendingX += x; pendingY += y;
         if (Math.max(Math.abs(pendingX), Math.abs(pendingY)) < AXIS_SLOP) return;
         if (Math.abs(pendingX) <= Math.abs(pendingY) * 1.15) { blocked = true; return; }
-        // Read the current visual position so a new swipe can interrupt a snap.
-        const transform = getComputedStyle(els.chatShell).transform;
-        const offset = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m41;
-        const wasHidden = els.chatMenu.classList.contains("hidden");
-        els.chatMenu.classList.remove("hidden");
-        const width = menuWidth();
-        if (wasHidden) els.chatMenu.classList.add("hidden");
-        const progress = width ? Math.max(0, Math.min(1, offset / width)) : 0;
-        if (!width || (progress <= 0 && pendingX > 0) || (progress >= 1 && pendingX < 0)) {
-          blocked = true;
-          return;
-        }
-        openChatMenu({ focusSearch: false });
-        gesture = { progress, startProgress: progress, samples: [] };
         movement = pendingX;
+        if (!begin(movement)) { pendingX = 0; pendingY = 0; return; }
+        owned = true;
+      } else if (!motion || motion.spring) {
+        // Consume a decaying tail without restarting the snap. A deliberate
+        // reversal or renewed acceleration grabs the panel at its current spot.
+        reverseDistance = Math.sign(x) !== direction ? reverseDistance + x : 0;
+        const resumed = elapsed > IDLE_MS || Math.abs(reverseDistance) >= 6 || Math.abs(x) > Math.max(4, tailSpeed * 1.4);
+        tailSpeed = Math.abs(x);
+        event.preventDefault();
+        if (!resumed) return;
+        movement = Math.abs(reverseDistance) >= 6 ? reverseDistance : x;
+        if (!begin(movement)) return;
+        reverseDistance = 0;
       }
       event.preventDefault();
-      const width = menuWidth();
-      if (!width) { settle(); return; }
-      const next = Math.max(0, Math.min(1, gesture.progress - movement / width));
-      const dt = elapsed <= IDLE_MS ? Math.max(1, elapsed) : 16;
-      gesture.samples.push({ dx: (next - gesture.progress) * width, dt, at: event.timeStamp });
-      gesture.samples = gesture.samples.filter(sample => event.timeStamp - sample.at <= 80);
-      gesture.progress = next;
-      paint();
+      const dt = elapsed <= BURST_MS ? Math.max(1, elapsed) : 16;
+      const sign = Math.sign(movement), speed = Math.abs(movement);
+      if (sign && sign !== direction) { motion.samples = []; motion.peak = 0; motion.decays = 0; }
+      motion.decays = speed < tailSpeed * 0.98 ? motion.decays + 1 : 0;
+      motion.peak = Math.max(motion.peak, speed);
+      direction = sign || direction;
+      tailSpeed = speed;
+      const next = Math.max(0, Math.min(motion.width, motion.x - movement));
+      motion.samples.push({ dx: next - motion.x, dt, at: event.timeStamp });
+      motion.samples = motion.samples.filter(sample => event.timeStamp - sample.at <= 60);
+      const duration = motion.samples.reduce((sum, sample) => sum + sample.dt, 0);
+      motion.velocity = motion.samples.reduce((sum, sample) => sum + sample.dx, 0) / duration;
+      motion.x = next;
+      scheduleFrame();
       clearTimeout(idleTimer);
-      idleTimer = setTimeout(settle, IDLE_MS);
+      // Do not wait through the long macOS momentum tail at an endpoint or
+      // after several shrinking deltas. The spring carries the release speed.
+      if (next === 0 || next === motion.width ||
+          (motion.decays >= 3 && speed < motion.peak * 0.5 && Math.abs(next - motion.startX) >= 24)) settle();
+      else idleTimer = setTimeout(settle, IDLE_MS);
     };
   }
 
@@ -1687,7 +1762,7 @@
     renderChatMenuList();
     if (focusSearch) els.chatMenuSearch.focus();
   }
-  function closeChatMenu() {
+  function closeChatMenu({ animate = true } = {}) {
     chatMenuWheelReset?.();
     if (!chatMenuIsOpen()) return;
     if (chatMenuDragId) finishChatMenuDrag();
@@ -1704,7 +1779,7 @@
     chatMenuHideTimer = setTimeout(() => {
       chatMenuHideTimer = null;
       els.chatMenu.classList.add("hidden");
-    }, reducedMotion.matches ? 0 : MENU_SLIDE_MS);
+    }, !animate || reducedMotion.matches ? 0 : MENU_SLIDE_MS);
   }
 
   // Open tabs come first, followed by history. Open ones carry their
@@ -1752,6 +1827,7 @@
 
   function renderChatMenuList() {
     if (!mounted || !els.chatMenuList || !chatMenuIsOpen() || chatMenuDragId) return;
+    if (chatMenuMoving) { chatMenuRenderPending = true; return; }
     if (chatMenuRename && chatMenuRenameTarget(chatMenuRename.entry)) return;
     chatMenuRename = null;
     const list = els.chatMenuList;
