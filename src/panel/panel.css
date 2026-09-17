@@ -4602,3 +4602,25 @@ button.model-item:focus-visible, button.mode-item:focus-visible, button.branch-i
   outline: 2px solid currentColor; outline-offset: -2px;
 }
 .login-device-code { font: 600 20px monospace; letter-spacing: 0.12em; user-select: all; margin: 12px 0; }
+
+/* Sent ChatGPT messages can restart their turn, including loaded history. */
+.sent-edit {
+  align-self: flex-end;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 6px;
+  padding: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  opacity: 0;
+}
+.msg-user:hover .sent-edit, .msg-user:focus-within .sent-edit { opacity: 1; }
+.sent-edit:hover, .sent-edit:focus-visible { color: var(--text-primary); background: var(--control-secondary); }
+.msg-edit-note { margin-top: 10px; color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
+.msg-edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.msg-edit-actions button { border: 1px solid var(--border-primary); border-radius: 6px; padding: 5px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+.msg-edit-cancel { background: transparent; color: var(--text-primary); }
+.msg-edit-save { background: var(--text-primary); color: var(--bg-primary); }
+.msg-edit-actions button:disabled { opacity: .5; cursor: default; }
+@media (hover: none) { .sent-edit { opacity: 1; } }

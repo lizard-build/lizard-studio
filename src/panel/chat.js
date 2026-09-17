@@ -2117,15 +2117,133 @@
   // synthetic "/login" one) pass no opts and stay plain.
   function userBubble(chat, text, attachments, opts) {
     const row = el("div", "msg msg-user");
-    const bubble = buildBubble(text, attachments, opts && opts.contexts);
+    const bubble = buildBubble(text || (opts?.hasAttachments && !attachments?.length ? "_(attached file)_" : ""), attachments, opts && opts.contexts);
     row.appendChild(bubble);
     if (opts && opts.real && !chat.historyPage) {
       const turnIndex = ++chat.turnIndexCounter;
       row.dataset.turnIndex = String(turnIndex);
       if (chat.harness !== "codex") wireEditableBubble(chat, bubble, turnIndex, text, attachments);
     }
+    if (opts?.real && chat.harness === "codex") {
+      row.dataset.messageId = opts.messageId || "";
+      row.codexEdit = { text, attachments, hasAttachments: opts.hasAttachments || !!attachments?.length, contexts: opts.contexts, turnId: opts.turnId, itemId: opts.itemId };
+      if (opts.turnId) wireCodexEdit(chat.historyOwner || chat, row);
+    }
     append(chat, row);
     return row;
+  }
+
+  function wireCodexEdit(chat, row) {
+    if (row.codexEditWired || !row.codexEdit?.turnId) return;
+    row.codexEditWired = true;
+    const button = el("button", "sent-edit");
+    button.type = "button";
+    button.title = "Edit message";
+    button.setAttribute("aria-label", "Edit message");
+    button.innerHTML = ICON("edit", 13);
+    button.addEventListener("click", () => beginCodexEdit(chat, row));
+    row.appendChild(button);
+    const bubble = row.querySelector(".bubble");
+    bubble.classList.add("editable");
+    bubble.addEventListener("click", (event) => {
+      if (event.target.closest("a, button, textarea") || String(window.getSelection() || "")) return;
+      beginCodexEdit(chat, row);
+    });
+  }
+
+  function acceptCodexPrompt(chat, msg) {
+    const row = [...chat.messagesEl.children].find((node) => node.dataset.messageId === msg.messageId);
+    if (!row?.codexEdit) return;
+    row.codexEdit.turnId = msg.turnId;
+    wireCodexEdit(chat, row);
+  }
+
+  function beginCodexEdit(chat, row) {
+    const bubble = row.querySelector(".bubble");
+    if (chat.rewindPending || bubble.classList.contains("editing")) return;
+    const edit = row.codexEdit;
+    if (!edit?.turnId) return;
+    const md = bubble.querySelector(".md");
+    const input = el("textarea", "msg-edit");
+    input.setAttribute("aria-label", "Edit message");
+    input.value = edit.text;
+    if (md) md.replaceWith(input); else bubble.appendChild(input);
+    bubble.classList.add("editing");
+    const note = el("div", "msg-edit-note", "Sending restarts the chat from here. Later messages are removed. File changes stay.");
+    const actions = el("div", "msg-edit-actions");
+    const cancel = el("button", "msg-edit-cancel", "Cancel");
+    const save = el("button", "msg-edit-save", "Save & send");
+    cancel.type = save.type = "button";
+    actions.append(cancel, save);
+    bubble.append(note, actions);
+    const resize = () => { input.style.height = "auto"; input.style.height = input.scrollHeight + "px"; };
+    input.addEventListener("input", resize);
+    const setPending = (pending) => {
+      input.disabled = cancel.disabled = save.disabled = pending;
+      save.textContent = pending ? "Restarting…" : "Save & send";
+    };
+    const revert = () => {
+      if (input.disabled) return;
+      input.replaceWith(R.markdown(edit.text));
+      note.remove(); actions.remove(); bubble.classList.remove("editing");
+    };
+    const submit = () => {
+      if (chat.rewindPending || input.disabled) return;
+      if (!input.value.trim() && !edit.hasAttachments) return;
+      const requestId = newId();
+      const pending = { requestId, row, text: input.value, edit, setPending };
+      chat.rewindPending = pending;
+      setPending(true);
+      if (!post({ type: "rewind", id: chat.id, requestId, turnId: edit.turnId, itemId: edit.itemId, text: input.value })) {
+        finishCodexEdit(chat, { requestId, ok: false, running: chat.turnRunning, error: "Host disconnected. Your edit was not sent." });
+      }
+    };
+    cancel.addEventListener("click", revert);
+    save.addEventListener("click", submit);
+    input.addEventListener("keydown", (event) => {
+      if (event.isComposing) return;
+      if (event.key === "Escape") { event.preventDefault(); revert(); }
+      if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); }
+    });
+    resize(); input.focus(); input.setSelectionRange(input.value.length, input.value.length);
+  }
+
+  function finishCodexEdit(chat, msg) {
+    const pending = chat.rewindPending;
+    if (!pending || pending.requestId !== msg.requestId) return;
+    chat.rewindPending = null;
+    if (!msg.ok) {
+      pending.setPending(false);
+      systemNote(chat, msg.error || "Couldn't edit this message. Try again.", "warn");
+      if (!msg.running && chat.turnRunning) {
+        // Keep queued prompts in place while the user corrects or retries an edit.
+        chat.rewindPending = pending;
+        endTurn(chat, null);
+        chat.rewindPending = null;
+      }
+      return;
+    }
+    if (chat.historyRequest) {
+      clearTimeout(chat.historyRequest.timer);
+      chat.historyRequest = null;
+    }
+    chat.historyError = false;
+    if (chat.historyCursor) {
+      // The old cursor may name a removed turn. Anchor it to retained history.
+      const rows = [...chat.messagesEl.children];
+      const earlier = rows.slice(0, rows.indexOf(pending.row)).find((row) => row.codexEdit?.turnId);
+      chat.historyCursor = earlier ? { kind: "legacy", before: earlier.codexEdit.turnId }
+        : msg.previousTurnId ? { kind: "legacy", through: msg.previousTurnId } : null;
+    }
+    historyNav(chat);
+    // Keep queued prompts, but remove their rows while the transcript is cut.
+    for (const entry of chat.queue || []) entry.el?.remove();
+    resendEdited(chat, pending.row.dataset.turnIndex, pending.text, pending.edit.attachments, pending);
+    for (const entry of chat.queue || []) entry.el = renderQueuedBubble(chat, entry);
+    chat.lastSentPrompt = { text: pending.text, attachments: (pending.edit.attachments || []).slice() };
+    chat.codexHasSubmittedTurn = true;
+    chat.ctxBase = 0; chat.ctxTokens = 0;
+    touchChat(chat); savePrefs();
   }
 
   // Click the message text to edit it in place. Committing (Enter) rewinds
@@ -2196,18 +2314,18 @@
   // sent right after would race that gap. So the host does the whole thing —
   // truncate, resume, write the edited prompt to the new process — as one
   // atomic step (see rewindSession in claude-host.mjs).
-  function resendEdited(chat, turnIndex, newText, attachments) {
-    if (chat.harness === "codex") return;
+  function resendEdited(chat, turnIndex, newText, attachments, confirmed) {
+    if (chat.harness === "codex" && !confirmed) return;
     const rows = Array.from(chat.messagesEl.children);
-    const startIdx = rows.findIndex((r) => r.dataset && r.dataset.turnIndex === String(turnIndex));
+    const startIdx = confirmed ? rows.indexOf(confirmed.row) : rows.findIndex((r) => r.dataset && r.dataset.turnIndex === String(turnIndex));
     if (startIdx === -1) return;
     const images = (attachments || []).map((a) => ({ mediaType: a.mediaType, data: (a.dataUrl.split(",")[1] || "") }));
-    if (!post({ type: "rewind", id: chat.id, turnIndex, text: newText, images })) {
+    if (!confirmed && !post({ type: "rewind", id: chat.id, turnIndex, text: newText, images })) {
       systemNote(chat, "Host disconnected — couldn't rewind. Nothing was changed.", "warn");
       return;
     }
     for (let i = rows.length - 1; i >= startIdx; i--) rows[i].remove();
-    chat.turnIndexCounter = turnIndex - 1;
+    if (!confirmed) chat.turnIndexCounter = turnIndex - 1;
     chat.currentAssistantId = null;
     chat.currentAssistantBody = null;
     // Kill any typewriter loops first — a live one would re-append the row
@@ -2230,7 +2348,7 @@
         chat.emittedToolIds.delete(toolUseId);
       }
     }
-    userBubble(chat, newText, attachments, { real: true });
+    userBubble(chat, newText, attachments, { real: true, messageId: confirmed?.requestId, contexts: confirmed?.edit.contexts, hasAttachments: confirmed?.edit.hasAttachments });
     chat.turnRunning = true;
     chat.unseen = false;
     updateTabDots();
@@ -5115,7 +5233,7 @@
     // A model/mode/effort switch made mid-turn was deferred so it wouldn't
     // hard-kill the reply that was still streaming — apply it now that the
     // turn is actually done, before anything queued goes out under it.
-    if (chat.restartPending) restartSessionNow(chat);
+    if (chat.restartPending && !chat.rewindPending) restartSessionNow(chat);
     // The turn may have edited files — refresh the uncommitted-changes badge.
     // It may also have switched or created a branch, so re-ask for that too:
     // the git bar always names the current branch on its left.
@@ -5381,6 +5499,8 @@
       codexUsage.fetching = false;
       for (const c of chats.values()) {
         c.started = false;
+        if (c.rewindPending) finishCodexEdit(c, { requestId: c.rewindPending.requestId, ok: false, running: c.turnRunning,
+          error: "Host disconnected while editing. Reopen the chat to check its history before trying again." });
         if (c.historyRequest) historyFailed(c, c.historyRequest);
         if (c.turnRunning) {
           systemNote(c, "Host disconnected mid-turn.", "warn");
@@ -5582,6 +5702,12 @@
           }
         }
         break;
+      case "promptAccepted":
+        if (chat) acceptCodexPrompt(chat, msg);
+        break;
+      case "rewindResult":
+        if (chat) finishCodexEdit(chat, msg);
+        break;
       case "event":
         if (chat) onClaudeEvent(chat, msg.data);
         break;
@@ -5651,6 +5777,8 @@
             if (c.harness !== msg.agent) continue;
             if (c.historyRequest) historyFailed(c, c.historyRequest);
             c.started = false;
+            if (c.rewindPending) finishCodexEdit(c, { requestId: c.rewindPending.requestId, ok: false, running: c.turnRunning,
+              error: "The ChatGPT helper stopped while editing. Reopen the chat to check its history." });
             clearPermCards(c);
             if (c.turnRunning) {
               systemNote(c, `${harnessLabel(msg.agent)} stopped.`, "warn");
@@ -5879,6 +6007,10 @@
         break;
       case "error":
         if (chat) {
+          if (chat.rewindPending) {
+            finishCodexEdit(chat, { requestId: chat.rewindPending.requestId, ok: false, running: chat.turnRunning, error: msg.message });
+            break;
+          }
           liftSuppress(chat); // a respawn error must not leave the event gate shut
           if (isAuthRevokedError(msg.message)) {
             // The exit event right behind this one would otherwise print a
@@ -6043,6 +6175,7 @@
     // reply, its counters, or its pending requests.
     const page = makeChat({ id: "history-" + chat.id, harness: chat.harness, model: chat.model, cwd: chat.cwd });
     page.historyPage = true;
+    page.historyOwner = chat;
     const seen = new Set();
     const events = msg.events.filter((event) => {
       if (!event.historyItemId) return true;
@@ -6105,6 +6238,13 @@
       if (!ev.message) continue;
       if (ev.type === "user") {
         const content = ev.message.content;
+        if (chat.harness === "codex" && ev.historyTurnId && !content?.some?.((part) => part.type === "tool_result")) {
+          const raw = typeof content === "string" ? content : (content || []).filter((part) => part.type === "text").map((part) => part.text).join("\n");
+          const text = raw.replace(CTX_MARK_RE, "").trim();
+          if (text || ev.hasAttachments) userBubble(chat, text, ev.attachments, { real: true,
+            turnId: ev.historyTurnId, itemId: ev.historyItemId, hasAttachments: ev.hasAttachments });
+          continue;
+        }
         const ts = ev.timestamp ? Date.parse(ev.timestamp) || Date.now() : Date.now();
         if (typeof content === "string") {
           // A background task / async subagent completion notice is a synthetic
@@ -6123,7 +6263,7 @@
             commandBubbleText(content) || content.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
           // Don't replay bare `/usage` command bubbles (their output is skipped
           // above, so the lone command echo would dangle).
-          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts });
+          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts, turnId: ev.historyTurnId, itemId: ev.historyItemId });
         } else if (Array.isArray(content)) {
           const texts = [];
           for (const b of content) {
@@ -6140,7 +6280,7 @@
           const joined = texts.join("\n\n");
           const stripped =
             commandBubbleText(joined) || joined.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
-          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts });
+          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts, turnId: ev.historyTurnId, itemId: ev.historyItemId });
         }
       } else if (ev.type === "assistant") {
         // Each replayed assistant message refreshes the context reading; the
@@ -6669,7 +6809,7 @@
   // Drains the next queued prompt (if any) once a turn finishes. Runs even if
   // `chat` isn't the active tab — background chats keep working while queued.
   function dispatchNextQueued(chat) {
-    if (chat.sessionFailure) return;
+    if (chat.sessionFailure || chat.rewindPending) return;
     if (!Array.isArray(chat.queue) || !chat.queue.length) return;
     // Head of the queue is open for editing — hold everything until the user
     // is done with it (or deletes it); both paths call back in here.
@@ -6690,6 +6830,13 @@
     // sessionLooksStale). Respawn it first so it re-reads the current keychain
     // credentials — resume keeps the conversation — and queue the prompt to go
     // out at the fresh process's init instead of dying with a 401.
+    if (chat.rewindPending) {
+      if (!Array.isArray(chat.queue)) chat.queue = [];
+      const entry = { text, contexts: contexts.slice(), attachments: attachments.slice(), silent };
+      chat.queue.push(entry);
+      entry.el = renderQueuedBubble(chat, entry);
+      return;
+    }
     if (sessionLooksStale(chat)) {
       chat.restartFlush = true;
       if (!Array.isArray(chat.queue)) chat.queue = [];
@@ -6762,7 +6909,8 @@
     // reached the host. Requeue the prompt (visible, cancellable) instead of
     // entering a running state whose spinner would never stop — endTurn() or
     // the reconnect's `ready` handler re-delivers it.
-    if (!post({ type: "prompt", id: chat.id, text: sentText, images })) {
+    const messageId = chat.harness === "codex" ? newId() : undefined;
+    if (!post({ type: "prompt", id: chat.id, text: sentText, images, messageId })) {
       const entry = {
         text,
         contexts: contexts.slice(),
@@ -6793,6 +6941,7 @@
     if (silent) chat.turnIndexCounter++;
     else userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments, USAGE_CMD_RE.test(text) ? null : {
       real: true,
+      messageId,
       contexts: !isCommand && hasContext ? contexts.slice() : null, // command turns don't consume chips
     });
     if (!isCommand) {

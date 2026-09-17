@@ -176,6 +176,11 @@
         activeId: "failure-a", lastHarness: "codex",
         tabs: [{ id: "failure-a", title: "New chat", harness: "codex", cwd: "/test/project", mode: "workspace" }],
       };
+      const editRegression = new URLSearchParams(location.search).get("regressions") === "edit";
+      if (editRegression) store.rkChatV2 = {
+        activeId: "edit-a", lastHarness: "codex",
+        tabs: [{ id: "edit-a", title: "Edit messages", harness: "codex", model: "test-model", cwd: "/test/project", sessionId: "thread-edit", mode: "workspace" }],
+      };
       const historyRegression = new URLSearchParams(location.search).get("regressions") === "history";
       const auditRegression = new URLSearchParams(location.search).get("regressions") === "audit";
       const codexRegression = auditRegression || new URLSearchParams(location.search).get("regressions") === "codex";
@@ -233,6 +238,15 @@
             document.body.appendChild(script);
           });
           window.__test.sessionFailureResult = await window.runSessionFailurePanelTests();
+        }
+        if (editRegression) {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement("script");
+            script.src = "edit-panel.js?t=" + stamp;
+            script.onload = resolve; script.onerror = reject;
+            document.body.appendChild(script);
+          });
+          window.__test.editResult = await window.runEditPanelTests();
         }
         if (codexRegression || historyRegression) {
           await new Promise((resolve, reject) => {
