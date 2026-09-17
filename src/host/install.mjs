@@ -158,9 +158,11 @@ function install() {
   if (parseInt(process.versions.node, 10) < 18) {
     fail(`Node 18+ required (found ${process.version}). Upgrade node and re-run.`);
   }
-  if (!CLAUDE_BIN) {
-    console.warn("warning: 'claude' not found on PATH. Install it with:  npm i -g @anthropic-ai/claude-code");
-    console.warn("         The host will still install and look in common locations at runtime.");
+  if (!CLAUDE_BIN && !CODEX_BIN) {
+    console.warn("No agent found on PATH. Install either Claude Code or Codex CLI:");
+    console.warn("  npm i -g @anthropic-ai/claude-code");
+    console.warn("  npm i -g @openai/codex");
+    console.warn("The helper will still install and check common locations when it starts.");
   }
 
   // The launcher embeds these paths inside double quotes, which covers spaces —
@@ -262,8 +264,8 @@ function install() {
   for (const loc of locations) console.log(`  installed -> ${loc}`);
   console.log();
   console.log(`  node    : ${NODE_BIN}`);
-  console.log(`  claude  : ${CLAUDE_BIN || "(not found — install @anthropic-ai/claude-code)"}`);
-  console.log(`  ChatGPT : ${CODEX_BIN || "(not found — optional)"}`);
+  console.log(`  claude  : ${CLAUDE_BIN || "(not found)"}`);
+  console.log(`  Codex CLI : ${CODEX_BIN || "(not found)"}`);
   console.log(`  ext ids : ${EXT_IDS.join(", ")}`);
   console.log(`  runtime : ${RUNTIME_DIR}  (log: ${join(RUNTIME_DIR, "host.log")})`);
   console.log();
