@@ -6,7 +6,7 @@ window.runOnboardingPanelTests = async function () {
   const scenario = new URLSearchParams(location.search).get("onboarding");
   const check = (name, ok) => { if (!ok) throw new Error(name); checks.push(name); };
   const node = (selector) => document.querySelector(selector);
-  const claude = (ok) => t.emit({ type: "ready", version: 32, ok, home: "/test" });
+  const claude = (ok) => t.emit({ type: "ready", version: 33, ok, home: "/test" });
   const codex = (ok) => t.emit({ type: "agentReady", agent: "codex", version: 6, ok });
   const hidden = () => node("#chat-onboarding").classList.contains("hidden");
   const selected = () => t.storage.rkChatV2.tabs.find((c) => c.id === t.storage.rkChatV2.activeId);
@@ -17,11 +17,25 @@ window.runOnboardingPanelTests = async function () {
     t.disconnect();
     check("connection screen names both agents", !hidden() && node("#ob-card-link").textContent.includes("Claude Code or ChatGPT"));
     check("an absent helper cannot confirm CLI installation", !node("#ob-node-claude").classList.contains("done"));
+    check("unchecked installation explains why the helper is needed", t.text("#ob-agent-status").includes("Connect the helper to check"));
+    check("both installers are offered before the helper connects", !node("#ob-install-options").classList.contains("hidden"));
+    node("#ob-install-options").open = true;
+    t.click('[data-agent="codex"]');
+    check("Codex can be selected before connecting", t.text("#ob-claude-cmd") === "npm i -g @openai/codex");
+    return { passed: checks.length, checks };
+  }
+  if (scenario === "old-helper") {
+    t.emit({ type: "ready", version: 32, ok: true, home: "/test" });
+    check("an older helper still confirms CLI installation", node("#ob-node-claude").classList.contains("done"));
+    check("an older helper does not start sessions", t.posted("start").length === 0);
+    check("an older helper gets an update request", t.posted("selfUpdate").length === 1);
+    check("known installed agents do not get installation prompts", node("#ob-install-options").classList.contains("hidden"));
     return { passed: checks.length, checks };
   }
   if (scenario === "codex-first") {
     codex(true);
     check("Codex alone cannot bypass the helper handshake", t.posted("start").length === 0);
+    check("Codex confirmation marks installation before the primary handshake", node("#ob-node-claude").classList.contains("done"));
     claude(false);
   } else if (scenario === "claude-only") {
     claude(true); codex(false);
@@ -29,7 +43,7 @@ window.runOnboardingPanelTests = async function () {
     codex(true); claude(true);
   } else {
     claude(false);
-    check("waits for the second CLI before asking to install", !hidden() && node("#ob-card-claude").classList.contains("hidden") && t.text("#ob-wait-label") === "Checking installed agents…");
+    check("waits for the second CLI before asking to install", !hidden() && !node("#ob-install-options").open && t.text("#ob-wait-label") === "Checking installed agents…");
     if (scenario === "agent-exit") {
       t.emit({ type: "agentExit", agent: "codex", code: -1 });
     } else {
@@ -37,8 +51,12 @@ window.runOnboardingPanelTests = async function () {
     }
   }
 
-  if (scenario === "neither" || scenario === "agent-exit") {
-    check("installation stays open when neither CLI is available", !hidden() && !node("#ob-card-claude").classList.contains("hidden"));
+  if (scenario === "agent-exit") {
+    check("a failed helper is not proof that its CLI is missing", !node("#ob-install-options").open && t.text("#ob-wait-label") === "Checking installed agents…");
+    codex(true);
+  }
+  if (scenario === "neither") {
+    check("installation stays open when neither CLI is available", !hidden() && node("#ob-install-options").open);
     check("missing CLI never receives a start request", t.posted("start").length === 0);
     t.click('[data-agent="codex"]');
     check("Codex has its own install command", t.text("#ob-claude-cmd") === "npm i -g @openai/codex" && node("#chat-copy-claude").dataset.cmd === "npm i -g @openai/codex");
@@ -74,7 +92,10 @@ window.runOnboardingPanelTests = async function () {
     check("another readiness reply does not start a second session", t.posted("start").length === 1);
   }
   t.disconnect();
-  check("disconnect clears stale installation checks", !node("#ob-node-claude").classList.contains("done"));
+  check("disconnect preserves confirmed CLI installation", node("#ob-node-claude").classList.contains("done"));
+  check("disconnect only asks to restore the connection", !hidden() && node("#ob-node-link").classList.contains("current") && node("#ob-install-options").classList.contains("hidden"));
+  claude(false); codex(false);
+  check("a fresh negative check replaces the earlier installation result", !node("#ob-node-claude").classList.contains("done") && node("#ob-install-options").open);
   check("panel reports no runtime errors", t.errors.length === 0);
   return { passed: checks.length, checks };
 };

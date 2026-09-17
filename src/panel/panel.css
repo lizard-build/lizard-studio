@@ -4602,3 +4602,12 @@ button.model-item:focus-visible, button.mode-item:focus-visible, button.branch-i
   outline: 2px solid currentColor; outline-offset: -2px;
 }
 .login-device-code { font: 600 20px monospace; letter-spacing: 0.12em; user-select: all; margin: 12px 0; }
+
+/* Installation can be confirmed even while the helper reconnects. */
+.onboarding-content { display: flex; flex-direction: column; align-items: center; gap: 22px; width: 100%; max-height: calc(100% - 200px); overflow-y: auto; padding: 2px; }
+.onboarding-content > * { flex-shrink: 0; }
+.ob-agent-status { margin: 0; max-width: 340px; text-align: center; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.ob-install-options { width: 100%; }
+.ob-install-options > summary { color: var(--text-secondary); font-size: 12px; line-height: 1.5; cursor: pointer; text-align: center; }
+.ob-install-options > summary:hover { color: var(--text-primary); }
+.ob-install-options[open] > summary { margin-bottom: 18px; }

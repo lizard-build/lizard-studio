@@ -83,6 +83,9 @@
   // would leave no way to find out it exists.
   const harnessReady = { claude: false, codex: false };
   const harnessChecked = { claude: false, codex: false };
+  // Installation and a live connection are separate. Keep the last confirmed
+  // installation across reconnects; a fresh panel starts with no assumptions.
+  const agentInstalled = { claude: null, codex: null };
 
   // Codex has three permission profiles where Claude has five modes. These are
   // the ids its host maps, so a remembered mode survives the round trip.
@@ -5486,6 +5489,8 @@
         hostReady = (msg.version || 0) >= EXPECTED_HOST_VERSION;
         harnessReady.claude = msg.ok === true;
         harnessChecked.claude = true;
+        agentInstalled.claude = msg.ok === true;
+        renderAgentInstallation();
         // The chip is drawn before any host has spoken, so it starts out
         // assuming nothing is installed. This is the moment that stops being
         // true — repaint it, or it sits dimmed for a working agent.
@@ -5517,6 +5522,7 @@
         } else {
           hostUpdatePending = true;
           hostUpdateStarted();
+          showOnboarding();
           post({ type: "selfUpdate" });
           hostUpdateTimer = setTimeout(() => {
             hostUpdatePending = false; // gave up — let the recheck resume
@@ -5637,6 +5643,8 @@
         if (msg.agent) {
           harnessReady[msg.agent] = !!msg.ok;
           harnessChecked[msg.agent] = true;
+          if (Object.hasOwn(agentInstalled, msg.agent)) agentInstalled[msg.agent] = msg.ok === true;
+          renderAgentInstallation();
           syncComposer();
           updateSetup();
           refreshSettingsIfOpen();
@@ -9825,11 +9833,19 @@
   }
 
   // ---- onboarding overlay ---------------------------------------------------
+  function renderAgentInstallation() {
+    const installed = HARNESSES.some((h) => agentInstalled[h.id] === true);
+    setObNode(els.obNodeClaude, els.obDotClaude, installed ? "done" : "idle");
+    if (els.obLine2) els.obLine2.classList.toggle("done", installed);
+    return installed;
+  }
+
   function finishAgentCheck() {
-    if (!hostReady) return;
+    if (!hostReady) { showOnboarding(); return; }
     const available = HARNESSES.find((h) => harnessReady[h.id]);
     if (!available) {
-      showOnboarding(HARNESSES.every((h) => harnessChecked[h.id]) ? "agent" : "checking");
+      showOnboarding(HARNESSES.every((h) => agentInstalled[h.id] === false) ? "agent"
+        : HARNESSES.some((h) => agentInstalled[h.id] === true) ? "reconnecting" : "checking");
       return;
     }
     setObNode(els.obNodeClaude, els.obDotClaude, "done");
@@ -9914,29 +9930,34 @@
       if (dot) dot.innerHTML = ""; // current → CSS ::after dot; idle → empty ring
     }
   }
-  // Stages: connect the helper, check the CLIs, or install either missing CLI.
+  // A missing bridge cannot inspect local programs. Offer both installers, but
+  // only a helper's CLI check can complete the installation step.
   function showOnboarding(stage = "link") {
     if (!mounted) return;
     const link = stage !== "agent";
-    const installed = HARNESSES.some((h) => harnessReady[h.id]);
-    // The helper must connect before it can check either CLI. Never mark an
-    // unchecked installation as done just because the extension is present.
+    const installed = renderAgentInstallation();
     setObNode(els.obNodeClaude, els.obDotClaude, installed ? "done" : link ? "idle" : "current");
-    setObNode(els.obNodeLink, els.obDotLink, hostReady ? "done" : "current");
-    if (els.obLine2) els.obLine2.classList.toggle("done", installed);
+    setObNode(els.obNodeLink, els.obDotLink, hostReady && stage !== "reconnecting" ? "done" : "current");
     if (els.obCardLink) els.obCardLink.classList.toggle("hidden", !link);
-    if (els.obCardClaude) els.obCardClaude.classList.toggle("hidden", link);
-    if (els.obWaitLabel)
-      els.obWaitLabel.textContent = link
-        ? stage === "checking" ? "Checking installed agents…" : "Waiting for connection…"
-        : "Waiting for either agent…";
-    if (link) {
-      stopClaudeRecheck();
-      if (stage === "checking") startClaudeRecheck();
-    } else {
-      renderClaudeCmd();
-      startClaudeRecheck();
+    if (els.obInstallOptions) {
+      els.obInstallOptions.classList.toggle("hidden", installed);
+      if (!link) els.obInstallOptions.open = true;
+      els.obInstallSummary.textContent = stage === "agent" ? "Choose an agent to install" : "Need an agent? Install Claude Code or Codex CLI";
     }
+    if (els.obCardClaude) els.obCardClaude.classList.toggle("hidden", installed);
+    if (els.obAgentStatus) {
+      els.obAgentStatus.textContent = installed
+        ? HARNESSES.filter((h) => agentInstalled[h.id] === true).map((h) => h.id === "codex" ? "Codex CLI" : "Claude Code").join(" and ") + " found."
+        : stage === "agent" ? "Neither Claude Code nor Codex CLI was found. Install either one."
+        : hostReady ? "Checking for Claude Code and Codex CLI…"
+        : "Connect the helper to check whether Claude Code or Codex CLI is installed.";
+    }
+    if (els.obWaitLabel) els.obWaitLabel.textContent = stage === "agent" ? "Waiting for either agent…"
+      : stage === "checking" ? "Checking installed agents…"
+      : stage === "reconnecting" ? "Reconnecting to your agent…" : "Waiting for connection…";
+    renderClaudeCmd();
+    stopClaudeRecheck();
+    if (stage === "agent" || stage === "checking" || stage === "reconnecting") startClaudeRecheck();
     els.onboarding.classList.remove("hidden");
   }
   function hideOnboarding() {
@@ -10009,6 +10030,9 @@
     els.obLine2 = root.querySelector("#ob-line-2");
     els.obCardLink = root.querySelector("#ob-card-link");
     els.obCardClaude = root.querySelector("#ob-card-claude");
+    els.obInstallOptions = root.querySelector("#ob-install-options");
+    els.obInstallSummary = root.querySelector("#ob-install-summary");
+    els.obAgentStatus = root.querySelector("#ob-agent-status");
     els.obWaitLabel = root.querySelector("#ob-wait-label");
     els.obOsToggle = root.querySelector("#ob-os-toggle");
     els.obOsSelect = root.querySelector("#ob-os-select");
@@ -10644,6 +10668,9 @@
         </div>
       </div>
 
+      <div class="onboarding-content">
+      <p id="ob-agent-status" class="ob-agent-status" role="status">Connect the helper to check whether Claude Code or Codex CLI is installed.</p>
+
       <!-- Link-up card: host not connected yet. -->
       <div id="ob-card-link" class="onboarding-card">
         <div class="onboarding-logos" aria-hidden="true">
@@ -10661,8 +10688,9 @@
         </div>
       </div>
 
-      <!-- The helper confirmed that neither CLI is installed. -->
-      <div id="ob-card-claude" class="onboarding-card hidden">
+      <details id="ob-install-options" class="ob-install-options">
+      <summary id="ob-install-summary">Need an agent? Install Claude Code or Codex CLI</summary>
+      <div id="ob-card-claude" class="onboarding-card">
         <div class="onboarding-logos" aria-hidden="true">
           <span id="onboarding-logo-claude2" class="onboarding-logo onboarding-agent"></span>
         </div>
@@ -10685,6 +10713,9 @@
           <code id="ob-claude-cmd"></code>
           <button id="chat-copy-claude" class="cmd-copy-btn" title="Copy" aria-label="Copy install command"></button>
         </div>
+      </div>
+
+      </details>
       </div>
 
       <button class="onboarding-wait-btn" disabled aria-live="polite">
