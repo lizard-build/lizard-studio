@@ -34,7 +34,7 @@ async function host() {
     clearTimeout: (timer) => timers.delete(timer),
   });
   const source = readFileSync(new URL("../../src/host/codex-host.mjs", import.meta.url), "utf8");
-  const module = new SourceTextModule(source + `\nexport { browserClients, cancelBrowserWorkflows, handle, loadSkills, loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, restartSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
+  const module = new SourceTextModule(source + `\nexport { browserClients, cancelBrowserWorkflows, handle, loadSkills, loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, restartSession, rewindSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
   await module.link((name) => {
     const values = imports[name];
     assert.ok(values, `unexpected import: ${name}`);
@@ -336,7 +336,7 @@ test("older CLI history fallback pages without offset drift or swallowed failure
 
 test("unsupported Codex actions return a failure instead of silently hanging", async () => {
   const h = await host(); h.session();
-  for (const [type, response] of [["rewind", "error"], ["remoteControl", "remoteControl"], ["authCode", "authDone"]]) {
+  for (const [type, response] of [["rewind", "rewindResult"], ["remoteControl", "remoteControl"], ["authCode", "authDone"]]) {
     const before = h.messages.length;
     h.api.handle({ type, id: "a", code: "test-only", text: "changed" });
     assert.equal(h.messages.length, before + 1); assert.equal(h.messages.at(-1).type, response);
@@ -427,4 +427,143 @@ test("stopping or closing a chat cancels only its browser workflows", async () =
   assert.equal(receivedB.length, 0);
   h.api.closeSession("b");
   assert.equal(receivedB[0].type, "workflowCancel");
+});
+
+const editTurn = (id, content = [{ type: "text", text: id }]) => ({ id, items: [{ id: `user-${id}`, type: "userMessage", content }] });
+const editRequest = (turnId = "t2") => ({ id: "a", requestId: "edit-request", turnId, itemId: `user-${turnId}`, text: "Changed prompt" });
+
+test("editing uses stable IDs across history pages and preserves context and original attachments", async () => {
+  const h = await host(), s = h.session(); s.running = false;
+  const context = "\u200b\u200b\u200bPage context\u200c\u200c\u200c";
+  const attachments = [{ type: "image", url: "data:image/png;base64,abc" }, { type: "localImage", path: "/test/image.png" }];
+  h.respond((req) => {
+    if (req.method === "thread/turns/list") return req.params.cursor
+      ? { data: [editTurn("t2", [{ type: "text", text: context + "Old" }, ...attachments]), editTurn("t1")] }
+      : { data: [editTurn("t4"), editTurn("t3")], nextCursor: "older" };
+    if (req.method === "thread/rollback") { assert.equal(req.params.numTurns, 3); return { thread: { id: s.threadId } }; }
+    if (req.method === "turn/start") {
+      assert.equal(h.messages.at(-1).type, "rewindResult");
+      assert.equal(h.messages.at(-1).ok, true);
+      assert.deepEqual(req.params.input, [...attachments, { type: "text", text: context + "Changed prompt" }]);
+      return { turn: { id: "replacement" } };
+    }
+    throw new Error(req.method);
+  });
+  await h.api.rewindSession(editRequest());
+  assert.deepEqual(h.requests.map((r) => r.method), ["thread/turns/list", "thread/turns/list", "thread/rollback", "turn/start"]);
+  assert.equal(h.messages.at(-1).type, "promptAccepted");
+  assert.equal(h.messages.at(-1).turnId, "replacement");
+  assert.equal(h.messages.at(-1).messageId, "edit-request");
+  assert.equal(s.running, true);
+  h.api.handleNotification("turn/completed", { threadId: s.threadId, turn: { id: "t4", status: "completed" } });
+  assert.equal(s.running, true);
+});
+
+test("editing an active chat waits for turn completion and ignores late removed events", async () => {
+  const h = await host(), s = h.session();
+  h.respond((req) => {
+    if (req.method === "turn/interrupt") return {};
+    if (req.method === "thread/turns/list") return { data: [editTurn("turn-a"), editTurn("t2")] };
+    if (req.method === "turn/start") return { turn: { id: "new-turn" } };
+    return {};
+  });
+  const work = h.api.rewindSession(editRequest());
+  await new Promise(setImmediate);
+  assert.deepEqual(h.requests.map((r) => r.method), ["turn/interrupt"]);
+  const before = h.messages.length;
+  h.api.handleNotification("item/started", { threadId: s.threadId, turnId: "turn-a", item: { type: "agentMessage", id: "stale" } });
+  assert.equal(h.messages.length, before);
+  h.api.handleNotification("turn/completed", { threadId: s.threadId, turn: { id: "turn-a", status: "interrupted" } });
+  await work;
+  const count = h.messages.length;
+  h.api.handleNotification("item/completed", { threadId: s.threadId, turnId: "turn-a", item: { type: "agentMessage", id: "stale", text: "Stale reply" } });
+  assert.equal(h.messages.length, count);
+  assert.equal(s.turnId, "new-turn");
+  assert.equal(s.rewinding, false);
+});
+
+for (const failure of ["missing target", "wrong user item", "rollback unsupported", "read failed"]) {
+  test(`failed edit never starts a replacement: ${failure}`, async () => {
+    const h = await host(), s = h.session(); s.running = false;
+    h.respond((req) => {
+      if (req.method === "thread/turns/list") {
+        if (failure === "read failed") throw new Error("Disk read failed");
+        return { data: [editTurn(failure === "missing target" ? "other" : "t2")] };
+      }
+      if (req.method === "thread/rollback") throw new Error("method not found");
+      throw new Error("Must not start a turn");
+    });
+    const msg = editRequest(); if (failure === "wrong user item") msg.itemId = "later-correction";
+    await h.api.rewindSession(msg);
+    assert.equal(h.messages.at(-1).type, "rewindResult");
+    assert.equal(h.messages.at(-1).ok, false);
+    assert.equal(h.requests.some((r) => r.method === "turn/start"), false);
+    assert.equal(s.rewinding, false);
+  });
+}
+
+test("first-message edit removes every turn and can restart with only an attachment", async () => {
+  const h = await host(), s = h.session(); s.running = false;
+  h.respond((req) => {
+    if (req.method === "thread/turns/list") return { data: [editTurn("t2"), editTurn("t1", [{ type: "localImage", path: "/test/one.png" }])] };
+    if (req.method === "thread/rollback") assert.equal(req.params.numTurns, 2);
+    if (req.method === "turn/start") { assert.deepEqual(req.params.input, [{ type: "localImage", path: "/test/one.png" }]); return { turn: { id: "new" } }; }
+    return {};
+  });
+  await h.api.rewindSession({ ...editRequest("t1"), text: "" });
+  assert.equal(h.messages.find((m) => m.type === "rewindResult").ok, true);
+});
+
+test("double submission cannot roll back twice and a stop timeout leaves history intact", async () => {
+  const h = await host(); h.session();
+  h.respond(() => ({}));
+  const work = h.api.rewindSession(editRequest());
+  await h.api.rewindSession({ ...editRequest(), requestId: "duplicate" });
+  assert.equal(h.messages.at(-1).ok, false);
+  const timeout = [...h.timers].find((t) => t.ms === 20000); assert.ok(timeout); timeout.fn();
+  await work;
+  assert.equal(h.messages.at(-1).ok, false);
+  assert.equal(h.requests.some((r) => r.method === "thread/rollback"), false);
+});
+
+test("history carries the stable turn and user-item IDs used by edits", async () => {
+  const h = await host(); h.session();
+  h.respond(() => ({ data: [editTurn("t2")] }));
+  await h.api.loadTranscript({ id: "a", sessionId: "thread-a", requestId: "history" });
+  assert.equal(h.messages.at(-1).events[0].historyTurnId, "t2");
+  assert.equal(h.messages.at(-1).events[0].historyItemId, "user-t2");
+});
+
+test("after editing the first loaded message, older history stops at a retained turn", async () => {
+  const h = await host();
+  h.respond((req) => { assert.equal(req.method, "thread/read"); return { thread: { turns: [editTurn("old"), editTurn("retained"), editTurn("replacement")] } }; });
+  await h.api.loadTranscript({ id: "a", sessionId: "thread-a", requestId: "history", cursor: { kind: "legacy", through: "retained" } });
+  assert.deepEqual(h.messages.at(-1).events.map((e) => e.historyTurnId), ["old", "retained"]);
+});
+
+test("image-only history retains its editable target and attachments", async () => {
+  const h = await host();
+  h.respond(() => ({ data: [editTurn("image", [{ type: "image", url: "data:image/png;base64,abc" }])] }));
+  await h.api.loadTranscript({ id: "a", sessionId: "thread-a", requestId: "history" });
+  const event = h.messages.at(-1).events[0];
+  assert.equal(event.historyTurnId, "image");
+  assert.equal(event.hasAttachments, true);
+  assert.equal(event.attachments[0].dataUrl, "data:image/png;base64,abc");
+});
+
+test("a failed rollback after stopping retires stale approval and stream state", async () => {
+  const h = await host(), s = h.session();
+  s.asks.set(71, { kind: "command", params: {} }); s.streamMsgId = "stale"; s.openTools.add("tool");
+  h.respond((req) => {
+    if (req.method === "turn/interrupt") {
+      h.api.handleNotification("turn/completed", { threadId: s.threadId, turn: { id: "turn-a", status: "interrupted" } });
+      return {};
+    }
+    if (req.method === "thread/turns/list") return { data: [editTurn("t2")] };
+    throw new Error("rollback failed");
+  });
+  await h.api.rewindSession(editRequest());
+  assert.equal(s.running, false); assert.equal(s.asks.size, 0); assert.equal(s.openTools.size, 0);
+  assert.equal(s.streamMsgId, null); assert.equal(s.turnId, null);
+  assert.equal(h.messages.find((m) => m.type === "rewindResult").ok, false);
 });
