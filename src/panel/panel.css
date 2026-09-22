@@ -1885,7 +1885,7 @@ body.chat-menu-open .la-layer {
    so it stays at full opacity instead of inheriting the bubble's dimming) and
    only shows up while hovering the message — same reveal-on-hover as
    .ctx-chip-x above. */
-.msg-user.queued.has-steer .bubble { padding-right: 104px; }
+.msg-user.queued.has-steer .bubble { padding-right: 124px; }
 .queued-tag {
   display: flex;
   align-items: center;
@@ -1923,7 +1923,7 @@ body.chat-menu-open .la-layer {
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
-.queued-steer { width: auto; padding: 0 5px; font: 11px var(--font-family); }
+.queued-steer { width: auto; gap: 4px; padding: 0 5px; font: 11px var(--font-family); }
 .queued-steer:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.08); }
 .queued-tag button:disabled { opacity: 0.5; cursor: wait; }
 .queued-tag button:focus-visible { outline: 1px solid var(--text-secondary); outline-offset: 1px; }

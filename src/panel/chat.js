@@ -6788,7 +6788,9 @@
     const tag = el("div", "queued-tag");
     if (chat.harness === "codex") {
       row.classList.add("has-steer");
-      const steer = el("button", "queued-steer", "Steer");
+      const steer = el("button", "queued-steer");
+      steer.innerHTML = ICON("send", 13);
+      steer.appendChild(el("span", "queued-steer-label", "Steer"));
       steer.type = "button";
       steer.title = "Send to the current turn";
       steer.setAttribute("aria-label", "Steer: send to the current turn");
@@ -6819,7 +6821,7 @@
     entry.el.setAttribute("aria-busy", String(sending));
     for (const button of entry.el.querySelectorAll(".queued-tag button")) button.disabled = sending;
     const steer = entry.el.querySelector(".queued-steer");
-    if (steer) steer.textContent = sending ? "Sending…" : "Steer";
+    if (steer) steer.querySelector(".queued-steer-label").textContent = sending ? "Sending…" : "Steer";
   }
 
   function failQueuedSteer(chat, entry, message) {
