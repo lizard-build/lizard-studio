@@ -68,7 +68,7 @@ globalThis.createStudioBrowser = function ({ post = () => {}, windowId = null } 
       let settled = false;
       const timer = setTimeout(() => {
         settled = true;
-        const error = new Error(step + " on tab " + tabId + " timed out after " + timeoutMs + " ms. The page may still be loading or unresponsive. For a background tab, call browser_tab_activate, then retry a read. Check the page before repeating an action; it may have already run.");
+        const error = new Error(step + " on tab " + tabId + " timed out after " + timeoutMs + " ms. The page may still be loading or unresponsive. Retry a read without switching tabs. Check the page before repeating an action; it may have already run.");
         error.code = "BROWSER_STEP_TIMEOUT";
         reject(error);
       }, timeoutMs);
@@ -221,6 +221,9 @@ globalThis.createStudioBrowser = function ({ post = () => {}, windowId = null } 
       try {
         await Promise.all(["Runtime.enable", "Log.enable", "Network.enable", "Page.enable", "DOM.enable"].map((method) => dbgSend(tabId, method)));
         if (cdpSessions.get(tabId) !== session) throw new Error("Debugger disconnected from tab " + tabId + " during setup.");
+        // Give CDP input page focus without selecting the tab or its window.
+        // Chrome clears this override when the debugger detaches.
+        await dbgSend(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
         bumpIdle(tabId);
       } catch (error) {
         if (cdpSessions.get(tabId) === session) detachCdp(tabId);
@@ -275,7 +278,7 @@ globalThis.createStudioBrowser = function ({ post = () => {}, windowId = null } 
       const url = String(args.url || "");
       if (!/^https?:\/\//i.test(url)) return opErr("Provide an absolute http(s) URL.");
       const t = await new Promise((resolve) => {
-        chrome.tabs.create({ url, active: args.active !== false }, (nt) => resolve(chrome.runtime.lastError ? null : nt));
+        chrome.tabs.create({ url, active: args.active === true }, (nt) => resolve(chrome.runtime.lastError ? null : nt));
       });
       if (!t) return opErr("Couldn't open a new tab.");
       if (session && !args.preserveWorkingTab) pinnedTabBySession.set(session, t.id);

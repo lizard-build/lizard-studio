@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
-// Load the shipped panel, replacing only Chrome and the clock. No live tabs,
+// Load the shipped browser runtime, replacing only Chrome and the clock. No live tabs,
 // accounts, host processes, or network calls take part in these tests.
 function panel() {
   const timers = new Set(), replies = [], commands = [], attachments = [], detachments = [];
@@ -75,6 +75,7 @@ test("a silent debugger command returns the failed step and allows another read"
   await reading;
   assert.equal(p.replies[0].ok, false);
   assert.match(p.replies[0].error, /Accessibility.getFullAXTree.*11.*timed out/i);
+  assert.doesNotMatch(p.replies[0].error, /browser_tab_activate/);
   p.chrome.debugger.sendCommand = send;
   await p.call("snapshot", { tabId: 11 });
   assert.equal(p.replies[1].ok, true);
@@ -215,4 +216,53 @@ test("batch reads and opens preserve the chat working tab", async () => {
   assert.equal(p.pinnedTabBySession.get("chat-a"), 99);
   await p.call("dom", { tabId: 11 });
   assert.equal(p.pinnedTabBySession.get("chat-a"), 11);
+});
+
+
+test("new tabs stay in the background unless activation is explicit", async () => {
+  const p = panel(), opened = [];
+  p.chrome.tabs.create = (options, cb) => { opened.push(options); cb({ id: 12, windowId: 1 }); };
+  await p.call("tab_open", { url: "https://test.invalid/" });
+  await p.call("tab_open", { url: "https://test.invalid/", active: false });
+  await p.call("tab_open", { url: "https://test.invalid/", active: true });
+  assert.deepEqual(opened.map(o => o.active), [false, false, true]);
+  assert.equal(p.pinnedTabBySession.get("chat-a"), 12);
+});
+
+test("background input emulates page focus and stays pinned when the user changes tabs", async () => {
+  const p = panel(), sent = [], changes = [];
+  const send = p.chrome.debugger.sendCommand;
+  p.chrome.debugger.sendCommand = (target, method, args, cb) => {
+    sent.push({ tabId: target.tabId, method, args });
+    send(target, method, args, cb);
+  };
+  p.chrome.tabs.update = (...args) => changes.push(args);
+  p.chrome.windows = { update: (...args) => changes.push(args) };
+  await p.call("click", { tabId: 11, x: 10, y: 20 });
+  p.chrome.tabs.query = (_q, cb) => cb([{ id: 99, active: true }]);
+  await p.call("type", { text: "hello" });
+  await p.call("key", { key: "Enter" });
+  assert.ok(p.replies.every(r => r.ok));
+  assert.ok(sent.every(c => c.tabId === 11));
+  const focus = sent.findIndex(c => c.method === "Emulation.setFocusEmulationEnabled");
+  assert.equal(sent[focus].args.enabled, true);
+  assert.ok(focus < sent.findIndex(c => c.method === "Input.dispatchMouseEvent"));
+  assert.ok(sent.some(c => c.method === "Input.insertText"));
+  assert.ok(sent.some(c => c.method === "Input.dispatchKeyEvent"));
+  assert.deepEqual(changes, []);
+});
+
+test("a focus setup failure detaches and never falls back to activating the tab", async () => {
+  const p = panel(), send = p.chrome.debugger.sendCommand;
+  p.chrome.debugger.sendCommand = (target, method, args, cb) => {
+    if (method !== "Emulation.setFocusEmulationEnabled") return send(target, method, args, cb);
+    p.chrome.runtime.lastError = { message: "Focus emulation unavailable" };
+    cb();
+    delete p.chrome.runtime.lastError;
+  };
+  await p.call("type", { tabId: 11, text: "hello" });
+  assert.equal(p.replies[0].ok, false);
+  assert.match(p.replies[0].error, /Focus emulation unavailable/);
+  assert.equal(p.detachments.length, 1);
+  assert.equal(p.commands.includes("Input.insertText"), false);
 });
