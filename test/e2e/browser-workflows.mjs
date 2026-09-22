@@ -1,4 +1,4 @@
-// Real MCP relay + TCP bridge + shipped panel code + Chrome extension APIs.
+// Real MCP relay + TCP bridge + shipped browser runtime + Chrome extension APIs.
 // The test host uses local HTTP in place of Chrome native messaging. No model,
 // account, installed extension, or user browser profile is used.
 // Run: STUDIO_TEST_CHROME=/path/to/chrome node test/e2e/browser-workflows.mjs
@@ -19,7 +19,7 @@ const session = "studio-workflow-test-" + process.pid;
 const queue = [], waiters = [], pending = new Map(), rpcPending = new Map();
 const sockets = new Set();
 const trace = (...args) => { if (process.env.STUDIO_TEST_TRACE) console.error(new Date().toISOString(), ...args); };
-let bid = 0, rpcId = 0, child, browserOpened = false;
+let bid = 0, rpcId = 0, child, browserOpened = false, userState;
 const html = (detail = false) => detail
   ? '<!doctype html><title>Details</title><h1>Detail page</h1><a href="/form">Home</a>'
   : '<!doctype html><title>Workflow test</title><h1>Test form</h1><label>Name <input id="name"></label><button id="save" onclick="document.querySelector(\'#result\').textContent=\'Saved \'+document.querySelector(\'#name\').value">Save</button><p id="result"></p><a id="details" href="/detail">Details</a>';
@@ -34,6 +34,7 @@ const http = createServer(async (req, res) => {
   if (req.url === "/result" && req.method === "POST") {
     let body = ""; for await (const part of req) body += part;
     const m = JSON.parse(body), request = pending.get(m.bid);
+    userState = m.testUserState;
     trace("result", m.bid, m.ok, m.error || "");
     if (request) { pending.delete(m.bid); request.sock.write(JSON.stringify({ reqId: request.reqId, ok: m.ok, data: m.data, error: m.error }) + "\n"); }
     res.end("ok"); return;
@@ -86,11 +87,15 @@ try {
   const manifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
   writeFileSync(join(dir, "manifest.json"), JSON.stringify({ manifest_version: 3, name: "Studio workflow test", version: "1.0.0", key: manifest.key,
     permissions: ["tabs", "debugger", "scripting"], host_permissions: [origin + "/*"] }));
-  writeFileSync(join(dir, "harness.html"), '<!doctype html><title>Studio workflow test</title><h1>Studio workflow test</h1><script src="setup.js"></script><script src="chat.js"></script><script src="poll.js"></script>');
-  writeFileSync(join(dir, "setup.js"), 'window.RKRender={};window.RKIconHTML=()=>"";');
-  const source = readFileSync(join(root, "src/panel/chat.js"), "utf8").replace("  window.RKChat =", `  window.browserTest={handleBrowserOp}; port={postMessage:m=>fetch(${JSON.stringify(origin + "/result")},{method:"POST",body:JSON.stringify(m)})};\n  window.RKChat =`);
-  writeFileSync(join(dir, "chat.js"), source);
-  writeFileSync(join(dir, "poll.js"), `(async()=>{while(true){const r=await fetch(${JSON.stringify(origin + "/command")});if(r.status===200)browserTest.handleBrowserOp(await r.json());}})().catch(console.error);`);
+  writeFileSync(join(dir, "harness.html"), '<!doctype html><title>User tab</title><h1>User tab</h1><input id="user-input" value="User draft"><script src="browser-runtime.js"></script><script src="poll.js"></script>');
+  writeFileSync(join(dir, "browser-runtime.js"), readFileSync(join(root, "src/browser-runtime.js"), "utf8"));
+  writeFileSync(join(dir, "poll.js"), `
+    window.activations=[];
+    chrome.tabs.onActivated.addListener(info=>activations.push(info.tabId));
+    const browserTest=createStudioBrowser({post:m=>fetch(${JSON.stringify(origin + "/result")},{method:"POST",body:JSON.stringify({...m,testUserState:{activations,value:document.querySelector("#user-input").value,focused:document.activeElement.id}})})});
+    document.querySelector("#user-input").focus();
+    (async()=>{while(true){const r=await fetch(${JSON.stringify(origin + "/command")});if(r.status===200)browserTest.handleBrowserOp(await r.json());}})().catch(console.error);
+  `);
   const launch = ["--profile", join(dir, "profile"), "--extension", dir];
   if (process.env.STUDIO_TEST_CHROME) launch.push("--executable-path", process.env.STUDIO_TEST_CHROME);
   await browser(...launch, "open", "chrome-extension://nhcgkijjijdinhldjohkmbbgjokobecd/harness.html"); browserOpened = true;
@@ -104,9 +109,10 @@ try {
   await rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "workflow-test", version: "1" } });
   const definitions = await rpc("tools/list", {});
   assert.ok(definitions.result.tools.some((t) => t.name === "browser_run"));
+  const userTab = (await tool("browser_tabs", {})).activeTabId;
   let started = performance.now();
   report.scenario = await tool("browser_run", { steps: [
-    { op: "tab_open", args: { url: origin + "/form", active: true } },
+    { op: "tab_open", args: { url: origin + "/form" } },
     { op: "wait_for", args: { condition: { selector: "#save", state: "visible" } } },
     { op: "fill", args: { selector: "#name", value: "Studio" } },
     { op: "click", args: { selector: "#save" } },
@@ -121,7 +127,11 @@ try {
   report.scenario.wallMs = Math.round(performance.now() - started);
   assert.equal(report.scenario.status, "completed"); assert.equal(report.scenario.completedSteps, 11);
   assert.ok(report.scenario.observation.text.includes("Detail page"));
-  await tool("browser_open_page", { url: origin + "/form", active: true });
+  await tool("browser_open_page", { url: origin + "/form" });
+  await tool("browser_type", { selector: "#name", text: "Background" });
+  await tool("browser_key", { key: "Backspace" });
+  await tool("browser_type", { text: "d input" });
+  await tool("browser_assert", { condition: { selector: "#name", valueEquals: "Background input" } });
   report.form = await tool("browser_fill_form", { fields: [{ selector: "#name", value: "One call" }], submit: { selector: "#save" }, waitFor: { selector: "#result", textIncludes: "Saved One call" }, observe: { selector: "#result" } });
   assert.ok(report.form.observation.text.includes("Saved One call"));
   report.click = await tool("browser_click_and_observe", { target: { selector: "#details" }, waitFor: { urlIncludes: "/detail", textIncludes: "Detail page" } });
@@ -139,6 +149,12 @@ try {
   assert.ok(afterTabs.tabs.every((t) => !t.url.includes("/slow?")));
   report.pinPreserved = true;
   report.outputBytes = JSON.stringify(report.scenario).length;
+  const finalTabs = await tool("browser_tabs", {});
+  assert.equal(finalTabs.activeTabId, userTab, "the user's tab must stay active");
+  assert.deepEqual(userState.activations, [], "no workflow may activate a tab, even briefly");
+  assert.equal(userState.value, "User draft", "background typing must not touch the user's input");
+  assert.equal(userState.focused, "user-input");
+  report.background = { activeTabUnchanged: true, activations: 0, userDraftUnchanged: true };
   writeFileSync(join(dir, "report.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ ok: true, artifacts: dir, report }, null, 2));
 } finally {

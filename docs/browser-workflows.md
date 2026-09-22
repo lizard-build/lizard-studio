@@ -7,7 +7,7 @@ Use `browser_run` when the next steps are known. Return to the model when the pa
 ```json
 {
   "steps": [
-    { "op": "tab_open", "args": { "url": "https://example.com/form", "active": true } },
+    { "op": "tab_open", "args": { "url": "https://example.com/form" } },
     { "op": "wait_for", "args": { "condition": { "selector": "#name", "state": "visible" } } },
     { "op": "fill", "args": { "selector": "#name", "value": "Alex" } },
     { "op": "click", "args": { "selector": "#save" } },
@@ -37,7 +37,7 @@ Each action needs the same user authorization as its single-call form. The host 
 
 `browser_run` accepts `tab_open`, `tab_activate`, `navigate`, `reload`, `info`, `dom`, `snapshot`, `console`, `network`, `click`, `fill`, `type`, and `key`, with the corresponding primitive tool's arguments. It also accepts `wait_for`, `assert`, `observe`, and `if`. Set `tabId` on the run, not on each step. Otherwise it uses the chat's working tab. `tab_open` changes the run's tab.
 
-Use selectors across navigation. Snapshot refs can expire; request a new `snapshot` when needed. Real clicks and keys may need an active tab. Use `active: true` when opening such a scenario, or `tab_activate` before input.
+Use selectors across navigation. Snapshot refs can expire; request a new `snapshot` when needed. New tabs open in the background by default. Clicks and keys target the working tab through CDP with page focus emulation; they do not select the tab or focus its window. Chrome clears that emulation when the debugger detaches. Use `active: true` or `tab_activate` only when the user asks to see a tab. After a timeout, inspect the page without switching tabs before deciding whether to repeat an action.
 
 ## Conditions and branches
 
