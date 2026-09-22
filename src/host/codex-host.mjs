@@ -48,7 +48,7 @@ const codexSpawner = createCodexSpawner({ hostDir: HOST_DIR, nodePath: process.e
 
 // Bumped on every change the panel needs to know about. Reported in
 // `agentReady`. Claude's own HOST_VERSION is separate and untouched.
-const CODEX_HOST_VERSION = 9;
+const CODEX_HOST_VERSION = 10;
 
 // The browser bridge numbers its requests from here so the router can tell our
 // `browserResult` replies from claude's by value alone, and never has to parse
@@ -686,7 +686,7 @@ function emit(s, data) {
       log("TRACE emit", data.type + (data.subtype ? "/" + data.subtype : ""));
     }
   }
-  send({ type: "event", id: s.id, data });
+  send({ type: "event", id: s.id, turnId: s.turnId || undefined, data });
 }
 
 function nextMsgId(s) {
@@ -898,6 +898,7 @@ function handleNotification(method, params) {
       if (!s) break;
       s.running = true;
       s.turnId = (params.turn && params.turn.id) || s.turnId;
+      send({ type: "turnStarted", id: s.id, turnId: s.turnId });
       break;
     }
     case "turn/completed": {
@@ -1858,6 +1859,7 @@ async function loadTranscript(msg) {
     const s = sessions.get(msg.id) || makeSession(msg.id, msg.cwd);
     const events = [];
     for (const turn of page.turns) {
+      if (Array.isArray(msg.excludeTurnIds) && msg.excludeTurnIds.includes(turn.id)) continue;
       for (const item of turn.items || []) {
         const replay = replayItem(s, item);
         if (replay) events.push(...replay.map((event) => ({ ...event, historyItemId: item.id,

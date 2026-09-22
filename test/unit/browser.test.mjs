@@ -27,16 +27,13 @@ function panel() {
       },
     },
   };
-  const window = { RKRender: {}, RKIconHTML: () => "", addEventListener() {}, matchMedia: () => ({ matches: false, addEventListener() {} }) };
-  const source = readFileSync(new URL("../../src/panel/chat.js", import.meta.url), "utf8").replace(
-    "  window.RKChat =",
-    "  window.browserTest = { handleBrowserOp, ensureAttached, cdpSessions, pinnedTabBySession, dbgSend }; port = { postMessage: (m) => testReplies.push(m) };\n  window.RKChat =",
-  );
-  vm.runInNewContext(source, {
-    window, document: { addEventListener() {} }, chrome, console, navigator: { platform: "MacIntel" }, testReplies: replies,
+  const scope = {
+    chrome, console, testReplies: replies,
     setTimeout: (fn, ms) => { const t = { fn, ms }; timers.add(t); return t; },
     clearTimeout: (t) => timers.delete(t),
-  });
+  };
+  vm.runInNewContext(readFileSync(new URL("../../src/browser-runtime.js", import.meta.url), "utf8") +
+    "\nglobalThis.browserTest = createStudioBrowser({ post: (m) => testReplies.push(m) });", scope);
   let bid = 0;
   const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
   const expire = async (ms) => {
@@ -44,8 +41,8 @@ function panel() {
     for (const t of due) { timers.delete(t); t.fn(); }
     await flush();
   };
-  const call = (op, args = {}) => window.browserTest.handleBrowserOp({ bid: ++bid, op, args, session: "chat-a" });
-  return { ...window.browserTest, chrome, call, replies, commands, attachments, detachments, timers, expire, flush, listeners };
+  const call = (op, args = {}) => scope.browserTest.handleBrowserOp({ bid: ++bid, op, args, session: "chat-a" });
+  return { ...scope.browserTest, chrome, call, replies, commands, attachments, detachments, timers, expire, flush, listeners };
 }
 
 test("a silent page helper falls back to CDP before the host timeout", async () => {

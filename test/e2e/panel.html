@@ -121,11 +121,12 @@
       window.addEventListener("unhandledrejection", (e) => window.__test.errors.push(String(e.reason)));
 
       window.chrome = {
+        windows: { getCurrent: (cb) => cb({ id: 1 }) },
         runtime: {
           lastError: null,
           id: "test",
           getURL: (p) => p,
-          connectNative() {
+          connect() {
             return {
               postMessage: (m) => sent.push(m),
               disconnect() {},
@@ -179,7 +180,8 @@
       const historyRegression = new URLSearchParams(location.search).get("regressions") === "history";
       const auditRegression = new URLSearchParams(location.search).get("regressions") === "audit";
       const codexRegression = auditRegression || new URLSearchParams(location.search).get("regressions") === "codex";
-      if (historyRegression) store.rkChatV2 = {
+      const backgroundRegression = new URLSearchParams(location.search).get("regressions") === "background";
+      if (historyRegression || backgroundRegression) store.rkChatV2 = {
         activeId: "history-a", lastHarness: "codex",
         tabs: [{ id: "history-a", title: "History", harness: "codex", model: "test-model", cwd: "/test/project", sessionId: "thread-history", mode: "workspace" }],
       };
@@ -233,6 +235,13 @@
             document.body.appendChild(script);
           });
           window.__test.sessionFailureResult = await window.runSessionFailurePanelTests();
+        }
+        if (backgroundRegression) {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement("script"); script.src = "background-panel.js?t=" + stamp;
+            script.onload = resolve; script.onerror = reject; document.body.appendChild(script);
+          });
+          window.__test.backgroundResult = await window.runBackgroundPanelTests();
         }
         if (codexRegression || historyRegression) {
           await new Promise((resolve, reject) => {
