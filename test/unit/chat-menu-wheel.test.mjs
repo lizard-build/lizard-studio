@@ -22,7 +22,9 @@ function setup({ initialOpen = false, initialWidth = 400, docked = false } = {})
   const search = element({ menuChild: true, focus() { document.activeElement = this; } });
   const menuBtn = element({ focus() { document.activeElement = this; } });
   const panel = element({ role: "dialog", "aria-modal": "true" });
-  menu.querySelector = () => panel;
+  const newChat = element(), windowMode = element();
+  const head = { children: [windowMode], insertBefore(node, before) { this.children.splice(this.children.indexOf(before), 0, node); } };
+  menu.querySelector = selector => selector === '.chat-menu-head' ? head : panel;
   menu.contains = node => node === menu || !!node.menuChild;
   menu.getBoundingClientRect = () => ({ width });
   guard.classList.add('hidden');
@@ -33,7 +35,7 @@ function setup({ initialOpen = false, initialWidth = 400, docked = false } = {})
   const scope = {
     document, getComputedStyle: node => ({ overflowX: node.overflowX }),
     ResizeObserver: class { constructor(fn) { resize = fn; } observe() {} },
-    els: { chatMenu: menu, chatShell: shell, chatMenuGuard: guard, chatMenuList: {}, chatMenuSearch: search, menuBtn },
+    els: { chatMenu: menu, chatShell: shell, chatMenuGuard: guard, chatMenuList: {}, chatMenuSearch: search, menuBtn, newChat, windowMode },
     chatMenuScroller: null, chatMenuMoving: false, chatMenuRenderPending: false, chatMenuDragId: null, chatMenuRename: null,
     reducedMotion: { matches: false }, HISTORY_PAGE_SIZE: 40, historyVisibleLimit: 40,
     menuRegistry: [], menuFilter: '', renderChatMenuList: () => rendered++, finishChatMenuRename() {}, finishChatMenuDrag() {},
@@ -45,7 +47,7 @@ function setup({ initialOpen = false, initialWidth = 400, docked = false } = {})
   scope.chatMenuScroller = scope.setupChatMenuScroller(viewport, { initialOpen, docked });
   viewport.fire('scrollend');
   return {
-    scope, viewport, body, shell, menu, guard, search, menuBtn, document, requests, panel,
+    scope, viewport, body, shell, menu, guard, search, menuBtn, document, requests, panel, head, newChat, windowMode,
     resize: value => { width = value; resize(); },
     scroll(left, end = false) { viewport.scrollLeft = left; viewport.fire('scroll'); if (end) viewport.fire('scrollend'); },
     wheel(x, y = 0, opts = {}) {
@@ -215,20 +217,20 @@ test('docked Chats leaves the conversation interactive without a dismiss overlay
   assert.equal(p.wheel(-100).defaultPrevented, undefined);
 });
 
-test('docked Chats can collapse and reopen without disabling the conversation', () => {
-  const p = setup({ initialOpen: true, docked: true });
+test('docked Chats stays open when close or toggle is requested', () => {
+  const p = setup({ initialOpen: false, docked: true });
+  assert.equal(p.state().open, true, 'the sidebar is always present in tab mode');
   p.search.focus();
+  p.scope.closeChatMenu();
   p.scope.toggleChatMenu();
-  assert.equal(p.state().open, false);
-  assert.equal(p.menu.inert, true);
-  assert.equal(p.shell.inert, false);
-  assert.equal(p.document.activeElement, p.menuBtn);
-  p.scope.toggleChatMenu();
+  p.scope.chatMenuScroller.to(false);
   assert.equal(p.state().open, true);
   assert.equal(p.menu.inert, false);
   assert.equal(p.shell.inert, false);
   assert.equal(p.document.activeElement, p.search);
   assert.equal(p.guard.classList.contains('hidden'), true);
+  assert.deepEqual(p.head.children, [p.newChat, p.windowMode]);
+  assert.equal(p.newChat['aria-label'], 'New chat');
 });
 
 test('choosing an open or saved chat preserves docked Chats and focuses the composer', () => {

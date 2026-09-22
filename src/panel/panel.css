@@ -1601,7 +1601,10 @@ body.chat-menu-docked .chat-shell.pushed {
   border-radius: 0;
   box-shadow: -1px 0 0 var(--border-primary);
 }
-body.chat-menu-docked .chat-menu-guard { display: none; }
+body.chat-menu-docked .chat-menu-guard,
+body.chat-menu-docked .chat-subbar { display: none; }
+body.chat-menu-docked #new-chat-btn { margin-left: auto; }
+body.chat-menu-docked .chat-menu-window { margin-left: 0; }
 @media (prefers-reduced-motion: reduce) {
   .chat-shell { transition: none; }
 }

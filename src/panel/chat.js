@@ -1629,11 +1629,15 @@
       const panel = els.chatMenu.querySelector(".chat-menu-panel");
       panel.setAttribute("role", "navigation");
       panel.removeAttribute("aria-modal");
-      finishChatMenuScroll(initialOpen);
+      els.chatMenu.querySelector(".chat-menu-head").insertBefore(els.newChat, els.windowMode);
+      els.newChat.setAttribute("aria-label", "New chat");
+      finishChatMenuScroll(true);
       viewport.classList.add("ready");
       return {
         get targetOpen() { return null; },
-        to(open, { focus = false } = {}) { finishChatMenuScroll(open, focus); },
+        to(open, { focus = false } = {}) {
+          if (open) finishChatMenuScroll(true, focus);
+        },
         // Both columns stay in view; wheel input belongs to their contents.
         onWheel() {},
       };
@@ -10480,7 +10484,10 @@
       els.fileInput.value = "";
       for (const f of files) addFile(f);
     });
-    els.newChat.addEventListener("click", () => createChat({ cwd: defaultCwd() }));
+    els.newChat.addEventListener("click", () => {
+      createChat({ cwd: defaultCwd() });
+      if (chatMenuIsDocked()) els.input.focus({ preventScroll: true });
+    });
     els.menuBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       toggleChatMenu();
