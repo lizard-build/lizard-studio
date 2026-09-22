@@ -11,14 +11,23 @@ window.runHistoryPanelTests = async function () {
   });
   const reply = (req, evs, cursor, extra = {}) => t.emit({ type: "transcript", id: req.id,
     sessionId: req.sessionId, requestId: req.requestId, paged: true, done: true, events: evs, nextCursor: cursor, ...extra });
-  t.emit({ type: "ready", ok: true, version: 32, home: "/test" });
+  t.emit({ type: "ready", ok: true, version: 33, home: "/test" });
   t.emit({ type: "agentReady", agent: "codex", ok: true, version: 6 });
   const initial = last();
   check("opening a restored chat asks for the tail once", t.posted("loadTranscript").length === 1 && initial.paged && initial.cursor === null);
-  reply(initial, events(20, 25), { kind: "turns", value: "older-20" });
+  const restoredQuestion = { type: "async_question", questionId: "history-q", historyItemId: "history-q", readOnly: false,
+    questions: [{ id: "0", question: "Restored question?", options: [{ label: "Keep it" }] }] };
+  reply(initial, [...events(20, 25), restoredQuestion], { kind: "turns", value: "older-20" });
   await frame();
   const box = document.querySelector(".chat-messages:not(.hidden)");
   check("the restored chat opens at its newest message", box.scrollHeight - box.scrollTop - box.clientHeight < 3 && box.textContent.includes("Message 24") && !box.textContent.includes("Message 19"));
+  const question = box.querySelector(".ask-card");
+  check("the newest page restores the question picker", question?.textContent.includes("Restored question?") && !!question.querySelector("button"));
+  question.querySelector("button").click();
+  const answer = t.posted("prompt").at(-1);
+  check("a restored picker targets its owning chat", answer?.id === "history-a" && answer.text === "Restored question?\nKeep it");
+  t.emit({ type: "promptResult", id: "history-a", requestId: answer.promptRequestId, ok: true, startedTurn: true });
+  check("the owning chat receives the answer receipt", question.textContent.includes("Answer sent"));
   check("opening does not eagerly download older pages", t.posted("loadTranscript").length === 1);
   box.scrollTop = 20;
   box.dispatchEvent(new Event("scroll"));

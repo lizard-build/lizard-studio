@@ -237,7 +237,7 @@ test("No SW retries setup without blocking clicks or starting duplicate attempts
   assert.equal(calls, 2);
 });
 
-test("persistent No SW is bounded, reported, and can recover on a later startup event", async () => {
+test("persistent No SW is bounded and can recover on a later startup event without an extension error", async () => {
   let calls = 0, broken = true;
   const timers = [], errors = [];
   const w = worker({
@@ -247,9 +247,30 @@ test("persistent No SW is bounded, reported, and can recover on a later startup 
   await flush();
   for (let i = 0; i < 3; i++) { timers[i].fn(); await flush(); }
   assert.deepEqual(timers.map(t => t.delay), [250, 1000, 3000]);
-  assert.equal(calls, 4); assert.equal(errors.length, 1);
+  assert.equal(calls, 4); assert.equal(errors.length, 0);
   broken = false; w.fire("startup"); await flush();
-  assert.equal(calls, 5); assert.equal(errors.length, 1);
+  assert.equal(calls, 5); assert.equal(errors.length, 0);
+});
+
+test("panel reconnect retries exhausted setup and keeps the click fallback available", async () => {
+  let calls = 0, broken = true;
+  const timers = [], errors = [];
+  const w = worker({
+    setPanelBehavior: async () => { calls++; if (broken) throw new Error("No SW"); },
+    timer: (fn, delay) => timers.push({ fn, delay }), log: { error: (...args) => errors.push(args) },
+  });
+  await flush();
+  for (let i = 0; i < 3; i++) { timers[i].fn(); await flush(); }
+  assert.equal(calls, 4);
+  w.fire("connect", { name: "unrelated" }); await flush();
+  assert.equal(calls, 4);
+  broken = false;
+  w.panel(101); await flush();
+  assert.equal(calls, 5);
+  w.fire("clicked", w.tabs[1]); await flush();
+  assert.equal(w.opened.at(-1).tabId, 22);
+  w.fire("startup"); w.panel(202); await flush();
+  assert.equal(calls, 5); assert.equal(errors.length, 0);
 });
 
 test("other API errors are reported immediately without repeated setup calls", async () => {

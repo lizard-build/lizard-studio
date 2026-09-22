@@ -1372,8 +1372,12 @@
   // Blocked on a human: a permission or question dialog is pending. Takes
   // priority over the yellow running dot — the turn is technically still open,
   // but nothing moves until you answer.
+  function pendingAsyncQuestion(chat) {
+    return [...(chat.asyncQuestions?.values() || [])].find((entry) => !entry.readOnly);
+  }
+
   function tabDotWaiting(chat) {
-    return !!(chat.permCards && chat.permCards.size);
+    return !!(chat.permCards && chat.permCards.size) || (!chat.turnRunning && !!pendingAsyncQuestion(chat));
   }
   // Retargets the dot classes on the existing tab nodes. Deliberately NOT a
   // full renderTabs(): turns start and end in background tabs all the time,
@@ -4580,21 +4584,75 @@
   // Claude Code's own picker returns (multi-select labels joined with ", ",
   // "Other" free text passed through verbatim). Questions (up to 4) are shown
   // one at a time; Esc dismisses the whole ask like the "No" option.
-  function showQuestionAsk(chat, msg) {
+  function showAsyncQuestion(chat, event) {
+    const owner = chat.historyOwner || chat;
+    if (!owner.asyncQuestions) owner.asyncQuestions = new Map();
+    if (owner.asyncQuestions.has(event.questionId)) return;
+    const streamed = owner.streamedText?.get(event.questionId);
+    if (streamed?.node) streamed.node.hidden = true;
+    showQuestionAsk(owner, {
+      requestId: event.questionId, async: true, readOnly: !!event.readOnly,
+      input: { questions: event.questions },
+    }, chat);
+  }
+
+  function sendAsyncQuestionAnswer(chat, entry, text) {
+    if (entry.sending || entry.readOnly || !text.trim()) return false;
+    if (!connected || !hostReady) {
+      entry.setError("Host disconnected. Reconnect, then try again.");
+      return false;
+    }
+    if (!chat.started) startChatSession(chat);
+    entry.sentText = text;
+    entry.promptRequestId = newId();
+    entry.setSending(true);
+    if (!post({ type: "prompt", agent: "codex", id: chat.id, text, promptRequestId: entry.promptRequestId })) {
+      entry.setError("Host disconnected. Your answer was not sent.");
+      return false;
+    }
+    return true;
+  }
+
+  function finishAsyncQuestionAnswer(chat, msg) {
+    const entry = [...(chat.asyncQuestions?.values() || [])].find((q) => q.promptRequestId === msg.requestId);
+    if (!entry || !entry.sending) return;
+    if (!msg.ok) {
+      entry.setError(msg.error || "Couldn't send your answer. Try again.");
+      return;
+    }
+    entry.complete("Answer sent");
+    userBubble(chat, entry.sentText, null, { real: !!msg.startedTurn });
+    chat.codexHasSubmittedTurn = true;
+    chat.empty = false;
+    touchChat(chat);
+    if (msg.startedTurn) resumeTurnIfIdle(chat);
+    updateTabDots();
+    savePrefs();
+  }
+
+  function failAsyncQuestionSends(chat) {
+    failQueuedSteers(chat);
+    for (const entry of chat.asyncQuestions?.values() || []) {
+      if (entry.sending) entry.setError("Connection lost. Check the chat before sending again.");
+    }
+  }
+
+  function showQuestionAsk(chat, msg, mountChat = chat) {
     const requestId = msg.requestId;
-    const questions = msg.input.questions.filter((q) => q && q.question).slice(0, 4);
-    const answers = {};
+    const questions = msg.input.questions.filter((q) => q && q.question).slice(0, msg.async ? 3 : 4);
+    const answers = Object.create(null);
     let qi = 0;
 
     const card = el("div", "perm-card ask-card");
     card.tabIndex = 0;
-    const entry = { card, selected: 0, rows: [] };
+    const entry = { card, selected: 0, rows: [], readOnly: !!msg.readOnly, sending: false };
 
     const title = el("div", "perm-title");
     const ic = el("span", "perm-title-ic");
     ic.innerHTML = ICON("chat", 14);
     title.appendChild(ic);
-    title.appendChild(el("span", null, chat.harness === "codex" ? "ChatGPT is asking" : "Claude is asking"));
+    const titleLabel = el("span", null, chat.harness === "codex" ? "ChatGPT is asking" : "Claude is asking");
+    title.appendChild(titleLabel);
     const step = el("span", "ask-step");
     title.appendChild(step);
     card.appendChild(title);
@@ -4603,8 +4661,15 @@
     card.appendChild(body);
     const hint = el("div", "ask-hint");
     card.appendChild(hint);
+    const retry = el("div", "ask-other hidden");
+    card.appendChild(retry);
 
     function finish(out) {
+      if (msg.async) {
+        const text = questions.map((q) => `${q.question}\n${answers[q.id] || ""}`).join("\n\n");
+        sendAsyncQuestionAnswer(chat, entry, text);
+        return;
+      }
       chat.permCards.delete(requestId);
       card.remove();
       renderTurnStatus(chat);
@@ -4616,11 +4681,13 @@
     }
 
     function dismiss() {
+      if (msg.async) { entry.complete("Dismissed"); updateTabDots(); return; }
       finish({ type: "permissionResult", id: chat.id, requestId, behavior: "deny", message: PERM_DENY_MESSAGE, interrupt: true });
     }
 
     function record(q, value) {
-      answers[q.question] = value;
+      if (entry.sending || entry.readOnly) return;
+      answers[msg.async ? q.id : q.question] = value;
       if (qi + 1 < questions.length) {
         qi++;
         renderQuestion();
@@ -4661,6 +4728,7 @@
       }
 
       function activate(i) {
+        if (entry.sending || entry.readOnly) return;
         if (i < options.length) {
           if (multi) {
             if (chosen.has(i)) chosen.delete(i);
@@ -4743,6 +4811,7 @@
     }
 
     card.addEventListener("keydown", (e) => {
+      if (entry.sending || entry.readOnly) return;
       const n = entry.rows.length;
       if (!n) return;
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -4770,15 +4839,55 @@
       }
     });
 
+    entry.setSending = (sending) => {
+      entry.sending = sending;
+      retry.textContent = "";
+      retry.classList.add("hidden");
+      hint.removeAttribute("role");
+      card.setAttribute("aria-busy", String(sending));
+      for (const field of card.querySelectorAll("button, input")) field.disabled = sending;
+      hint.textContent = sending ? "Sending answer…" : "1-9 / ↑↓ + enter selects · esc dismisses";
+    };
+    entry.setError = (message) => {
+      entry.setSending(false);
+      hint.textContent = message;
+      hint.setAttribute("role", "alert");
+      if (entry.sentText) {
+        retry.classList.remove("hidden");
+        retry.appendChild(el("div", "ask-opt-desc", entry.sentText));
+        const button = el("button", "perm-opt", "Retry answer");
+        button.type = "button";
+        button.addEventListener("keydown", (e) => e.stopPropagation());
+        button.addEventListener("click", () => sendAsyncQuestionAnswer(chat, entry, entry.sentText));
+        retry.appendChild(button);
+      }
+    };
+    entry.complete = (status) => {
+      entry.setSending(false);
+      entry.readOnly = true;
+      if (msg.async) titleLabel.textContent = "ChatGPT asked";
+      body.textContent = "";
+      step.textContent = "";
+      for (const q of questions) {
+        body.appendChild(el("div", "ask-question", q.question));
+        const answer = answers[q.id];
+        if (answer) body.appendChild(el("div", "ask-opt-title", answer));
+        else for (const option of q.options || []) body.appendChild(el("div", "ask-opt-desc", option.label));
+      }
+      hint.textContent = status;
+      hint.removeAttribute("role");
+    };
     const wasWaiting = tabDotWaiting(chat);
-    chat.permCards.set(requestId, entry);
-    renderQuestion();
-    append(chat, card);
+    if (msg.async) chat.asyncQuestions.set(requestId, entry);
+    else chat.permCards.set(requestId, entry);
+    if (entry.readOnly) entry.complete("Earlier question");
+    else renderQuestion();
+    append(mountChat, card);
     renderTurnStatus(chat);
-    noteWaitingAsk(chat, wasWaiting);
-    if (chat.id === activeId) {
+    if (!entry.readOnly && !mountChat.historyPage) noteWaitingAsk(chat, wasWaiting);
+    if (chat.id === activeId && !mountChat.historyPage) {
       scrollToBottom(chat);
-      if (!els.input || !els.input.value.trim()) card.focus();
+      if (!entry.readOnly && (!els.input || !els.input.value.trim())) card.focus();
     }
   }
 
@@ -4883,6 +4992,9 @@
     // and swallow every event so nothing renders and the turn UI stays idle.
     if (chat.usageProbe) { handleUsageProbe(chat, d); return; }
     switch (d.type) {
+      case "async_question":
+        showAsyncQuestion(chat, d);
+        break;
       case "system":
         if (d.subtype === "init") {
           chat.started = true;
@@ -5380,6 +5492,7 @@
       }
       codexUsage.fetching = false;
       for (const c of chats.values()) {
+        failAsyncQuestionSends(c);
         c.started = false;
         if (c.historyRequest) historyFailed(c, c.historyRequest);
         if (c.turnRunning) {
@@ -5624,6 +5737,9 @@
         // Not chat-scoped — claude is inspecting the live browser tab.
         handleBrowserOp(msg);
         break;
+      case "promptResult":
+        if (chat && !finishQueuedSteer(chat, msg)) finishAsyncQuestionAnswer(chat, msg);
+        break;
       case "permission":
         if (chat) showPermission(chat, msg);
         break;
@@ -5649,6 +5765,7 @@
           harnessChecked[msg.agent] = true;
           for (const c of chats.values()) {
             if (c.harness !== msg.agent) continue;
+            failAsyncQuestionSends(c);
             if (c.historyRequest) historyFailed(c, c.historyRequest);
             c.started = false;
             clearPermCards(c);
@@ -5762,6 +5879,7 @@
       }
       case "exit":
         if (chat) {
+          failAsyncQuestionSends(chat);
           chat.started = false;
           clearPermCards(chat);
           liftSuppress(chat); // no respawn coming — don't leave the event gate shut
@@ -6043,6 +6161,7 @@
     // reply, its counters, or its pending requests.
     const page = makeChat({ id: "history-" + chat.id, harness: chat.harness, model: chat.model, cwd: chat.cwd });
     page.historyPage = true;
+    page.historyOwner = chat;
     const seen = new Set();
     const events = msg.events.filter((event) => {
       if (!event.historyItemId) return true;
@@ -6100,6 +6219,10 @@
         if (isUsageDump(ev.content)) continue;
         const ts = ev.timestamp ? Date.parse(ev.timestamp) || Date.now() : Date.now();
         renderLocalCommandOutput(chat, String(ev.content || ""), ts);
+        continue;
+      }
+      if (ev.type === "async_question") {
+        showAsyncQuestion(chat, ev);
         continue;
       }
       if (!ev.message) continue;
@@ -6422,6 +6545,7 @@
     chat.bashPending = [];
     chat._bashIdx = 0;
     chat.bashMode = false;
+    chat.asyncQuestions?.clear();
     chat.queue = []; // stale prompts from the wiped conversation shouldn't replay
     if (chat.id === activeId) {
       renderTurnStatus(chat);
@@ -6508,6 +6632,13 @@
       post({ type: "pickFolder", id: chat.id }) || promptForFolder(chat);
       return;
     }
+    // A reply to an async question belongs to the current Codex turn.
+    // Leave attachments and page context in the composer for a normal send.
+    const question = chat.harness === "codex" && !hasContext && !hasAttach && !/^\//.test(text) ? pendingAsyncQuestion(chat) : null;
+    if (question) {
+      if (sendAsyncQuestionAnswer(chat, question, text)) { els.input.value = ""; autosize(); }
+      return;
+    }
     // Freeze the selection at Send, before any await or queue delay.
     if (selectionAtSend) chat.contexts = dedupeContexts([...(chat.contexts || []), selectionAtSend]);
     // A turn is already streaming — queue this one instead of dropping it.
@@ -6564,6 +6695,16 @@
     const bubble = buildBubble(entry.text, entry.attachments, entry.contexts);
     row.appendChild(bubble);
     const tag = el("div", "queued-tag");
+    if (chat.harness === "codex") {
+      row.classList.add("has-steer");
+      const steer = el("button", "queued-steer", "Steer");
+      steer.type = "button";
+      steer.title = "Send to the current turn";
+      steer.setAttribute("aria-label", "Steer: send to the current turn");
+      steer.addEventListener("mousedown", (e) => e.preventDefault());
+      steer.addEventListener("click", () => steerQueuedPrompt(chat, entry));
+      tag.appendChild(steer);
+    }
     const cancel = el("button", "queued-cancel");
     cancel.type = "button";
     cancel.innerHTML = ICON("x", 13);
@@ -6580,7 +6721,75 @@
     return row;
   }
 
+  function setQueuedSteering(entry, sending) {
+    entry.steering = sending;
+    if (!entry.el) return;
+    entry.el.setAttribute("aria-busy", String(sending));
+    for (const button of entry.el.querySelectorAll(".queued-tag button")) button.disabled = sending;
+    const steer = entry.el.querySelector(".queued-steer");
+    if (steer) steer.textContent = sending ? "Sending…" : "Steer";
+  }
+
+  function failQueuedSteer(chat, entry, message) {
+    setQueuedSteering(entry, false);
+    // An uncertain send must never be retried by the automatic queue drain.
+    entry.steerFailed = true;
+    systemNote(chat, `${message} The message is still in the queue.`, "warn", { dismissible: true });
+  }
+
+  function failQueuedSteers(chat) {
+    for (const entry of chat.queue || []) {
+      if (entry.steering) failQueuedSteer(chat, entry, "Connection lost. Check the chat before trying again.");
+    }
+  }
+
+  function steerQueuedPrompt(chat, entry) {
+    if (chat.harness !== "codex" || !chat.queue?.includes(entry) || chat.queue.some((q) => q.steering)) return;
+    if (!connected || !hostReady || !chat.started || chat.sessionFailure) {
+      systemNote(chat, "Reconnect to ChatGPT before sending this message.", "warn", { dismissible: true });
+      return;
+    }
+    // Lock before closing the editor: blur or turn completion can drain the queue.
+    setQueuedSteering(entry, true);
+    entry.finishEdit?.();
+    const extra = formatContexts({ contexts: entry.contexts || [] });
+    const text = (extra ? CTX_MARK_START + extra + CTX_MARK_END : "") + entry.text;
+    const images = (entry.attachments || []).map((a) => ({ mediaType: a.mediaType, data: a.dataUrl.split(",")[1] || "" }));
+    if (!text.trim() && !images.length) {
+      failQueuedSteer(chat, entry, "Enter a message first.");
+      return;
+    }
+    entry.promptRequestId = newId();
+    if (!post({ type: "prompt", agent: "codex", id: chat.id, text, images, promptRequestId: entry.promptRequestId })) {
+      failQueuedSteer(chat, entry, "Host disconnected before sending.");
+    }
+  }
+
+  function finishQueuedSteer(chat, msg) {
+    const entry = chat.queue?.find((q) => q.promptRequestId === msg.requestId && q.steering);
+    if (!entry) return false;
+    if (!msg.ok) {
+      failQueuedSteer(chat, entry, msg.error || "Couldn't send this message.");
+      return true;
+    }
+    chat.queue.splice(chat.queue.indexOf(entry), 1);
+    setQueuedSteering(entry, false);
+    entry.el?.classList.remove("queued", "has-steer");
+    entry.el?.querySelector(".bubble")?.classList.remove("editable");
+    entry.el?.querySelector(".queued-tag")?.remove();
+    if (msg.startedTurn && entry.el) entry.el.dataset.turnIndex = String(++chat.turnIndexCounter);
+    chat.codexHasSubmittedTurn = true;
+    chat.empty = false;
+    touchChat(chat);
+    if (msg.startedTurn) resumeTurnIfIdle(chat);
+    updateTabDots();
+    savePrefs();
+    flushQueuedIfIdle(chat);
+    return true;
+  }
+
   function removeQueued(chat, entry, row) {
+    if (entry.steering) return;
     if (Array.isArray(chat.queue)) {
       const idx = chat.queue.indexOf(entry);
       if (idx !== -1) chat.queue.splice(idx, 1);
@@ -6599,7 +6808,7 @@
   function wireQueuedEdit(chat, entry, bubble, row) {
     bubble.classList.add("editable");
     bubble.addEventListener("click", (e) => {
-      if (bubble.classList.contains("editing")) return;
+      if (!chat.queue?.includes(entry) || entry.steering || bubble.classList.contains("editing")) return;
       if (e.target.closest("a")) return; // don't hijack link clicks
       if (e.target.closest(".queued-cancel")) return;
       const sel = window.getSelection();
@@ -6630,11 +6839,13 @@
       closed = true;
       entry.text = text;
       entry.editing = false;
+      entry.finishEdit = null;
       bubble.classList.remove("editing");
       ta.replaceWith(R.markdown(text));
       // The entry may have been due to go out while it was held — release it.
       flushQueuedIfIdle(chat);
     };
+    entry.finishEdit = () => close(ta.value);
     ta.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
@@ -6673,7 +6884,7 @@
     if (!Array.isArray(chat.queue) || !chat.queue.length) return;
     // Head of the queue is open for editing — hold everything until the user
     // is done with it (or deletes it); both paths call back in here.
-    if (chat.queue[0].editing) return;
+    if (chat.queue[0].editing || chat.queue[0].steerFailed || chat.queue.some((entry) => entry.steering)) return;
     const entry = chat.queue.shift();
     if (entry.el && entry.el.parentNode) entry.el.remove();
     // The queued entry owns its files and context; the composer is a new draft.
