@@ -52,9 +52,11 @@ test('full UI resources start in a new task after the document load event', asyn
   p.tick(0);
   assert.equal(p.resources[0].href, 'panel.css');
   await p.loaded();
-  assert.equal(p.resources[1].src, 'icons.js');
+  assert.equal(p.resources[1].src, 'window-mode.js');
   await p.loaded();
-  assert.equal(p.resources[2].src, 'render.js');
+  assert.equal(p.resources[2].src, 'icons.js');
+  await p.loaded();
+  assert.equal(p.resources[3].src, 'render.js');
   assert.equal(p.nodes.get('panel-startup').hidden, false);
 });
 
@@ -64,7 +66,7 @@ test('slow loading keeps the screen and offers retry without reloading or skippi
   assert.match(p.nodes.get('panel-startup-message').textContent, /longer/);
   assert.equal(p.reloads, 0);
   await p.loaded();
-  assert.equal(p.resources.at(-1).src, 'icons.js');
+  assert.equal(p.resources.at(-1).src, 'window-mode.js');
   p.api.ready();
   assert.equal(p.nodes.get('panel-startup').hidden, true);
   assert.equal(p.reloads, 0);

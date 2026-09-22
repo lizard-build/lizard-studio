@@ -153,8 +153,8 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity })
       started: s.started, running: s.running, failed: s.failed, submitted: s.submitted, queue: s.queue.map((entry) => entry.ui), turnIds: [...s.turnIds],
     })) });
     for (const msg of r.ready.values()) send(port, msg);
-    for (const s of r.sessions.values()) if (s.agent === "codex") {
-      for (const msg of s.journal) {
+    for (const s of r.sessions.values()) {
+      for (const msg of s.agent === "codex" ? s.journal : []) {
         if (msg.type === "backgroundPrompt" && msg.accepted === false) continue;
         send(port, { type: "backgroundReplay", message: msg });
       }
@@ -205,7 +205,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity })
     if (port.name !== "studio-session") return false;
     // Content scripts can also open runtime ports. Only the extension's panel
     // may read chats or send commands to a native host.
-    if (port.sender?.id !== chrome.runtime.id || port.sender?.tab ||
+    if (port.sender?.id !== chrome.runtime.id ||
         port.sender?.url?.split(/[?#]/)[0] !== chrome.runtime.getURL("src/panel/panel.html")) {
       port.disconnect(); return true;
     }

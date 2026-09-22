@@ -623,7 +623,7 @@
         if (Array.isArray(p.usageLabels) && p.usageLabels.length) usageLabels = p.usageLabels;
         if (Array.isArray(p.tabs) && p.tabs.length) {
           for (const t of p.tabs) {
-            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt, draft: t.draft, bashMode: t.bashMode, bookmarkColor: t.bookmarkColor, titleEdited: t.titleEdited });
+            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt, draft: t.draft, contexts: t.contexts, attachments: t.attachments, bashMode: t.bashMode, bookmarkColor: t.bookmarkColor, titleEdited: t.titleEdited });
             chat.queue = Array.isArray(t.queue) ? t.queue : [];
             chats.set(chat.id, chat);
     let lastScrollTop = 0;
@@ -650,14 +650,14 @@
   function resumableSessionId(chat) {
     return chat.harness === "codex" && !chat.codexHasSubmittedTurn ? null : chat.sessionId;
   }
-  function savePrefs() {
-    if (backgroundRestoring) return;
+  function savePrefs(done) {
+    if (backgroundRestoring) { done?.(new Error("Chats are still loading. Try again in a moment.")); return; }
     try {
       const owner = chats.get(composerChatId);
       if (owner && els.input) owner.draft = els.input.value;
       const tabs = order.map((id) => {
         const c = chats.get(id);
-        return { queue: (c.queue || []).map(({ text, contexts, attachments, silent, steerFailed }) => ({ text, contexts, attachments, silent, steerFailed })), id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: resumableSessionId(c), bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, bashMode: c.bashMode, bookmarkColor: c.bookmarkColor, titleEdited: c.titleEdited };
+        return { queue: (c.queue || []).map(({ text, contexts, attachments, silent, steerFailed }) => ({ text, contexts, attachments, silent, steerFailed })), id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: resumableSessionId(c), bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, contexts: c.contexts, attachments: c.attachments, bashMode: c.bashMode, bookmarkColor: c.bookmarkColor, titleEdited: c.titleEdited };
       });
       chrome.storage.local.set({
         rkChatV2: {
@@ -667,8 +667,8 @@
           // so downgrading the extension doesn't lose the settings.
           lastModel: lastBy.claude.model, lastEffort: lastBy.claude.effort, lastMode: lastBy.claude.mode,
         },
-      });
-    } catch (_) {}
+      }, () => done?.(chrome.runtime.lastError ? new Error(chrome.runtime.lastError.message) : null));
+    } catch (error) { done?.(error); }
   }
 
   // Remember a folder the user deliberately selected so new chats can default to
@@ -983,10 +983,10 @@
       bashPending: [],
       // Page elements attached via the Selector tool, sent as context with the
       // next prompt, then cleared.
-      contexts: [],
+      contexts: Array.isArray(opts.contexts) ? opts.contexts.slice() : [],
       // Images pasted/dropped into the composer, sent as image blocks with the
       // next prompt, then cleared. Each: { id, mediaType, dataUrl }.
-      attachments: [],
+      attachments: Array.isArray(opts.attachments) ? opts.attachments.slice() : [],
       empty: !opts.sessionId,
       // Whether this tab's on-disk transcript has been requested/replayed yet.
       // Restored tabs (and history re-opens) carry a sessionId but no messages.
@@ -5502,7 +5502,7 @@
     }
     port.onMessage.addListener(onHostMessage);
     const attachingPort = port;
-    chrome.windows.getCurrent((win) => {
+    (window.RKPanelWindow?.sourceWindow || chrome.windows.getCurrent)((win) => {
       if (port !== attachingPort || !Number.isInteger(win?.id)) return;
       try { attachingPort.postMessage({ type: "attach", windowId: win.id }); } catch (_) {}
     });
@@ -10296,6 +10296,7 @@
     els.modeMenu = root.querySelector("#mode-menu");
     els.newChat = root.querySelector("#new-chat-btn");
     els.menuBtn = root.querySelector("#menu-btn");
+    els.windowMode = root.querySelector("#window-mode-btn");
     els.chatShell = root.querySelector("#chat-shell");
     els.chatMenuViewport = root.querySelector("#chat-menu-viewport");
     els.chatMenu = root.querySelector("#chat-menu");
@@ -10461,6 +10462,17 @@
     els.menuBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       toggleChatMenu();
+    });
+    els.windowMode.innerHTML = ICON("window-open", 18);
+    els.windowMode.hidden = !!window.RKPanelWindow?.detached;
+    els.windowMode.addEventListener("click", async () => {
+      els.windowMode.disabled = true;
+      try {
+        await window.RKPanelWindow.open(() => new Promise((resolve, reject) => savePrefs((error) => error ? reject(error) : resolve())));
+      } catch (error) {
+        systemNote(chats.get(activeId), error.message, "warn", { dismissible: true });
+        closeChatMenu();
+      } finally { els.windowMode.disabled = false; }
     });
     els.chatMenuGuard.addEventListener("click", closeChatMenu);
     chatMenuScroller = setupChatMenuScroller(els.chatMenuViewport);
@@ -10748,6 +10760,7 @@
         <div class="chat-menu-head">
           <span id="chat-menu-mark" class="chat-menu-mark"></span>
           <span class="chat-menu-title">Chats</span>
+          <button id="window-mode-btn" class="icon-btn chat-menu-window" type="button" title="Open in a separate window" aria-label="Open in a separate window"></button>
         </div>
         <div class="chat-menu-search">
           <span id="chat-menu-search-ic" class="chat-menu-search-ic"></span>
@@ -11017,7 +11030,13 @@
   // (so the "being debugged" banner only shows while in use).
   // ===========================================================================
   function activeTab() {
-    return new Promise((resolve) => chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => resolve(tabs?.[0] || null)));
+    return new Promise((resolve) => {
+      if (!window.RKPanelWindow) return chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => resolve(tabs?.[0] || null));
+      window.RKPanelWindow.sourceWindow((win) => {
+        if (!win) return resolve(null);
+        chrome.tabs.query({ active: true, windowId: win.id }, (tabs) => resolve(tabs?.[0] || null));
+      });
+    });
   }
   function listTabs() {
     return new Promise((resolve) => chrome.tabs.query({}, (tabs) => resolve(tabs || [])));

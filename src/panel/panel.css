@@ -1611,6 +1611,8 @@ body.chat-menu-open .la-layer {
   margin-left: -2px;
   color: var(--control-primary);
 }
+.chat-menu-window { margin-left: auto; flex: 0 0 auto; }
+.chat-menu-window[hidden] { display: none; }
 .chat-menu-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
 .chat-menu-search {
   display: flex;

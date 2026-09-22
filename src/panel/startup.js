@@ -59,6 +59,7 @@
         window.removeEventListener("error", onError);
         window.removeEventListener("unhandledrejection", onRejection);
         screen.hidden = true;
+        window.RKPanelWindow?.ready();
       };
       if (!viewport) { fail(new Error("Chat viewport missing")); return; }
       observer = new MutationObserver(reveal);
@@ -84,7 +85,7 @@
     try {
       mark("styles");
       await load("link", "panel.css");
-      for (const path of ["icons.js", "render.js", "activity.js", "chat.js", "panel.js"]) {
+      for (const path of ["window-mode.js", "icons.js", "render.js", "activity.js", "chat.js", "panel.js"]) {
         if (failed) return;
         mark(path);
         await load("script", path);

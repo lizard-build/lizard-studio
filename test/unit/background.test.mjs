@@ -282,3 +282,15 @@ test("other API errors are reported immediately without repeated setup calls", a
     assert.equal(errors[0][1].message, "Permission denied");
   }
 });
+
+test("the detached shell routes page selections to its source window", () => {
+  const sent = [];
+  const port = { postMessage: m => sent.push(m), onMessage: { addListener() {} }, onDisconnect: { addListener() {} } };
+  vm.runInNewContext(readFileSync(new URL("../../src/panel/panel.js", import.meta.url), "utf8"), {
+    chrome: { runtime: { id: "test", connect: () => port }, windows: { getCurrent() { throw Error("must not use popup window"); } } },
+    document: { getElementById: () => null },
+    window: { addEventListener() {}, RKPanelWindow: { sourceWindow: cb => cb({ id: 7 }) } },
+    setTimeout() {}, setInterval() {},
+  });
+  assert.equal(sent[0].type, "panelReady"); assert.equal(sent[0].windowId, 7);
+});

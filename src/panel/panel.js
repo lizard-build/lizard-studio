@@ -31,7 +31,7 @@
       setTimeout(connectBg, 500);
       return;
     }
-    chrome.windows.getCurrent((win) => {
+    (window.RKPanelWindow?.sourceWindow || chrome.windows.getCurrent)((win) => {
       if (disconnected || chrome.runtime.lastError || !win || !Number.isInteger(win.id)) return;
       try {
         bg.postMessage({ type: "panelReady", windowId: win.id });

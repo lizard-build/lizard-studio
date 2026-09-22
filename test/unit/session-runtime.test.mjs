@@ -176,3 +176,27 @@ test("web page content scripts cannot connect to native sessions or read chat re
   r.sessions.connect(p); p.emit({ type: "attach", windowId: 1 });
   assert.equal(p.closed, true); assert.equal(r.native.length, 0); assert.equal(p.sent.length, 0);
 });
+
+test("a detached extension view shares the original host, replay and pending permissions", async () => {
+  const r = runtime(), side = r.panel(7); r.start(side);
+  const host = r.native[0];
+  host.emit({ type: "permission", id: "a", requestId: "approval", input: {} });
+  const detached = r.port("studio-session");
+  detached.sender = { id: "test", url: "chrome-extension://test/src/panel/panel.html?mode=window&sourceWindowId=7", tab: { id: 80, windowId: 90 } };
+  r.sessions.connect(detached); detached.emit({ type: "attach", windowId: 7 });
+  side.disconnect(); await r.settle();
+  assert.equal(r.native.length, 1); assert.equal(host.closed, false);
+  assert.ok(detached.sent.some(m => m.type === "backgroundReplay" && m.message.requestId === "approval"));
+  assert.equal(host.sent.filter(m => m.type === "prompt").length, 1);
+  host.emit({ type: "browser", bid: 1, op: "dom", session: "a" }); await flush();
+  assert.equal(r.browserCalls.at(-1).windowId, 7);
+});
+
+test("Claude permission requests survive moving to another view", () => {
+  const r = runtime(), side = r.panel(7);
+  side.emit({ type: "start", agent: "claude", id: "a" });
+  side.emit({ type: "prompt", agent: "claude", id: "a", text: "work" });
+  r.native[0].emit({ type: "permission", id: "a", requestId: "claude-approval", input: {} });
+  const next = r.panel(7);
+  assert.ok(next.sent.some(m => m.type === "backgroundReplay" && m.message.requestId === "claude-approval"));
+});
