@@ -2,8 +2,17 @@
 
 // Native ports belong to the worker, never to a disposable panel page.
 // Each window keeps its own host and browser-tool state.
-globalThis.createStudioSessions = function ({ chrome, createBrowser, activity }) {
+globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, prefsStore }) {
   const runtimes = new Map();
+  const panels = () => [...runtimes.values()].flatMap((r) => [...r.panels]);
+  const ownerOf = (id) => [...runtimes.values()].find((r) => r.sessions.has(id));
+  const stateFor = (s, panel) => ({ id: s.id, agent: s.agent, spec: s.spec, sessionId: s.sessionId,
+    observer: s.controller !== panel, started: s.started, running: s.running, failed: s.failed,
+    submitted: s.submitted, queue: s.queue.map((entry) => entry.ui), turnIds: [...s.turnIds] });
+  function roles(s) {
+    for (const panel of panels()) send(panel, { type: "sessionRole", id: s.id, observer: s.controller !== panel });
+  }
+
   const send = (port, message) => { try { port.postMessage(message); } catch (_) {} };
   const busy = (s) => s.running || s.permissions.size > 0 || s.queue.length > 0 || s.pendingPrompts.size > 0;
   const count = (r) => [...r.sessions.values()].filter((s) => (s.running || s.pendingPrompts.size > 0 || s.queue.length > 0 && !s.queue[0]?.held) && !s.permissions.size && !s.failed).length;
@@ -11,6 +20,15 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity })
   function remember(r) {
     // Hosts save transcripts. Persist the thread id as soon as it arrives, even
     // when the panel closed before the first reply. Do not rewrite UI drafts.
+    if (prefsStore) return prefsStore.update((prefs) => {
+      const tabs = [...(prefs.tabs || [])];
+      for (const s of r.sessions.values()) {
+        if (!s.sessionId || !s.submitted) continue;
+        const index = tabs.findIndex((t) => t.id === s.id);
+        if (index >= 0) tabs[index] = { ...tabs[index], sessionId: s.sessionId, queue: s.queue.map((entry) => entry.ui) };
+      }
+      return { ...prefs, tabs };
+    }).catch((error) => console.error("[Studio] Save session", error));
     r.saving = r.saving.then(() => new Promise((resolve) => {
       chrome.storage.local.get(["rkChatV2"], (data) => {
         const prefs = data?.rkChatV2 || {};
@@ -29,11 +47,11 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity })
   }
   function releaseIfIdle(r) {
     clearTimeout(r.idleTimer);
-    if (r.panels.size || [...r.sessions.values()].some(busy) || r.browserCalls) return;
+    if (panels().length || [...r.sessions.values()].some(busy) || r.browserCalls) return;
     // Let trailing usage/error messages and an immediate reopen settle first.
     r.idleTimer = setTimeout(async () => {
       await remember(r);
-      if (r.panels.size || [...r.sessions.values()].some(busy) || r.browserCalls) return;
+      if (panels().length || [...r.sessions.values()].some(busy) || r.browserCalls) return;
       if (runtimes.get(r.windowId) !== r) return;
       runtimes.delete(r.windowId);
       r.browser.detachAllCdp();
@@ -54,7 +72,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity })
     return s;
   }
   function drain(r, s) {
-    if (r.panels.size || s.running || s.pendingPrompts.size || s.permissions.size || s.failed || !s.queue.length || s.queue[0].held) return;
+    if (s.controller || s.running || s.pendingPrompts.size || s.permissions.size || s.failed || !s.queue.length || s.queue[0].held) return;
     const entry = s.queue.shift();
     forward(r, entry.message);
   }
@@ -91,7 +109,9 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity })
           pending.entry.accepted = !!msg.ok;
           if (msg.ok) {
             if (msg.startedTurn) s.running = true;
+            for (const panel of panels()) if (panel !== pending.origin) send(panel, { type: "sharedPrompt", message: pending.entry });
             s.queue = s.queue.filter((q) => q.ui.backgroundId !== pending.queueId || !pending.queueId);
+            for (const panel of panels()) if (panel !== pending.origin) send(panel, { type: "sharedQueue", id: s.id, entries: s.queue.map((entry) => entry.ui) });
           } else {
             const queued = s.queue.find((q) => pending.queueId && q.ui.backgroundId === pending.queueId);
             if (queued) { queued.held = true; queued.ui.steerFailed = true; }
@@ -118,7 +138,9 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity })
         item.running = false; item.started = false; item.failed = true; item.permissions.clear(); item.pendingPrompts.clear();
       }
     }
-    for (const panel of r.panels) send(panel, msg);
+    for (const panel of s ? panels() : r.panels) {
+      send(panel, s && panel !== s.controller ? { type: "sharedEvent", message: msg } : msg);
+    }
     if (s) drain(r, s);
     update(); releaseIfIdle(r);
   }
@@ -132,6 +154,9 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity })
     r.native.onDisconnect.addListener(() => {
       void chrome.runtime.lastError;
       if (runtimes.get(windowId) !== r) return;
+      for (const session of r.sessions.values()) for (const panel of panels()) {
+        if (!r.panels.has(panel)) send(panel, { type: "sharedEvent", message: { type: "exit", id: session.id, code: 1 } });
+      }
       runtimes.delete(windowId); clearTimeout(r.idleTimer);
       r.browser.detachAllCdp();
       remember(r);
@@ -148,12 +173,11 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity })
     r.panels.add(port);
     // An ordered snapshot precedes new live messages on the same port. Replays
     // only paint the UI; no permission, prompt or browser action is repeated.
-    send(port, { type: "backgroundRestoreStart", sessions: [...r.sessions.values()].map((s) => ({
-      id: s.id, agent: s.agent, spec: s.spec, sessionId: s.sessionId,
-      started: s.started, running: s.running, failed: s.failed, submitted: s.submitted, queue: s.queue.map((entry) => entry.ui), turnIds: [...s.turnIds],
-    })) });
+    const allSessions = [...runtimes.values()].flatMap((item) => [...item.sessions.values()]);
+    for (const s of allSessions) if (!s.controller) s.controller = port;
+    send(port, { type: "backgroundRestoreStart", sessions: allSessions.map((s) => stateFor(s, port)) });
     for (const msg of r.ready.values()) send(port, msg);
-    for (const s of r.sessions.values()) {
+    for (const s of allSessions) {
       for (const msg of s.agent === "codex" ? s.journal : []) {
         if (msg.type === "backgroundPrompt" && msg.accepted === false) continue;
         send(port, { type: "backgroundReplay", message: msg });
@@ -163,13 +187,30 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity })
     send(port, { type: "backgroundRestoreEnd" });
     return r;
   }
-  function forward(r, msg) {
+  function forward(r, msg, origin = null) {
+    r = ownerOf(msg.id) || r;
+    const existing = r.sessions.get(msg.id);
+    if (msg.type === "start" && existing?.started && origin && existing.controller !== origin) {
+      send(origin, { type: "sharedSession", session: stateFor(existing, origin) });
+      return;
+    }
+    if (msg.type === "sessionClaim") {
+      if (existing && origin) { existing.controller = origin; roles(existing); }
+      return;
+    }
+    if (msg.type === "permissionResult" && existing && !existing.permissions.has(msg.requestId)) return;
+    if (msg.type === "backgroundQueue" && existing?.controller && existing.controller !== origin) return;
     const s = getSession(r, msg);
+    if (s && origin && (!s.controller || ["prompt", "restartSession"].includes(msg.type))) {
+      s.controller = origin;
+      roles(s);
+    }
     if (msg.type === "backgroundQueue" && !s) return;
     if (s) {
       if (msg.type === "backgroundQueue") {
         s.agent = msg.agent || s.agent;
         s.queue = Array.isArray(msg.entries) ? msg.entries : [];
+        for (const panel of panels()) if (panel !== origin) send(panel, { type: "sharedQueue", id: s.id, entries: s.queue.map((entry) => entry.ui) });
         update(); return;
       }
       if (msg.type === "start" || msg.type === "restartSession") {
@@ -179,16 +220,21 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity })
         // A resumed thread already has history, even before another prompt.
         s.submitted = !!msg.resume;
         s.journal = []; s.turnIds.clear();
+        for (const panel of panels()) if (panel !== origin) send(panel, { type: "sharedSession", session: stateFor(s, panel) });
       }
       if (msg.type === "prompt") {
         if (!s.running) { s.journal = []; s.turnIds.clear(); }
         s.submitted = true; s.failed = false;
         const entry = { type: "backgroundPrompt", id: s.id, text: msg.text, images: msg.images, accepted: !msg.promptRequestId };
-        if (msg.promptRequestId) s.pendingPrompts.set(msg.promptRequestId, { entry, queueId: msg.backgroundQueueId });
+        if (msg.promptRequestId) s.pendingPrompts.set(msg.promptRequestId, { entry, queueId: msg.backgroundQueueId, origin });
         else s.running = true;
         if (s.agent === "codex") s.journal.push(entry);
+        if (!msg.promptRequestId) for (const panel of panels()) if (panel !== origin) send(panel, { type: "sharedPrompt", message: entry });
       }
-      if (msg.type === "permissionResult") s.permissions.delete(msg.requestId);
+      if (msg.type === "permissionResult") {
+        s.permissions.delete(msg.requestId);
+        for (const panel of panels()) if (panel !== origin) send(panel, { type: "sharedEvent", message: { type: "permissionCancel", id: s.id, requestId: msg.requestId } });
+      }
       if (msg.type === "loadTranscript" && s.agent === "codex") {
         // The panel owns the exclusions for its current rendering, not a newer
         // turn that might have started since it restored the snapshot.
@@ -220,13 +266,18 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity })
         }
         return;
       }
-      if (runtimes.get(r.windowId) === r && r.panels.has(port)) forward(r, msg);
+      if (runtimes.get(r.windowId) === r && r.panels.has(port)) forward(r, msg, port);
     });
     port.onDisconnect.addListener(() => {
       if (!r) return;
       r.panels.delete(port);
-      for (const s of r.sessions.values()) drain(r, s);
-      releaseIfIdle(r);
+      for (const runtime of runtimes.values()) {
+        for (const s of runtime.sessions.values()) {
+          if (s.controller === port) { s.controller = panels()[0] || null; roles(s); }
+          drain(runtime, s);
+        }
+        releaseIfIdle(runtime);
+      }
     });
     return true;
   }

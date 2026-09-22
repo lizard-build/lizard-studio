@@ -85,7 +85,7 @@
     try {
       mark("styles");
       await load("link", "panel.css");
-      for (const path of ["window-mode.js", "icons.js", "render.js", "activity.js", "chat.js", "panel.js"]) {
+      for (const path of ["window-mode.js", "icons.js", "render.js", "activity.js", "../prefs-sync.js", "chat.js", "panel.js"]) {
         if (failed) return;
         mark(path);
         await load("script", path);

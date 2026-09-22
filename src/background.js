@@ -1,4 +1,5 @@
-importScripts("browser-runtime.js", "session-runtime.js");
+importScripts("browser-runtime.js", "prefs-sync.js", "session-runtime.js");
+const prefsStore = StudioPrefsSync.createStore(chrome);
 
 // The worker owns native sessions, browser tools, and panel/toolbar routing.
 
@@ -123,7 +124,7 @@ chrome.commands.onCommand.addListener((command) => {
 // another window may become active between selecting content and delivering it.
 const panelPorts = new Map();
 let nativeRunningCount = 0;
-const sessions = createStudioSessions({ chrome, createBrowser: createStudioBrowser, activity(count) {
+const sessions = createStudioSessions({ chrome, prefsStore, createBrowser: createStudioBrowser, activity(count) {
   nativeRunningCount = count;
   refreshActionActivity();
 } });

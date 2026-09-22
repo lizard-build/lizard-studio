@@ -19,7 +19,7 @@ function worker(options = {}) {
   };
   let nativeActivity;
   vm.runInNewContext(readFileSync(new URL("../../src/background.js", import.meta.url), "utf8"), {
-    chrome, console: log, setTimeout: timer, clearTimeout, importScripts() {}, createStudioBrowser() {},
+    chrome, console: log, setTimeout: timer, clearTimeout, importScripts() {}, createStudioBrowser() {}, StudioPrefsSync: { createStore() { return {}; } },
     createStudioSessions({ activity }) { nativeActivity = activity; return { connect() { return false; } }; },
   });
   const fire = (name, ...args) => (listeners[name] || []).map((fn) => fn(...args));

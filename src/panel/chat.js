@@ -9,6 +9,7 @@
 (function () {
   let backgroundRestoring = false;
   let backgroundRestoreStates = [];
+  let sharedRendering = false, applyingSharedPrefs = false, prefsSync = null;
   const RECONNECT_MS = 1200;
   const R = window.RKRender;
   const ICON = window.RKIconHTML;
@@ -640,6 +641,7 @@
           }
           activeId = chats.has(p.activeId) ? p.activeId : order[0];
         }
+        prefsSync = StudioPrefsSync.createClient(chrome, p, chatPrefsSnapshot, applySharedPrefs);
         done && done();
       });
     } catch (_) {
@@ -650,25 +652,60 @@
   function resumableSessionId(chat) {
     return chat.harness === "codex" && !chat.codexHasSubmittedTurn ? null : chat.sessionId;
   }
+  function chatPrefsSnapshot() {
+    const owner = chats.get(composerChatId);
+    if (owner && els.input) owner.draft = els.input.value;
+    const tabs = order.map((id) => {
+      const c = chats.get(id);
+      return { queue: (c.queue || []).map(({ text, contexts, attachments, silent, steerFailed, backgroundId }) => ({ text, contexts, attachments, silent, steerFailed, backgroundId })), id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: resumableSessionId(c), bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, contexts: c.contexts, attachments: c.attachments, bashMode: c.bashMode, bookmarkColor: c.bookmarkColor, titleEdited: c.titleEdited };
+    });
+    return { tabs, activeId, history, lastCwd, soundOnDone, usageLabels, lastBy, lastHarness,
+      lastModel: lastBy.claude.model, lastEffort: lastBy.claude.effort, lastMode: lastBy.claude.mode };
+  }
   function savePrefs(done) {
-    if (backgroundRestoring) { done?.(new Error("Chats are still loading. Try again in a moment.")); return; }
+    if (applyingSharedPrefs || sharedRendering) { done?.(); return; }
+    if (backgroundRestoring) { done?.(new Error("Chats are still loading. Try again.")); return; }
     try {
-      const owner = chats.get(composerChatId);
-      if (owner && els.input) owner.draft = els.input.value;
-      const tabs = order.map((id) => {
-        const c = chats.get(id);
-        return { queue: (c.queue || []).map(({ text, contexts, attachments, silent, steerFailed }) => ({ text, contexts, attachments, silent, steerFailed })), id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: resumableSessionId(c), bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, contexts: c.contexts, attachments: c.attachments, bashMode: c.bashMode, bookmarkColor: c.bookmarkColor, titleEdited: c.titleEdited };
-      });
-      chrome.storage.local.set({
-        rkChatV2: {
-          tabs, activeId, history, lastCwd, soundOnDone, usageLabels,
-          lastBy, lastHarness,
-          // Mirrors of the Claude slot under the names older builds look for,
-          // so downgrading the extension doesn't lose the settings.
-          lastModel: lastBy.claude.model, lastEffort: lastBy.claude.effort, lastMode: lastBy.claude.mode,
-        },
-      }, () => done?.(chrome.runtime.lastError ? new Error(chrome.runtime.lastError.message) : null));
+      if (!prefsSync) { done?.(new Error("Chats are still loading. Try again.")); return; }
+      prefsSync.save(chatPrefsSnapshot(), done);
     } catch (error) { done?.(error); }
+  }
+  function applySharedPrefs(prefs) {
+    if (!mounted) return;
+    const previousActiveId = activeId;
+    applyingSharedPrefs = true;
+    try {
+      const ids = new Set((prefs.tabs || []).map((t) => t.id));
+      for (const [id, chat] of chats) if (!ids.has(id)) {
+        chat.messagesEl.remove();
+        if (chat.historyRequest) clearTimeout(chat.historyRequest.timer);
+        chats.delete(id);
+      }
+      for (const saved of prefs.tabs || []) {
+        let chat = chats.get(saved.id);
+        if (!chat) {
+          chat = makeChat(saved);
+          chats.set(chat.id, chat);
+          els.stack.appendChild(chat.messagesEl);
+        }
+        for (const key of ["title", "titleEdited", "bookmarkColor", "cwd", "harness", "model", "effort", "mode", "draft", "contexts", "attachments", "bashMode", "lastActivityAt"]) {
+          if (saved[key] !== undefined) chat[key] = saved[key];
+        }
+        if (saved.sessionId && !chat.sessionId) { chat.sessionId = saved.sessionId; chat.codexHasSubmittedTurn = true; }
+      }
+      order = (prefs.tabs || []).map((t) => t.id);
+      history = prefs.history || [];
+      if (!chats.has(activeId)) activeId = order[0] || null;
+      for (const [id, chat] of chats) chat.messagesEl.classList.toggle("hidden", id !== activeId);
+      const active = chats.get(activeId);
+      if (active) {
+        composerChatId = activeId;
+        if (els.input.value !== active.draft) { els.input.value = active.draft || ""; autosize(); }
+        syncComposer();
+      }
+      renderTabs();
+    } finally { applyingSharedPrefs = false; }
+    if (activeId && activeId !== previousActiveId) setActive(activeId);
   }
 
   // Remember a folder the user deliberately selected so new chats can default to
@@ -1382,8 +1419,9 @@
     return !!(chat.permCards && chat.permCards.size) || (!chat.turnRunning && !!pendingAsyncQuestion(chat));
   }
   function syncBackgroundQueues() {
-    if (!connected || backgroundRestoring) return;
+    if (!connected || backgroundRestoring || sharedRendering || applyingSharedPrefs) return;
     for (const chat of chats.values()) {
+      if (chat.sessionObserver) continue;
       if (chat.harness !== "codex") continue;
       const entries = (chat.queue || []).map((entry) => {
         entry.backgroundId ||= newId();
@@ -5269,7 +5307,7 @@
       setRunningUI(chat.turnRunning);
       renderTurnStatus(chat);
     }
-    if (backgroundRestoring) { updateTabDots(); return; }
+    if (backgroundRestoring || sharedRendering || chat.sessionObserver) { updateTabDots(); return; }
     // A model/mode/effort switch made mid-turn was deferred so it wouldn't
     // hard-kill the reply that was still streaming — apply it now that the
     // turn is actually done, before anything queued goes out under it.
@@ -5642,6 +5680,52 @@
 
   function onHostMessage(msg) {
     if (!msg) return;
+    if (msg.type === "sharedQueue") {
+      const chat = chats.get(msg.id);
+      if (!chat || !chat.sessionObserver) return;
+      sharedRendering = true;
+      try {
+        for (const entry of chat.queue) entry.el?.remove();
+        chat.queue = msg.entries || [];
+        for (const entry of chat.queue) entry.el = renderQueuedBubble(chat, entry);
+        updateTabDots();
+      } finally { sharedRendering = false; }
+      return;
+    }
+    if (msg.type === "sessionRole") {
+      const chat = chats.get(msg.id);
+      if (chat) chat.sessionObserver = msg.observer;
+      return;
+    }
+    if (msg.type === "sharedSession") {
+      const state = msg.session;
+      let chat = chats.get(state.id);
+      if (!chat) {
+        chat = makeChat({ id: state.id, harness: state.agent, cwd: state.spec.cwd, model: state.spec.model, sessionId: state.sessionId });
+        chats.set(chat.id, chat); order.push(chat.id); els.stack.appendChild(chat.messagesEl);
+      }
+      chat.sessionObserver = state.observer;
+      chat.started = state.started;
+      chat.turnRunning = state.running;
+      if (state.sessionId) chat.sessionId = state.sessionId;
+      chat.codexHasSubmittedTurn = state.submitted;
+      if (state.agent === "codex" && !state.submitted) chat.empty = true;
+      chat.messagesEl.classList.toggle("hidden", chat.id !== activeId);
+      sharedRendering = true;
+      try { renderTabs(); syncComposer(); } finally { sharedRendering = false; }
+      return;
+    }
+    if (msg.type === "sharedEvent" || msg.type === "sharedPrompt") {
+      sharedRendering = true;
+      try {
+        if (msg.type === "sharedPrompt") {
+          onHostMessage({ type: "backgroundReplay", message: msg.message });
+          const chat = chats.get(msg.message.id);
+          if (chat) { chat.codexHasSubmittedTurn = true; resumeTurnIfIdle(chat); syncComposer(); updateTabDots(); }
+        } else onHostMessage(msg.message);
+      } finally { sharedRendering = false; }
+      return;
+    }
     if (msg.type === "backgroundRestoreStart") {
       backgroundRestoring = true;
       backgroundRestoreStates = msg.sessions || [];
@@ -5660,6 +5744,7 @@
         chats.set(chat.id, chat);
         chat.messagesEl.classList.toggle("hidden", chat.id !== activeId);
         chat.started = state.started;
+        chat.sessionObserver = !!state.observer;
         // Older workers did not mark resumed threads as submitted. Keep the
         // saved ID so reopening an idle chat cannot erase its history link.
         const savedSessionId = state.spec.resume || (old && resumableSessionId(old));
@@ -5705,6 +5790,7 @@
     if (msg.type === "turnStarted") {
       const chat = chats.get(msg.id);
       if (chat?.backgroundTurnIds && msg.turnId) chat.backgroundTurnIds.add(msg.turnId);
+      if (chat && sharedRendering) { resumeTurnIfIdle(chat); updateTabDots(); }
       return;
     }
     connected = true;
@@ -6144,6 +6230,7 @@
   }
 
   function post(obj) {
+    if (sharedRendering || applyingSharedPrefs) return true;
     if (backgroundRestoring) return true;
     // The router picks a host by this field. Stamping it here rather than at
     // three dozen call sites means a new message type can never forget it —
@@ -6168,6 +6255,7 @@
 
   // ---- session control ------------------------------------------------------
   function startChatSession(chat, resume) {
+    if (chat.sessionObserver || applyingSharedPrefs) return;
     if (!hostReady || !harnessReady[chat.harness || DEFAULT_HARNESS]) return;
     // Never spawn a session in an unspecified directory — wait for an explicit
     // folder pick. The empty-state setup chips stay visible so the user knows.
@@ -6675,9 +6763,13 @@
     startChatSession(chat);
   }
 
+  function claimSession(chat) {
+    if (chat.sessionObserver && post({ type: "sessionClaim", id: chat.id })) chat.sessionObserver = false;
+  }
   async function sendPrompt() {
     const chat = chats.get(activeId);
     if (!chat) return;
+    claimSession(chat);
     const text = els.input.value.trim();
     // Bash mode ("!"): run the line as a local shell command in the tab's cwd
     // instead of sending it to the model. Runs independently of any in-flight
@@ -6913,6 +7005,7 @@
 
   function removeQueued(chat, entry, row) {
     if (entry.steering) return;
+    claimSession(chat);
     if (Array.isArray(chat.queue)) {
       const idx = chat.queue.indexOf(entry);
       if (idx !== -1) chat.queue.splice(idx, 1);
@@ -6941,6 +7034,7 @@
   }
 
   function beginQueuedEdit(chat, entry, bubble, row) {
+    claimSession(chat);
     const mdNode = bubble.querySelector(".md");
     bubble.classList.add("editing");
     // Holds the queue at this entry: its send time may come around mid-edit,
@@ -7006,6 +7100,7 @@
   // `chat` isn't the active tab — background chats keep working while queued.
   function dispatchNextQueued(chat) {
     if (typeof backgroundRestoring !== "undefined" && backgroundRestoring) return;
+    if (chat.sessionObserver) return;
     if (chat.sessionFailure) return;
     if (!Array.isArray(chat.queue) || !chat.queue.length) return;
     // Head of the queue is open for editing — hold everything until the user

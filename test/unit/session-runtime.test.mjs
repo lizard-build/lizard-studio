@@ -123,13 +123,13 @@ test("a first reply after closing saves its thread id without replacing drafts",
   assert.equal(r.storage.rkChatV2.draft, "keep");
 });
 
-test("separate windows cannot overwrite each other's host, count or replay", async () => {
+test("separate windows share chat events while retaining each task's host and count", async () => {
   const r = runtime(), a = r.panel(1), b = r.panel(2); r.start(a, "a"); r.start(b, "b");
   assert.equal(r.counts.at(-1), 2); a.disconnect();
   r.native[0].emit(result("a")); await r.settle();
-  assert.equal(r.native[0].closed, true); assert.equal(r.native[1].closed, false);
+  assert.equal(r.native[0].closed, false); assert.equal(r.native[1].closed, false);
   assert.equal(r.counts.at(-1), 1);
-  assert.ok(!b.sent.some((m) => m.id === "a"));
+  assert.ok(b.sent.some((m) => m.id === "a" || m.message?.id === "a"));
 });
 
 test("host failure clears the badge and disconnects the panel without restarting work", () => {
@@ -222,4 +222,63 @@ test("Claude permission requests survive moving to another view", () => {
   r.native[0].emit({ type: "permission", id: "a", requestId: "claude-approval", input: {} });
   const next = r.panel(7);
   assert.ok(next.sent.some(m => m.type === "backgroundReplay" && m.message.requestId === "claude-approval"));
+});
+
+test('the same chat in two windows has one session and shares prompts and streaming events', () => {
+  const r = runtime(), a = r.panel(1), b = r.panel(2);
+  r.start(a);
+  b.emit({ type: 'start', id: 'a', agent: 'codex', cwd: '/project' });
+  assert.equal(r.native.flatMap(p => p.sent).filter(m => m.type === 'start').length, 1);
+  assert.ok(b.sent.some(m => m.type === 'sharedPrompt' && m.message.text === 'Work a'));
+  const delta = { type: 'event', id: 'a', data: { type: 'stream_event', event: { delta: { text: 'Hello' } } } };
+  r.native[0].emit(delta);
+  assert.deepEqual(b.sent.at(-1), { type: 'sharedEvent', message: delta });
+  assert.deepEqual(a.sent.at(-1), delta);
+  b.emit({ type: 'prompt', id: 'a', text: 'Continue' });
+  assert.equal(r.native[0].sent.at(-1).text, 'Continue');
+  assert.equal(r.native[1].sent.filter(m => m.type === 'prompt').length, 0);
+  assert.ok(a.sent.some(m => m.type === 'sessionRole' && m.observer));
+});
+
+test('opening another window during a response restores that response and its session', () => {
+  const r = runtime(), a = r.panel(1); r.start(a);
+  r.native[0].emit({ type: 'turnStarted', id: 'a', turnId: 'turn' });
+  r.native[0].emit({ type: 'event', id: 'a', data: { type: 'assistant', message: { content: [{ type: 'text', text: 'Partial answer' }] } } });
+  const b = r.panel(2);
+  assert.equal(b.sent[0].sessions[0].observer, true);
+  assert.equal(b.sent[0].sessions[0].running, true);
+  assert.ok(b.sent.some(m => m.message?.data?.message?.content?.[0]?.text === 'Partial answer'));
+});
+
+test('a mirror cannot overwrite the queue and a permission is resolved only once', () => {
+  const r = runtime(), a = r.panel(1), b = r.panel(2); r.start(a);
+  a.emit({ type: 'backgroundQueue', id: 'a', entries: [{ ui: { text: 'next' }, message: { type: 'prompt', id: 'a', text: 'next' } }] });
+  assert.equal(b.sent.at(-1).type, 'sharedQueue');
+  b.emit({ type: 'backgroundQueue', id: 'a', entries: [] });
+  r.native[0].emit({ type: 'permission', id: 'a', requestId: 'approve' });
+  b.emit({ type: 'permissionResult', id: 'a', requestId: 'approve', behavior: 'allow' });
+  a.emit({ type: 'permissionResult', id: 'a', requestId: 'approve', behavior: 'allow' });
+  assert.equal(r.native[0].sent.filter(m => m.type === 'permissionResult').length, 1);
+  a.disconnect();
+  assert.ok(b.sent.some(m => m.type === 'sessionRole' && !m.observer));
+  const c = r.panel(3);
+  assert.equal(c.sent[0].sessions[0].queue[0].text, 'next');
+});
+
+test('Claude live prompts and responses reach other windows without repeating commands', () => {
+  const r = runtime(), a = r.panel(1), b = r.panel(2);
+  a.emit({ type: 'start', id: 'a', agent: 'claude', cwd: '/project' });
+  a.emit({ type: 'prompt', id: 'a', agent: 'claude', text: 'Hello' });
+  r.native[0].emit(result('a'));
+  assert.ok(b.sent.some(m => m.type === 'sharedPrompt' && m.message.text === 'Hello'));
+  assert.ok(b.sent.some(m => m.type === 'sharedEvent' && m.message.data?.result === 'Done'));
+  assert.equal(r.native[0].sent.filter(m => m.type === 'prompt').length, 1);
+});
+
+test('a rejected steer never appears as an accepted prompt in another window', () => {
+  const r = runtime(), a = r.panel(1), b = r.panel(2); r.start(a);
+  a.emit({ type: 'prompt', id: 'a', text: 'Correction', promptRequestId: 'steer' });
+  assert.ok(!b.sent.some(m => m.type === 'sharedPrompt' && m.message.text === 'Correction'));
+  r.native[0].emit({ type: 'promptResult', id: 'a', requestId: 'steer', ok: false });
+  assert.ok(!b.sent.some(m => m.type === 'sharedPrompt' && m.message.text === 'Correction'));
 });
