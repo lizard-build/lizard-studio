@@ -5504,7 +5504,7 @@
     const attachingPort = port;
     (window.RKPanelWindow?.sourceWindow || chrome.windows.getCurrent)((win) => {
       if (port !== attachingPort || !Number.isInteger(win?.id)) return;
-      try { attachingPort.postMessage({ type: "attach", windowId: win.id }); } catch (_) {}
+      try { attachingPort.postMessage({ type: "attach", windowId: win.id, contextTabId: window.RKPanelWindow?.sourceTabId }); } catch (_) {}
     });
     port.onDisconnect.addListener(() => {
       // Read (and discard) lastError so Chrome doesn't log "Unchecked
@@ -10463,8 +10463,9 @@
       e.stopPropagation();
       toggleChatMenu();
     });
-    els.windowMode.innerHTML = ICON("window-open", 18);
-    els.windowMode.hidden = !!window.RKPanelWindow?.detached;
+    els.windowMode.innerHTML = ICON(window.RKPanelWindow?.detached ? "side-panel" : "window-open", 18);
+    els.windowMode.title = window.RKPanelWindow?.detached ? "Return to side panel" : "Open in a Chrome tab";
+    els.windowMode.setAttribute("aria-label", els.windowMode.title);
     els.windowMode.addEventListener("click", async () => {
       els.windowMode.disabled = true;
       try {
@@ -10494,7 +10495,7 @@
     els.settingsClose.addEventListener("click", closeSettings);
     // Click the dimmed backdrop (outside the modal) to dismiss.
     window.addEventListener("beforeunload", (e) => {
-      savePrefs();
+      if (!window.RKPanelWindow?.transferring) savePrefs();
       if ([...cfgEditors.values()].some((editor) => editor.saving || editor.content !== editor.original) || modelDraft) {
         e.preventDefault();
         e.returnValue = "";
@@ -10760,7 +10761,7 @@
         <div class="chat-menu-head">
           <span id="chat-menu-mark" class="chat-menu-mark"></span>
           <span class="chat-menu-title">Chats</span>
-          <button id="window-mode-btn" class="icon-btn chat-menu-window" type="button" title="Open in a separate window" aria-label="Open in a separate window"></button>
+          <button id="window-mode-btn" class="icon-btn chat-menu-window" type="button" title="Open in a Chrome tab" aria-label="Open in a Chrome tab"></button>
         </div>
         <div class="chat-menu-search">
           <span id="chat-menu-search-ic" class="chat-menu-search-ic"></span>
@@ -11030,13 +11031,8 @@
   // (so the "being debugged" banner only shows while in use).
   // ===========================================================================
   function activeTab() {
-    return new Promise((resolve) => {
-      if (!window.RKPanelWindow) return chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => resolve(tabs?.[0] || null));
-      window.RKPanelWindow.sourceWindow((win) => {
-        if (!win) return resolve(null);
-        chrome.tabs.query({ active: true, windowId: win.id }, (tabs) => resolve(tabs?.[0] || null));
-      });
-    });
+    if (window.RKPanelWindow) return window.RKPanelWindow.activeTab();
+    return new Promise(resolve => chrome.tabs.query({ active: true, currentWindow: true }, tabs => resolve(tabs?.[0] || null)));
   }
   function listTabs() {
     return new Promise((resolve) => chrome.tabs.query({}, (tabs) => resolve(tabs || [])));

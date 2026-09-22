@@ -266,3 +266,13 @@ test("a focus setup failure detaches and never falls back to activating the tab"
   assert.equal(p.detachments.length, 1);
   assert.equal(p.commands.includes("Input.insertText"), false);
 });
+
+test("an active Studio tab cannot replace the page used by browser tools", async () => {
+  const p = panel(), panelURL = "chrome-extension://test/src/panel/panel.html";
+  p.chrome.runtime.getURL = () => panelURL;
+  p.chrome.tabs.query = (_, cb) => cb([{ id: 80, windowId: 1, url: panelURL + "?mode=tab" }]);
+  p.setContextTab(11);
+  await p.call("snapshot");
+  assert.equal(p.pinnedTabBySession.get("chat-a"), 11);
+  assert.equal(p.replies[0].ok, true);
+});

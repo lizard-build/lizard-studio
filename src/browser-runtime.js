@@ -27,11 +27,19 @@ globalThis.createStudioBrowser = function ({ post = () => {}, windowId = null } 
     for (const [id, u] of uploads) if (now - u.ts > UPLOAD_TTL_MS) uploads.delete(id);
   }
 
-  function activeTab() {
+  let contextTabId = null;
+  function activeTab(useContext = true) {
     return new Promise((resolve) => {
       chrome.tabs.query(windowId == null ? { active: true, lastFocusedWindow: true } : { active: true, windowId }, (tabs) => {
         const t = tabs && tabs[0];
-        if (t && t.id != null) return resolve(t);
+        if (t && t.id != null) {
+          const panelURL = chrome.runtime.getURL?.("src/panel/panel.html");
+          if (useContext && panelURL && t.url?.split(/[?#]/)[0] === panelURL) {
+            return getTab(contextTabId).then(tab => resolve(tab && tab.windowId === t.windowId && tab.url?.split(/[?#]/)[0] !== panelURL ? tab : null));
+          }
+          if (!panelURL || t.url?.split(/[?#]/)[0] !== panelURL) contextTabId = t.id;
+          return resolve(t);
+        }
         if (windowId != null) return resolve(null);
         chrome.tabs.query({ active: true, currentWindow: true }, (t2) => resolve((t2 && t2[0]) || null));
       });
@@ -267,7 +275,7 @@ globalThis.createStudioBrowser = function ({ post = () => {}, windowId = null } 
 
   const GLOBAL_OPS = {
     async tabs({ session }) {
-      const [tabs, current] = await Promise.all([listTabs(), activeTab()]);
+      const [tabs, current] = await Promise.all([listTabs(), activeTab(false)]);
       return opOk({
         activeTabId: current ? current.id : null,
         workingTabId: session ? pinnedTabBySession.get(session) ?? null : null,
@@ -663,5 +671,5 @@ globalThis.createStudioBrowser = function ({ post = () => {}, windowId = null } 
   }
 
 
-  return { handleBrowserOp, activeTab, listTabs, detachAllCdp, ensureAttached, cdpSessions, pinnedTabBySession, dbgSend };
+  return { setContextTab: (tabId) => { contextTabId = tabId; }, handleBrowserOp, activeTab, listTabs, detachAllCdp, ensureAttached, cdpSessions, pinnedTabBySession, dbgSend };
 };

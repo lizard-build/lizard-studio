@@ -212,7 +212,10 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity })
     let r = null;
     port.onMessage.addListener((msg) => {
       if (!r) {
-        if (msg?.type === "attach" && Number.isInteger(msg.windowId) && msg.windowId >= 0) r = attach(port, msg.windowId);
+        if (msg?.type === "attach" && Number.isInteger(msg.windowId) && msg.windowId >= 0) {
+          r = attach(port, msg.windowId);
+          if (Number.isInteger(msg.contextTabId)) r?.browser.setContextTab?.(msg.contextTabId);
+        }
         return;
       }
       if (runtimes.get(r.windowId) === r && r.panels.has(port)) forward(r, msg);

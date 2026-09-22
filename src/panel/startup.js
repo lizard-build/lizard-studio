@@ -89,6 +89,7 @@
         if (failed) return;
         mark(path);
         await load("script", path);
+        if (path === "window-mode.js") await window.RKPanelWindow?.prepare();
       }
     } catch (error) { fail(error); }
   }
