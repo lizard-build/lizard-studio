@@ -256,10 +256,10 @@ process.on("unhandledRejection", (reason) => {
   log("UNHANDLED_REJECTION", String(reason));
 });
 
-// Chrome closing the pipe means the panel is gone. Take the children with us —
-// otherwise a claude process keeps streaming into a dead file descriptor.
+// The worker keeps this pipe open while tasks run, even without a panel.
+// Once it releases the connection, stop the children and their output streams.
 process.stdout.on("error", () => {
-  log("stdout error — panel gone, shutting down");
+  log("stdout error — worker connection gone, shutting down");
   shutdown(0);
 });
 

@@ -1,5 +1,6 @@
-// Minimal service worker: relay toggle requests to the active tab's content script.
-// Everything else lives in the content scripts — no network, no remote state.
+importScripts("browser-runtime.js", "session-runtime.js");
+
+// The worker owns native sessions, browser tools, and panel/toolbar routing.
 
 // ---- content-script injection ----------------------------------------------
 // Manifest content_scripts only reach pages loaded AFTER the extension is
@@ -121,7 +122,11 @@ chrome.commands.onCommand.addListener((command) => {
 // A side panel belongs to one browser window. Never route by last focus:
 // another window may become active between selecting content and delivering it.
 const panelPorts = new Map();
-const runningCounts = new Map();
+let nativeRunningCount = 0;
+const sessions = createStudioSessions({ chrome, createBrowser: createStudioBrowser, activity(count) {
+  nativeRunningCount = count;
+  refreshActionActivity();
+} });
 let appliedCount = null;
 let badgeUpdate = Promise.resolve();
 
@@ -137,7 +142,7 @@ function refreshActionActivity() {
       await chrome.action.setBadgeBackgroundColor({ color: "#fbbf24" });
       await chrome.action.setBadgeTextColor({ color: "#121212" });
     }
-    const count = [...runningCounts.values()].reduce((total, value) => total + value, 0);
+    const count = nativeRunningCount;
     if (count === appliedCount) return;
     await chrome.action.setBadgeText({ text: count ? (count > 999 ? "999+" : String(count)) : "" });
     await chrome.action.setTitle({ title: count
@@ -146,7 +151,7 @@ function refreshActionActivity() {
     appliedCount = count;
   }).catch((error) => console.error("[RK] session badge", error));
 }
-// Panels replay their counts on reconnect; clear stale state until they do.
+// Clear stale badges until the native runtime reports active sessions.
 refreshActionActivity();
 
 function panelsForWindow(windowId) {
@@ -214,15 +219,13 @@ function selectionChanged(selection, sender) {
 }
 
 chrome.runtime.onConnect.addListener((port) => {
+  if (sessions.connect(port)) return;
   if (port.name !== "rk-sidepanel") return;
   ensurePanelBehavior();
   panelPorts.set(port, null);
   port.onMessage.addListener((msg) => {
     if (msg?.type === "chatActivity") {
       if (panelPorts.get(port) == null || !Number.isSafeInteger(msg.count) || msg.count < 0) return;
-      if (msg.count) runningCounts.set(port, msg.count);
-      else runningCounts.delete(port);
-      refreshActionActivity();
       return;
     }
     if (msg?.type !== "panelReady" || !Number.isInteger(msg.windowId) || msg.windowId < 0) return;
@@ -234,7 +237,6 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onDisconnect.addListener(() => {
     const windowId = panelPorts.get(port);
     panelPorts.delete(port);
-    runningCounts.delete(port);
     refreshActionActivity();
     if (windowId != null && !panelsForWindow(windowId).length) {
       liveSelections.delete(windowId);

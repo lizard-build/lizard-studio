@@ -497,3 +497,22 @@ test("history keeps async questions and only reopens those without later user in
   questions = h.messages.at(-1).events.filter((e) => e.type === "async_question");
   assert.ok(questions.every((q) => q.readOnly));
 });
+
+test("background history excludes replayed turns without changing the older cursor", async () => {
+  const h = await host();
+  h.respond(() => ({ data: ["live", "old"].map((id) => ({ id, items: [{ id: id + "-item", type: "agentMessage", text: id }] })), nextCursor: "older" }));
+  await h.api.loadTranscript({ id: "a", sessionId: "thread-a", requestId: "restore", excludeTurnIds: ["live"] });
+  const page = h.messages.at(-1);
+  assert.deepEqual(page.events.map((e) => e.message.content[0].text), ["old"]);
+  assert.equal(page.nextCursor.value, "older");
+});
+
+test("turn boundaries and emitted replies carry the same id for background replay", async () => {
+  const h = await host(), s = h.session();
+  h.api.handleNotification("turn/started", { threadId: s.threadId, turn: { id: "new-turn" } });
+  assert.equal(h.messages.at(-1).type, "turnStarted");
+  h.api.handleNotification("item/completed", { threadId: s.threadId, item: { type: "agentMessage", id: "answer", text: "Done" } });
+  assert.equal(h.messages.findLast((m) => m.type === "event").turnId, "new-turn");
+  h.api.handleNotification("turn/completed", { threadId: s.threadId, turn: { id: "new-turn", status: "completed" } });
+  assert.equal(h.messages.findLast((m) => m.data?.type === "result").turnId, "new-turn");
+});

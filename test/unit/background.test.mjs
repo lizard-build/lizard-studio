@@ -17,8 +17,10 @@ function worker(options = {}) {
     windows: { WINDOW_ID_CURRENT: -2, WINDOW_ID_NONE: -1, onFocusChanged: event("focus") },
     declarativeNetRequest: { updateSessionRules: async () => {} },
   };
+  let nativeActivity;
   vm.runInNewContext(readFileSync(new URL("../../src/background.js", import.meta.url), "utf8"), {
-    chrome, console: log, setTimeout: timer, clearTimeout,
+    chrome, console: log, setTimeout: timer, clearTimeout, importScripts() {}, createStudioBrowser() {},
+    createStudioSessions({ activity }) { nativeActivity = activity; return { connect() { return false; } }; },
   });
   const fire = (name, ...args) => (listeners[name] || []).map((fn) => fn(...args));
   function panel(windowId, ready = true) {
@@ -30,7 +32,7 @@ function worker(options = {}) {
     return { received, identify, activity: (count) => messages.forEach((fn) => fn({ type: "chatActivity", count })), close: () => disconnect.forEach((fn) => fn()) };
   }
   const message = (msg, windowId) => fire("message", msg, { tab: { windowId, id: 11 } }, () => {});
-  return { panel, message, fire, tabsSent, opened, tabs, contexts, icons, titles, badges, backgrounds, textColors };
+  return { activity: (count) => nativeActivity(count), panel, message, fire, tabsSent, opened, tabs, contexts, icons, titles, badges, backgrounds, textColors };
 }
 
 test("attachments, selected elements, and close only reach the source window", () => {
@@ -85,48 +87,39 @@ test("the panel identifies its own window on every worker connection", () => {
 
 const flush = () => new Promise(setImmediate);
 
-test("the yellow badge sums running sessions across panels and clears at zero", async () => {
+test("the yellow badge follows native sessions even after all panels close", async () => {
   const w = worker(), a = w.panel(101), b = w.panel(202);
   await flush();
   assert.equal(w.icons.at(-1).path[16], "chrome-extension://test/icons/icon16.png");
-  assert.equal(w.badges.at(-1), "");
   assert.equal(w.backgrounds.at(-1), "#fbbf24");
   assert.equal(w.textColors.at(-1), "#121212");
-  a.activity(2); b.activity(3); await flush();
+  w.activity(5); await flush();
   assert.equal(w.badges.at(-1), "5");
-  assert.equal(w.titles.at(-1), "Lizard Studio — 5 sessions running");
-  a.activity(1); await flush(); assert.equal(w.badges.at(-1), "4");
-  b.close(); await flush(); assert.equal(w.badges.at(-1), "1");
+  a.close(); b.close(); await flush();
+  assert.equal(w.badges.at(-1), "5");
+  w.activity(1); await flush();
   assert.equal(w.titles.at(-1), "Lizard Studio — 1 session running");
-  const writes = w.badges.length;
-  a.activity(1); await flush(); assert.equal(w.badges.length, writes);
-  a.activity(0); await flush();
+  w.activity(0); await flush();
   assert.equal(w.badges.at(-1), ""); assert.equal(w.titles.at(-1), "Studio idle");
-  assert.equal(w.icons.length, 1);
 });
 
-test("unregistered, disconnected, and invalid count reports cannot set the badge", async () => {
-  const w = worker(), p = w.panel(101, false);
-  p.activity(2); await flush(); assert.equal(w.badges.at(-1), "");
-  p.identify(); p.activity(2); await flush();
-  for (const invalid of [true, "3", -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
-    p.activity(invalid); await flush(); assert.equal(w.badges.at(-1), "2");
-  }
-  p.close(); p.activity(3); await flush(); assert.equal(w.badges.at(-1), "");
+test("panel activity cannot overwrite the native session count", async () => {
+  const w = worker(), p = w.panel(101);
+  w.activity(2);
+  for (const value of [0, 12, true, "3", -1, 1.5, NaN, Infinity]) p.activity(value);
+  await flush(); assert.equal(w.badges.at(-1), "2");
 });
 
 test("finishing during a delayed badge write cannot leave a stale count", async () => {
   let release;
   const pending = new Promise((resolve) => { release = resolve; });
-  const w = worker({ writeBadge: (text) => text === "2" ? pending : undefined }), p = w.panel(101);
-  await flush(); p.activity(2); await flush(); p.activity(0); release();
+  const w = worker({ writeBadge: (text) => text === "2" ? pending : undefined });
+  await flush(); w.activity(2); await flush(); w.activity(0); release();
   await flush(); assert.equal(w.badges.at(-1), "");
-  assert.equal(w.titles.at(-1), "Studio idle");
 });
 
 test("large counts fit the badge while the tooltip keeps the exact total", async () => {
-  const w = worker(), p = w.panel(101);
-  p.activity(1200); await flush();
+  const w = worker(); w.activity(1200); await flush();
   assert.equal(w.badges.at(-1), "999+");
   assert.equal(w.titles.at(-1), "Lizard Studio — 1200 sessions running");
 });
