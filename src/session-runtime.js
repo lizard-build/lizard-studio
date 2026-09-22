@@ -176,6 +176,8 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity })
         s.spec = { ...msg }; s.agent = msg.agent || s.agent;
         s.started = true; s.running = false; s.failed = false; s.permissions.clear();
         s.sessionId = msg.resume || null;
+        // A resumed thread already has history, even before another prompt.
+        s.submitted = !!msg.resume;
         s.journal = []; s.turnIds.clear();
       }
       if (msg.type === "prompt") {

@@ -5637,7 +5637,10 @@
         chats.set(chat.id, chat);
         chat.messagesEl.classList.toggle("hidden", chat.id !== activeId);
         chat.started = state.started;
-        chat.codexHasSubmittedTurn = state.submitted;
+        // Older workers did not mark resumed threads as submitted. Keep the
+        // saved ID so reopening an idle chat cannot erase its history link.
+        const savedSessionId = state.spec.resume || (old && resumableSessionId(old));
+        chat.codexHasSubmittedTurn = !!state.submitted || !!savedSessionId && savedSessionId === chat.sessionId;
         chat.tabsContextSent = state.submitted;
         if (state.agent === "codex") chat.backgroundTurnIds = new Set(state.turnIds || []);
         chat.replayed = false;

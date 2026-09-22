@@ -45,6 +45,29 @@ function runtime() {
 }
 const result = (id) => ({ type: "event", id, data: { type: "result", result: "Done" } });
 
+test("a resumed chat keeps its saved history across panel reloads without a new prompt", async () => {
+  const r = runtime(), p = r.panel();
+  p.emit({ type: "start", agent: "codex", id: "a", cwd: "/project", resume: "saved-thread" });
+  p.disconnect();
+  const reopened = r.panel();
+  const state = reopened.sent[0].sessions[0];
+  assert.equal(state.sessionId, "saved-thread");
+  assert.equal(state.submitted, true);
+  assert.equal(state.running, false);
+  reopened.disconnect(); await r.settle();
+  assert.equal(r.storage.rkChatV2.tabs[0].sessionId, "saved-thread");
+});
+
+test("starting a fresh chat clears the previous session's submitted flag", () => {
+  const r = runtime(), p = r.panel(); r.start(p);
+  p.emit({ type: "start", agent: "codex", id: "a", cwd: "/other-project" });
+  r.native[0].emit({ type: "event", id: "a", data: { type: "system", subtype: "init", session_id: "empty-thread" } });
+  p.disconnect();
+  const state = r.panel().sent[0].sessions[0];
+  assert.equal(state.sessionId, "empty-thread");
+  assert.equal(state.submitted, false);
+});
+
 test("closing the last panel preserves every active session and releases only after the last result", async () => {
   const r = runtime(), p = r.panel(); r.start(p, "a"); r.start(p, "b");
   assert.equal(r.counts.at(-1), 2); p.disconnect(); await r.settle();
