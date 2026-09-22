@@ -9797,20 +9797,23 @@
   function updateSetup() {
     if (!els.setup) return;
     const chat = chats.get(activeId);
-    els.setup.classList.toggle("hidden", !(chat && chat.empty && !chat.sessionFailure));
+    els.setup.classList.toggle("hidden", !(chat && (chat.empty || chatHasEmptyView(chat)) && !chat.sessionFailure));
     updateEmptyMark();
+  }
+
+  // Shared by the logo and setup controls after an empty transcript loads.
+  function chatHasEmptyView(chat) {
+    // A completed history load leaves its hidden navigation button in the DOM.
+    // It is not a message; queued bubbles and shell output still count.
+    const hasContent = chat && [...chat.messagesEl.children].some((node) => node !== chat.historyNav || !node.hidden);
+    return !!(chat && (chat.empty || chat.historyLoaded) && !chat.turnRunning
+      && !chat.historyRequest && !chat.historyError && !chat.historyCursor && !hasContent);
   }
 
   // ---- empty-chat mark -------------------------------------------------------
   function updateEmptyMark() {
     if (!els.emptyMark) return;
-    const chat = chats.get(activeId);
-    // A completed history load leaves its hidden navigation button in the DOM.
-    // It is not a message; queued bubbles and shell output still count.
-    const hasContent = chat && [...chat.messagesEl.children].some((node) => node !== chat.historyNav || !node.hidden);
-    const show = !!(chat && (chat.empty || chat.historyLoaded) && !chat.turnRunning
-      && !chat.historyRequest && !chat.historyError && !chat.historyCursor && !hasContent);
-    els.emptyMark.classList.toggle("hidden", !show);
+    els.emptyMark.classList.toggle("hidden", !chatHasEmptyView(chats.get(activeId)));
   }
 
   // ---- git branch chip ------------------------------------------------------
@@ -9891,7 +9894,7 @@
   // mode swap to whatever this agent was last left on.
   function chooseHarness(chat, id) {
     if (!chat || chat.harness === id) return;
-    if (!chat.empty || chat.turnRunning || chat.queue.length) {
+    if ((!chat.empty && !chatHasEmptyView(chat)) || chat.turnRunning || chat.queue.length) {
       createChat({ cwd: chat.cwd, harness: id });
       return;
     }
