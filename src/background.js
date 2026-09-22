@@ -66,8 +66,8 @@ function toggleStudio(tab) {
 
 // Let Chrome handle icon clicks without waiting for the worker to start.
 // Chrome can reject an API call with "No SW" while the worker is stopping.
-// Retry that specific failure, then keep the fallback and report persistent
-// failures. A fresh worker also runs this setup if shutdown cancels the timer.
+// Retry that specific failure, then leave setup pending for the next worker or
+// panel connection. A stopped worker cannot repair Chrome's registration.
 let panelBehaviorReady = false;
 let panelBehaviorTask = null;
 function ensurePanelBehavior() {
@@ -81,7 +81,11 @@ function ensurePanelBehavior() {
         panelBehaviorReady = true;
         return;
       } catch (error) {
-        if (error?.message !== "No SW" || attempt === delays.length) throw error;
+        if (error?.message !== "No SW") throw error;
+        // This worker is no longer registered with Chrome. Keep the click
+        // fallback and allow a later event to retry, without recording a
+        // normal worker shutdown as an extension error.
+        if (attempt === delays.length) return;
         await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
       }
     }
@@ -211,6 +215,7 @@ function selectionChanged(selection, sender) {
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "rk-sidepanel") return;
+  ensurePanelBehavior();
   panelPorts.set(port, null);
   port.onMessage.addListener((msg) => {
     if (msg?.type === "chatActivity") {
