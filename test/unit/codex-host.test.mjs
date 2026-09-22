@@ -428,3 +428,72 @@ test("stopping or closing a chat cancels only its browser workflows", async () =
   h.api.closeSession("b");
   assert.equal(receivedB[0].type, "workflowCancel");
 });
+
+test("async questions keep their options without opening an approval or a text stream", async () => {
+  const h = await host(), s = h.session();
+  const item = { type: "agentMessage", id: "async-q", delivery: "async", text: "CPU or RAM?", questions: [{ title: "Resources?", options: ["CPU", "RAM"] }, { title: "Details", options: null }] };
+  h.api.handleNotification("item/started", { threadId: s.threadId, item });
+  h.api.handleNotification("item/completed", { threadId: s.threadId, item });
+  const event = h.messages.find((m) => m.data?.type === "async_question");
+  assert.equal(event.id, "a");
+  assert.deepEqual(event.data.questions, [
+    { id: "0", question: "Resources?", multiSelect: false, options: [{ label: "CPU" }, { label: "RAM" }] },
+    { id: "1", question: "Details", multiSelect: false, options: [] },
+  ]);
+  assert.equal(s.asks.size, 0);
+  assert.equal(h.messages.some((m) => m.data?.type === "assistant" || m.data?.type === "stream_event"), false);
+  h.api.handleNotification("turn/completed", { threadId: s.threadId, turn: { id: s.turnId, status: "completed" } });
+  assert.equal(h.messages.some((m) => m.type === "permissionCancel"), false);
+});
+
+test("async answers steer a running turn and acknowledge only after acceptance", async () => {
+  const h = await host(), s = h.session();
+  let accept;
+  h.respond(() => new Promise((resolve) => { accept = resolve; }));
+  const sent = h.api.sendPrompt({ id: s.id, text: "Resources?\nCPU", promptRequestId: "answer-1" });
+  await new Promise(setImmediate);
+  assert.equal(h.messages.some((m) => m.type === "promptResult"), false);
+  accept({ turnId: s.turnId }); await sent;
+  assert.deepEqual(h.requests.map((r) => r.method), ["turn/steer"]);
+  assert.equal(h.messages.at(-1).ok, true);
+  assert.equal(h.messages.at(-1).requestId, "answer-1");
+  assert.equal(h.messages.at(-1).startedTurn, false);
+});
+
+test("async answers start a turn after completion, including a late completion notification", async () => {
+  for (const running of [true, false]) {
+    const h = await host(), s = h.session(); s.running = running;
+    h.respond((req) => {
+      if (req.method === "turn/steer") throw new Error("no active turn");
+      return { turn: { id: "next-turn" } };
+    });
+    await h.api.sendPrompt({ id: s.id, text: "CPU", promptRequestId: "answer-2" });
+    assert.deepEqual(h.requests.map((r) => r.method), running ? ["turn/steer", "turn/start"] : ["turn/start"]);
+    assert.equal(h.messages.at(-1).ok, true);
+    assert.equal(h.messages.at(-1).startedTurn, true);
+    h.api.handleNotification("turn/completed", { threadId: s.threadId, turn: { id: "turn-a", status: "completed" } });
+    assert.equal(s.running, true);
+  }
+});
+
+test("failed async answers stay retryable without starting another turn", async () => {
+  const h = await host(), s = h.session();
+  h.respond(() => { throw new Error("connection lost"); });
+  await h.api.sendPrompt({ id: s.id, text: "CPU", promptRequestId: "answer-3" });
+  assert.deepEqual(h.requests.map((r) => r.method), ["turn/steer"]);
+  assert.equal(h.messages.at(-1).ok, false);
+  assert.match(h.messages.at(-1).error, /connection lost/);
+  assert.equal(s.running, true);
+});
+
+test("history keeps async questions and only reopens those without later user input", async () => {
+  const h = await host(); h.session();
+  const q = (id) => ({ type: "agentMessage", id, delivery: "async", text: "Choose", questions: [{ title: "Choose", options: ["A", "B"] }] });
+  h.respond(() => ({ data: [{ id: "t", items: [q("old"), { type: "userMessage", id: "reply", content: [{ type: "text", text: "A" }] }, q("pending")] }], nextCursor: null }));
+  await h.api.loadTranscript({ id: "a", sessionId: "thread-a" });
+  let questions = h.messages.at(-1).events.filter((e) => e.type === "async_question");
+  assert.deepEqual(questions.map((q) => [q.questionId, q.readOnly]), [["old", true], ["pending", false]]);
+  await h.api.loadTranscript({ id: "a", sessionId: "thread-a", cursor: { kind: "turns", value: "older" } });
+  questions = h.messages.at(-1).events.filter((e) => e.type === "async_question");
+  assert.ok(questions.every((q) => q.readOnly));
+});

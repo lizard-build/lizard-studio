@@ -48,7 +48,7 @@ const codexSpawner = createCodexSpawner({ hostDir: HOST_DIR, nodePath: process.e
 
 // Bumped on every change the panel needs to know about. Reported in
 // `agentReady`. Claude's own HOST_VERSION is separate and untouched.
-const CODEX_HOST_VERSION = 8;
+const CODEX_HOST_VERSION = 9;
 
 // The browser bridge numbers its requests from here so the router can tell our
 // `browserResult` replies from claude's by value alone, and never has to parse
@@ -1039,6 +1039,15 @@ function handleNotification(method, params) {
   }
 }
 
+function asyncQuestion(item) {
+  if (item.delivery !== "async" || !item.id || !Array.isArray(item.questions)) return null;
+  const questions = item.questions.filter((q) => q && typeof q.title === "string" && q.title.trim()).map((q, i) => ({
+    id: String(i), question: q.title, multiSelect: false,
+    options: (Array.isArray(q.options) ? q.options : []).filter((label) => typeof label === "string" && label.trim()).map((label) => ({ label })),
+  }));
+  return questions.length ? { type: "async_question", questionId: item.id, questions } : null;
+}
+
 function onItemStarted(s, params) {
   if (!s) return;
   const item = params.item || {};
@@ -1048,6 +1057,10 @@ function onItemStarted(s, params) {
       // moment the user hit send — rendering it again would double it.
       break;
     case "agentMessage": {
+      if (asyncQuestion(item)) {
+        if (s.streamMsgId) closeStream(s, s.streamText);
+        break;
+      }
       // The same item can start twice, and the second start is not a second
       // message. A custom provider on the responses wire sends
       // `output_item.added` only once the message is finished, so the
@@ -1110,6 +1123,12 @@ function onItemCompleted(s, params) {
   const item = params.item || {};
   switch (item.type) {
     case "agentMessage": {
+      const question = asyncQuestion(item);
+      if (question) {
+        if (s.streamMsgId) closeStream(s, s.streamText);
+        emit(s, question);
+        break;
+      }
       const id = item.id || s.streamMsgId;
       // `closeStream` tops the stream up to this text before closing it, so the
       // panel's buffer is the whole reply whatever the deltas managed to carry.
@@ -1641,11 +1660,15 @@ async function runPrewarm(cwd) {
 }
 
 async function sendPrompt(msg) {
+  const acknowledge = (ok, error, startedTurn = false) => {
+    if (msg.promptRequestId) send({ type: "promptResult", id: msg.id, requestId: msg.promptRequestId, ok, error, startedTurn });
+  };
   const s = sessions.get(msg.id);
   if (!s) {
     // No session at all — nothing is coming, so end the turn as well as saying
     // so. An error on its own leaves the panel spinning on a reply that will
     // never arrive.
+    acknowledge(false, "This chat has no session. Reopen it and try again.");
     send({ type: "error", id: msg.id, message: "This ChatGPT chat has no session. Reopen it to start one." });
     send({ type: "event", id: msg.id, data: { type: "result", subtype: "error_during_execution", is_error: true, result: "No session.", num_turns: 0 } });
     return;
@@ -1656,6 +1679,7 @@ async function sendPrompt(msg) {
       log("queued a prompt for", msg.id, "— the thread is still opening");
       return;
     }
+    acknowledge(false, "This session isn't running. Reopen it and try again.");
     send({ type: "error", id: s.id, message: "This ChatGPT session isn't running." });
     endTurnWith(s, true, "The session isn't running.");
     return;
@@ -1668,18 +1692,23 @@ async function sendPrompt(msg) {
     if (img && img.path) input.push({ type: "localImage", path: img.path });
     else if (img && img.data) input.push({ type: "image", url: `data:${img.mediaType || "image/png"};base64,${img.data}` });
   }
-  if (!input.length) return;
+  if (!input.length) { acknowledge(false, "Enter an answer."); return; }
 
   // A prompt sent while a turn runs is a correction, not a queue entry — Codex
   // can take it mid-flight, which is better than making the user wait.
   if (s.running && s.turnId) {
+    const expectedTurnId = s.turnId;
     try {
-      await rpc("turn/steer", { threadId: s.threadId, expectedTurnId: s.turnId, input });
+      await rpc("turn/steer", { threadId: s.threadId, expectedTurnId, input });
+      acknowledge(true);
       return;
     } catch (err) {
       log("steer failed:", err && err.message);
-      if (s.running) {
-        send({ type: "error", id: s.id, message: `Couldn't send this correction: ${err && err.message}` });
+      // Completion can reach us after the steer rejection. Only a definite
+      // "no active turn" permits a new turn; uncertain failures must not retry.
+      if (!/no active turn|not currently running/i.test(err?.message || "") || (s.running && s.turnId !== expectedTurnId)) {
+        acknowledge(false, String(err?.message || "Couldn't send this answer."));
+        if (!msg.promptRequestId) send({ type: "error", id: s.id, message: `Couldn't send this correction: ${err && err.message}` });
         return;
       }
     }
@@ -1698,7 +1727,9 @@ async function sendPrompt(msg) {
     s.turnId = (res && res.turn && res.turn.id) || null;
     s.running = true;
     touchTurn(s);
+    acknowledge(true, undefined, true);
   } catch (err) {
+    acknowledge(false, String(err?.message || "Couldn't send this answer."));
     log("turn/start failed:", err && err.message);
     send({ type: "error", id: s.id, message: String(err && err.message) });
     endTurnWith(s, true, String(err && err.message));
@@ -1833,6 +1864,13 @@ async function loadTranscript(msg) {
           timestamp: turn.startedAt ? new Date(turn.startedAt * 1000).toISOString() : undefined })));
       }
     }
+    // Only unanswered questions on the newest page can still accept input.
+    let laterInput = !!msg.cursor;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i];
+      if (event.type === "user" && event.message?.content?.some((b) => b.type === "text")) laterInput = true;
+      if (event.type === "async_question") event.readOnly = laterInput;
+    }
     sendTranscriptPage({ ...meta, events, nextCursor: page.nextCursor });
   } catch (err) {
     log("history read failed:", err?.message);
@@ -1850,6 +1888,7 @@ function replayItem(s, item) {
       return [{ type: "user", message: { role: "user", content: [{ type: "text", text }] } }];
     }
     case "agentMessage":
+      if (asyncQuestion(item)) return [asyncQuestion(item)];
       if (!item.text) return null;
       return [{
         type: "assistant",
