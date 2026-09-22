@@ -1584,11 +1584,24 @@ button:active > .copy-swap {
 /* The live-activity pod is pinned to the viewport, not to the chat, so it would
    sit over the menu instead of travelling with the work it reports on. It goes
    quiet for as long as the chat is away. */
-body.chat-menu-open .la-layer {
+body.chat-menu-open:not(.chat-menu-docked) .la-layer {
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.18s ease;
 }
+/* In a browser tab Chats and the conversation share the available width. */
+body.chat-menu-docked .view { --chat-menu-w: min(400px, 35%); }
+body.chat-menu-docked .chat-menu-viewport {
+  overflow: hidden;
+  scroll-snap-type: none;
+}
+body.chat-menu-docked .chat-menu[aria-hidden="true"] { display: none; }
+body.chat-menu-docked .chat-shell { flex: 1 1 0; }
+body.chat-menu-docked .chat-shell.pushed {
+  border-radius: 0;
+  box-shadow: -1px 0 0 var(--border-primary);
+}
+body.chat-menu-docked .chat-menu-guard { display: none; }
 @media (prefers-reduced-motion: reduce) {
   .chat-shell { transition: none; }
 }

@@ -11,15 +11,18 @@ function element(props = {}) {
     style: {}, matches: () => false,
     classList: { add: c => classes.add(c), remove: c => classes.delete(c), contains: c => classes.has(c) },
     setAttribute(k, v) { this[k] = v; },
+    removeAttribute(k) { delete this[k]; },
     addEventListener(k, fn) { listeners[k] = fn; },
     fire(k, event) { listeners[k]?.(event); }, ...props };
 }
-function setup({ initialOpen = false, initialWidth = 400 } = {}) {
+function setup({ initialOpen = false, initialWidth = 400, docked = false } = {}) {
   const viewport = element(), body = element(), shell = element(), menu = element(), guard = element();
   let time = 0, width = initialWidth, resize, rendered = 0;
   const requests = [], document = { body, activeElement: body };
   const search = element({ menuChild: true, focus() { document.activeElement = this; } });
   const menuBtn = element({ focus() { document.activeElement = this; } });
+  const panel = element({ role: "dialog", "aria-modal": "true" });
+  menu.querySelector = () => panel;
   menu.contains = node => node === menu || !!node.menuChild;
   menu.getBoundingClientRect = () => ({ width });
   guard.classList.add('hidden');
@@ -39,10 +42,10 @@ function setup({ initialOpen = false, initialWidth = 400 } = {}) {
     requestAnimationFrame() { throw Error('Native menu must not animate scroll with JS'); },
   };
   vm.createContext(scope); vm.runInContext(code, scope);
-  scope.chatMenuScroller = scope.setupChatMenuScroller(viewport, { initialOpen });
+  scope.chatMenuScroller = scope.setupChatMenuScroller(viewport, { initialOpen, docked });
   viewport.fire('scrollend');
   return {
-    scope, viewport, body, shell, menu, guard, search, menuBtn, document, requests,
+    scope, viewport, body, shell, menu, guard, search, menuBtn, document, requests, panel,
     resize: value => { width = value; resize(); },
     scroll(left, end = false) { viewport.scrollLeft = left; viewport.fire('scroll'); if (end) viewport.fire('scrollend'); },
     wheel(x, y = 0, opts = {}) {
@@ -194,4 +197,59 @@ test('Chrome tab mode keeps its open default when its first layout has zero widt
   assert.equal(p.viewport.classList.contains('ready'), true);
   assert.equal(p.viewport.scrollLeft, 0);
   assert.equal(p.state().open, true);
+});
+
+
+test('docked Chats leaves the conversation interactive without a dismiss overlay', () => {
+  const p = setup({ initialOpen: true, docked: true });
+  assert.equal(p.state().open, true);
+  assert.equal(p.shell.inert, false, 'composer, messages and chat controls must accept input');
+  assert.equal(p.menu.inert, false);
+  assert.equal(p.guard.classList.contains('hidden'), true);
+  assert.equal(p.panel.role, 'navigation');
+  assert.equal(p.panel['aria-modal'], undefined);
+  assert.equal(p.requests.length, 0, 'split layout must not shift the chat outside the viewport');
+  p.scroll(100, true);
+  assert.equal(p.state().open, true);
+  assert.equal(p.state().moving, false);
+  assert.equal(p.wheel(-100).defaultPrevented, undefined);
+});
+
+test('docked Chats can collapse and reopen without disabling the conversation', () => {
+  const p = setup({ initialOpen: true, docked: true });
+  p.search.focus();
+  p.scope.toggleChatMenu();
+  assert.equal(p.state().open, false);
+  assert.equal(p.menu.inert, true);
+  assert.equal(p.shell.inert, false);
+  assert.equal(p.document.activeElement, p.menuBtn);
+  p.scope.toggleChatMenu();
+  assert.equal(p.state().open, true);
+  assert.equal(p.menu.inert, false);
+  assert.equal(p.shell.inert, false);
+  assert.equal(p.document.activeElement, p.search);
+  assert.equal(p.guard.classList.contains('hidden'), true);
+});
+
+test('choosing an open or saved chat preserves docked Chats and focuses the composer', () => {
+  const start = source.indexOf('    row.addEventListener("click", () => {\n      if (chatMenuDragId');
+  const handler = source.slice(start, source.indexOf('    return row;', start));
+  for (const docked of [false, true]) {
+    for (const open of [false, true]) {
+      let click, closed = 0, selected = null, focused = 0;
+      const scope = {
+        row: { classList: { contains: () => false }, addEventListener: (_, fn) => { click = fn; } },
+        chatMenuDragId: null, chatMenuIsDocked: () => docked,
+        closeChatMenu: () => closed++, setActive: id => { selected = id; },
+        reopenFromHistory: item => { selected = item.id; },
+        entry: { open, item: { id: 'saved' } }, chat: { id: 'live' },
+        els: { input: { focus: () => focused++ } },
+      };
+      vm.runInNewContext(handler, scope);
+      click();
+      assert.equal(closed, docked ? 0 : 1);
+      assert.equal(selected, open ? 'live' : 'saved');
+      assert.equal(focused, docked ? 1 : 0);
+    }
+  }
 });

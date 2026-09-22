@@ -1581,6 +1581,10 @@
     return Boolean(els.chatShell) && els.chatShell.classList.contains("pushed");
   }
 
+  function chatMenuIsDocked() {
+    return document.body.classList.contains("chat-menu-docked");
+  }
+
   function prepareChatMenu() {
     if (chatMenuIsOpen()) return;
     for (const menu of menuRegistry) closeMenu(menu);
@@ -1590,9 +1594,9 @@
     els.chatMenuSearch.value = "";
     els.chatMenu.inert = false;
     els.chatMenu.setAttribute("aria-hidden", "false");
-    els.chatMenuGuard.classList.remove("hidden");
+    if (!chatMenuIsDocked()) els.chatMenuGuard.classList.remove("hidden");
     els.chatShell.classList.add("pushed");
-    els.chatShell.inert = true;
+    els.chatShell.inert = !chatMenuIsDocked();
     document.body.classList.add("chat-menu-open");
     els.menuBtn.setAttribute("aria-expanded", "true");
     renderChatMenuList();
@@ -1619,7 +1623,21 @@
     }
   }
 
-  function setupChatMenuScroller(viewport, { initialOpen = false } = {}) {
+  function setupChatMenuScroller(viewport, { initialOpen = false, docked = false } = {}) {
+    if (docked) {
+      document.body.classList.add("chat-menu-docked");
+      const panel = els.chatMenu.querySelector(".chat-menu-panel");
+      panel.setAttribute("role", "navigation");
+      panel.removeAttribute("aria-modal");
+      finishChatMenuScroll(initialOpen);
+      viewport.classList.add("ready");
+      return {
+        get targetOpen() { return null; },
+        to(open, { focus = false } = {}) { finishChatMenuScroll(open, focus); },
+        // Both columns stay in view; wheel input belongs to their contents.
+        onWheel() {},
+      };
+    }
     let width = 0, ready = false, settledOpen = initialOpen, targetOpen = null, focusSearch = false;
     let lastWheelAt = -Infinity, owner = null;
     const atClosed = () => viewport.scrollLeft >= width - 0.5;
@@ -2041,9 +2059,10 @@
 
     row.addEventListener("click", () => {
       if (chatMenuDragId || row.classList.contains("editing")) return;
-      closeChatMenu();
+      if (!chatMenuIsDocked()) closeChatMenu();
       if (entry.open) setActive(chat.id);
       else reopenFromHistory(entry.item);
+      if (chatMenuIsDocked()) els.input.focus({ preventScroll: true });
     });
     return row;
   }
@@ -10479,7 +10498,7 @@
       } finally { els.windowMode.disabled = false; }
     });
     els.chatMenuGuard.addEventListener("click", closeChatMenu);
-    chatMenuScroller = setupChatMenuScroller(els.chatMenuViewport, { initialOpen: !!window.RKPanelWindow?.detached });
+    chatMenuScroller = setupChatMenuScroller(els.chatMenuViewport, { initialOpen: !!window.RKPanelWindow?.detached, docked: !!window.RKPanelWindow?.detached });
     els.chatMenuViewport.addEventListener("wheel", chatMenuScroller.onWheel, { passive: false });
     els.chatMenuList.addEventListener("scroll", scheduleChatHistoryLoad, { passive: true });
     window.addEventListener("resize", scheduleChatHistoryLoad);
