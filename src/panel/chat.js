@@ -4631,6 +4631,7 @@
   }
 
   function failAsyncQuestionSends(chat) {
+    failQueuedSteers(chat);
     for (const entry of chat.asyncQuestions?.values() || []) {
       if (entry.sending) entry.setError("Connection lost. Check the chat before sending again.");
     }
@@ -5737,7 +5738,7 @@
         handleBrowserOp(msg);
         break;
       case "promptResult":
-        if (chat) finishAsyncQuestionAnswer(chat, msg);
+        if (chat && !finishQueuedSteer(chat, msg)) finishAsyncQuestionAnswer(chat, msg);
         break;
       case "permission":
         if (chat) showPermission(chat, msg);
@@ -6694,6 +6695,16 @@
     const bubble = buildBubble(entry.text, entry.attachments, entry.contexts);
     row.appendChild(bubble);
     const tag = el("div", "queued-tag");
+    if (chat.harness === "codex") {
+      row.classList.add("has-steer");
+      const steer = el("button", "queued-steer", "Steer");
+      steer.type = "button";
+      steer.title = "Send to the current turn";
+      steer.setAttribute("aria-label", "Steer: send to the current turn");
+      steer.addEventListener("mousedown", (e) => e.preventDefault());
+      steer.addEventListener("click", () => steerQueuedPrompt(chat, entry));
+      tag.appendChild(steer);
+    }
     const cancel = el("button", "queued-cancel");
     cancel.type = "button";
     cancel.innerHTML = ICON("x", 13);
@@ -6710,7 +6721,75 @@
     return row;
   }
 
+  function setQueuedSteering(entry, sending) {
+    entry.steering = sending;
+    if (!entry.el) return;
+    entry.el.setAttribute("aria-busy", String(sending));
+    for (const button of entry.el.querySelectorAll(".queued-tag button")) button.disabled = sending;
+    const steer = entry.el.querySelector(".queued-steer");
+    if (steer) steer.textContent = sending ? "Sending…" : "Steer";
+  }
+
+  function failQueuedSteer(chat, entry, message) {
+    setQueuedSteering(entry, false);
+    // An uncertain send must never be retried by the automatic queue drain.
+    entry.steerFailed = true;
+    systemNote(chat, `${message} The message is still in the queue.`, "warn", { dismissible: true });
+  }
+
+  function failQueuedSteers(chat) {
+    for (const entry of chat.queue || []) {
+      if (entry.steering) failQueuedSteer(chat, entry, "Connection lost. Check the chat before trying again.");
+    }
+  }
+
+  function steerQueuedPrompt(chat, entry) {
+    if (chat.harness !== "codex" || !chat.queue?.includes(entry) || chat.queue.some((q) => q.steering)) return;
+    if (!connected || !hostReady || !chat.started || chat.sessionFailure) {
+      systemNote(chat, "Reconnect to ChatGPT before sending this message.", "warn", { dismissible: true });
+      return;
+    }
+    // Lock before closing the editor: blur or turn completion can drain the queue.
+    setQueuedSteering(entry, true);
+    entry.finishEdit?.();
+    const extra = formatContexts({ contexts: entry.contexts || [] });
+    const text = (extra ? CTX_MARK_START + extra + CTX_MARK_END : "") + entry.text;
+    const images = (entry.attachments || []).map((a) => ({ mediaType: a.mediaType, data: a.dataUrl.split(",")[1] || "" }));
+    if (!text.trim() && !images.length) {
+      failQueuedSteer(chat, entry, "Enter a message first.");
+      return;
+    }
+    entry.promptRequestId = newId();
+    if (!post({ type: "prompt", agent: "codex", id: chat.id, text, images, promptRequestId: entry.promptRequestId })) {
+      failQueuedSteer(chat, entry, "Host disconnected before sending.");
+    }
+  }
+
+  function finishQueuedSteer(chat, msg) {
+    const entry = chat.queue?.find((q) => q.promptRequestId === msg.requestId && q.steering);
+    if (!entry) return false;
+    if (!msg.ok) {
+      failQueuedSteer(chat, entry, msg.error || "Couldn't send this message.");
+      return true;
+    }
+    chat.queue.splice(chat.queue.indexOf(entry), 1);
+    setQueuedSteering(entry, false);
+    entry.el?.classList.remove("queued", "has-steer");
+    entry.el?.querySelector(".bubble")?.classList.remove("editable");
+    entry.el?.querySelector(".queued-tag")?.remove();
+    if (msg.startedTurn && entry.el) entry.el.dataset.turnIndex = String(++chat.turnIndexCounter);
+    chat.codexHasSubmittedTurn = true;
+    chat.empty = false;
+    touchChat(chat);
+    if (msg.startedTurn) resumeTurnIfIdle(chat);
+    updateTabDots();
+    savePrefs();
+    flushQueuedIfIdle(chat);
+    return true;
+  }
+
   function removeQueued(chat, entry, row) {
+    if (entry.steering) return;
     if (Array.isArray(chat.queue)) {
       const idx = chat.queue.indexOf(entry);
       if (idx !== -1) chat.queue.splice(idx, 1);
@@ -6729,7 +6808,7 @@
   function wireQueuedEdit(chat, entry, bubble, row) {
     bubble.classList.add("editable");
     bubble.addEventListener("click", (e) => {
-      if (bubble.classList.contains("editing")) return;
+      if (!chat.queue?.includes(entry) || entry.steering || bubble.classList.contains("editing")) return;
       if (e.target.closest("a")) return; // don't hijack link clicks
       if (e.target.closest(".queued-cancel")) return;
       const sel = window.getSelection();
@@ -6760,11 +6839,13 @@
       closed = true;
       entry.text = text;
       entry.editing = false;
+      entry.finishEdit = null;
       bubble.classList.remove("editing");
       ta.replaceWith(R.markdown(text));
       // The entry may have been due to go out while it was held — release it.
       flushQueuedIfIdle(chat);
     };
+    entry.finishEdit = () => close(ta.value);
     ta.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
@@ -6803,7 +6884,7 @@
     if (!Array.isArray(chat.queue) || !chat.queue.length) return;
     // Head of the queue is open for editing — hold everything until the user
     // is done with it (or deletes it); both paths call back in here.
-    if (chat.queue[0].editing) return;
+    if (chat.queue[0].editing || chat.queue[0].steerFailed || chat.queue.some((entry) => entry.steering)) return;
     const entry = chat.queue.shift();
     if (entry.el && entry.el.parentNode) entry.el.remove();
     // The queued entry owns its files and context; the composer is a new draft.

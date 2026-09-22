@@ -19,6 +19,8 @@ function panel({ background = false } = {}) {
   const input = { value: "" };
   const scope = {
     activeId: background ? "other" : "a", els: { input },
+    connected: true, hostReady: true, newId: () => "steer-" + sent.length,
+    flushQueuedIfIdle: () => {}, resumeTurnIfIdle: () => { chat.turnRunning = true; },
     DEFAULT_TITLE: "New chat", USAGE_CMD_RE: /^\/usage$/, CTX_MARK_START: "<context>", CTX_MARK_END: "</context>",
     sessionLooksStale: () => stale,
     restartSessionNow: () => { restarts++; stale = false; },
@@ -26,17 +28,21 @@ function panel({ background = false } = {}) {
     formatBashContext: () => "", dedupeContexts: (contexts) => contexts,
     post: (message) => { sent.push(plain(message)); return accepts; },
     userBubble: (chat, text, attachments, opts) => bubbles.push(plain({ text, attachments, opts })),
-    renderQueuedBubble: () => ({ parentNode: true, remove() {} }),
+    renderQueuedBubble: () => ({ parentNode: true, dataset: {}, classList: { remove() {} }, setAttribute() {}, querySelectorAll: () => [], querySelector: () => null, remove() {} }),
   };
   for (const name of ["renderContextChips", "renderAttachmentThumbs", "autosize", "updateTabDots", "updateEmptyMark", "touchChat", "finishUsageProbe", "startChatSession", "systemNote", "refreshStatusWord", "renderTabs", "setRunningUI", "startStatusTicker", "renderTurnStatus", "updateSetup", "savePrefs"]) scope[name] = () => {};
   vm.createContext(scope);
   vm.runInContext([
     section("  function formatContexts(chat)", "  // Invisible-char sentinels"),
     section("  // Stashes a prompt (plus its context/attachments)", "  // opts.atFront:"),
+    section("  function setQueuedSteering(entry, sending)", "  function removeQueued(chat, entry, row)"),
     section("  function dispatchNextQueued(chat)", "  function setRunningUI(on)"),
   ].join("\n"), scope);
   return {
     chat, input, sent, bubbles,
+    steer: (entry) => scope.steerQueuedPrompt(chat, entry),
+    receipt: (msg) => scope.finishQueuedSteer(chat, msg),
+    failSteer: () => scope.failQueuedSteers(chat),
     queue(text, attachments = [], contexts = []) {
       chat.attachments = attachments; chat.contexts = contexts; input.value = text;
       scope.queuePrompt(chat, text);
@@ -133,4 +139,41 @@ test("queued slash commands leave context for the next draft", async () => {
   assert.equal(p.sent[0].text, "/compact"); assert.deepEqual(p.sent[0].images, []);
   assert.deepEqual(plain(p.chat.contexts), [page("draft-context")]);
   assert.deepEqual(plain(p.chat.attachments), [image("draft")]);
+});
+
+
+test("steer sends the selected queued snapshot without touching the draft or active stream", () => {
+  const p = panel(); p.chat.harness = "codex"; p.chat.turnRunning = true;
+  p.queue("first"); p.queue("correction", [image("queued")], [page("queued-context")]);
+  const entry = p.chat.queue[1], stream = p.chat.streamBlocks;
+  p.chat.attachments = [image("draft")]; p.chat.contexts = [page("draft-context")]; p.input.value = "draft";
+  p.steer(entry); p.steer(entry);
+  assert.equal(p.sent.length, 1);
+  assert.match(p.sent[0].text, /queued-context/); assert.doesNotMatch(p.sent[0].text, /draft-context/);
+  assert.deepEqual(p.sent[0].images.map((x) => x.data), ["queued"]);
+  assert.equal(p.chat.queue.length, 2);
+  p.receipt({ requestId: p.sent[0].promptRequestId, ok: true });
+  assert.deepEqual(p.chat.queue.map((q) => q.text), ["first"]);
+  assert.equal(p.input.value, "draft"); assert.equal(p.chat.attachments[0].id, "draft");
+  assert.equal(p.chat.streamBlocks, stream); assert.equal(p.chat.turnRunning, true);
+});
+
+test("turn completion cannot drain a steer in flight or retry an uncertain failure", () => {
+  const p = panel(); p.chat.harness = "codex";
+  p.queue("first"); p.queue("steer second"); p.steer(p.chat.queue[1]);
+  p.chat.turnRunning = false; p.dispatch();
+  assert.equal(p.chat.queue.length, 2); assert.equal(p.sent.length, 1);
+  p.receipt({ requestId: p.sent[0].promptRequestId, ok: false, error: "lost reply" });
+  assert.equal(p.chat.queue[1].steerFailed, true);
+  p.chat.queue.shift(); p.dispatch();
+  assert.equal(p.sent.length, 1); assert.equal(p.chat.queue.length, 1);
+  p.steer(p.chat.queue[0]); assert.equal(p.sent.length, 2);
+});
+
+test("steer leaves Claude queues alone and preserves failed sends", () => {
+  const p = panel(); p.queue("keep me"); p.chat.harness = "claude";
+  p.steer(p.chat.queue[0]); assert.equal(p.sent.length, 0);
+  p.chat.harness = "codex"; p.disconnect(); p.steer(p.chat.queue[0]);
+  assert.equal(p.chat.queue[0].steering, false); assert.equal(p.chat.queue[0].steerFailed, true);
+  assert.equal(p.chat.queue[0].text, "keep me");
 });

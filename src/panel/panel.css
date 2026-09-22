@@ -1885,7 +1885,11 @@ body.chat-menu-open .la-layer {
    so it stays at full opacity instead of inheriting the bubble's dimming) and
    only shows up while hovering the message — same reveal-on-hover as
    .ctx-chip-x above. */
+.msg-user.queued.has-steer .bubble { padding-right: 104px; }
 .queued-tag {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   position: absolute;
   top: 50%;
   right: 8px;
@@ -1895,12 +1899,14 @@ body.chat-menu-open .la-layer {
   transition: opacity 0.15s;
 }
 .msg-user.queued:hover .queued-tag,
+.msg-user.queued:focus-within .queued-tag,
 /* Keep the remove button up while the prompt is open for editing — clearing it
    out is one of the two ways to end the edit. */
 .msg-user.queued .bubble.editing ~ .queued-tag {
   opacity: 1;
   pointer-events: auto;
 }
+.queued-steer,
 .queued-cancel {
   appearance: none;
   display: inline-flex;
@@ -1917,6 +1923,10 @@ body.chat-menu-open .la-layer {
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
+.queued-steer { width: auto; padding: 0 5px; font: 11px var(--font-family); }
+.queued-steer:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.08); }
+.queued-tag button:disabled { opacity: 0.5; cursor: wait; }
+.queued-tag button:focus-visible { outline: 1px solid var(--text-secondary); outline-offset: 1px; }
 .queued-cancel:hover { color: var(--other-red); background: rgba(239, 68, 68, 0.12); }
 .msg-assistant {
   align-items: flex-start;

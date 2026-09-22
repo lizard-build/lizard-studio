@@ -135,6 +135,29 @@ window.runCodexPanelTests = async function () {
   check("restored unanswered questions reply to the real chat", t.posted("prompt").at(-1).id === "audit-a" && t.posted("prompt").at(-1).text === "Still open?\nB");
   ack(true);
 
+  // Steer sits before the queue's remove button and sends this entry now.
+  composer.value = "Queued correction"; keyOn(composer, "Enter");
+  const queuedRow = document.querySelector(".msg-user.queued");
+  const queueActions = queuedRow.querySelector(".queued-tag");
+  check("ChatGPT queues show Steer to the left of remove", queueActions.children[0].classList.contains("queued-steer") && queueActions.children[1].classList.contains("queued-cancel"));
+  composer.value = "Keep my draft";
+  const steerBefore = t.posted("prompt").length;
+  queuedRow.querySelector(".queued-steer").click();
+  queuedRow.querySelector(".queued-steer").click();
+  check("Steer sends once and keeps the row pending", t.posted("prompt").length === steerBefore + 1 && queuedRow.classList.contains("queued") && queuedRow.querySelector(".queued-cancel").disabled);
+  check("Steer preserves the composer draft", composer.value === "Keep my draft");
+  ack(false, { error: "Steer rejected" });
+  check("a failed Steer remains queued and can retry", queuedRow.classList.contains("queued") && !queuedRow.querySelector(".queued-steer").disabled);
+  queuedRow.querySelector(".bubble").click();
+  queuedRow.querySelector("textarea").value = "Edited correction";
+  queuedRow.querySelector(".queued-steer").click();
+  check("Steer sends the current queued edit", t.posted("prompt").at(-1).text === "Edited correction");
+  ack(true);
+  check("accepted Steer removes queue controls without duplicating the message", !queuedRow.classList.contains("queued") && !queuedRow.querySelector(".queued-tag") && queuedRow.textContent.includes("Edited correction"));
+  queuedRow.querySelector(".bubble").click();
+  check("a sent correction cannot reopen the queue editor", !queuedRow.querySelector("textarea"));
+  composer.value = "";
+
   ask("async-background");
   const bgBefore = t.posted("prompt").length;
   emit({ type: "promptResult", id: "audit-b", requestId: "wrong", ok: true });
