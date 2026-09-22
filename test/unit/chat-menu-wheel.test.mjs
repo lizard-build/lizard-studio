@@ -14,9 +14,9 @@ function element(props = {}) {
     addEventListener(k, fn) { listeners[k] = fn; },
     fire(k, event) { listeners[k]?.(event); }, ...props };
 }
-function setup() {
+function setup({ initialOpen = false, initialWidth = 400 } = {}) {
   const viewport = element(), body = element(), shell = element(), menu = element(), guard = element();
-  let time = 0, width = 400, resize, rendered = 0;
+  let time = 0, width = initialWidth, resize, rendered = 0;
   const requests = [], document = { body, activeElement: body };
   const search = element({ menuChild: true, focus() { document.activeElement = this; } });
   const menuBtn = element({ focus() { document.activeElement = this; } });
@@ -39,7 +39,7 @@ function setup() {
     requestAnimationFrame() { throw Error('Native menu must not animate scroll with JS'); },
   };
   vm.createContext(scope); vm.runInContext(code, scope);
-  scope.chatMenuScroller = scope.setupChatMenuScroller(viewport);
+  scope.chatMenuScroller = scope.setupChatMenuScroller(viewport, { initialOpen });
   viewport.fire('scrollend');
   return {
     scope, viewport, body, shell, menu, guard, search, menuBtn, document, requests,
@@ -170,4 +170,28 @@ test('a nested scroller finishing cannot end an active menu gesture', () => {
   p.viewport.fire('scrollend', { target: element() });
   assert.equal(p.state().moving, true);
   p.scroll(0, true); assert.equal(p.state().moving, false);
+});
+
+
+test('Chrome tab mode starts with Chats open before the first visible frame', () => {
+  const p = setup({ initialOpen: true });
+  assert.equal(p.requests[0].left, 0);
+  assert.equal(p.viewport.classList.contains('ready'), true);
+  assert.equal(p.state().open, true);
+  assert.equal(p.menu.inert, false);
+  assert.equal(p.menu['aria-hidden'], 'false');
+  assert.equal(p.menuBtn['aria-expanded'], 'true');
+  p.scope.closeChatMenu({ animate: false }); p.viewport.fire('scrollend');
+  assert.equal(p.state().open, false);
+  p.resize(350);
+  assert.equal(p.viewport.scrollLeft, 350, 'resizing must preserve the user closing Chats');
+});
+
+test('Chrome tab mode keeps its open default when its first layout has zero width', () => {
+  const p = setup({ initialOpen: true, initialWidth: 0 });
+  assert.equal(p.viewport.classList.contains('ready'), false);
+  p.resize(400);
+  assert.equal(p.viewport.classList.contains('ready'), true);
+  assert.equal(p.viewport.scrollLeft, 0);
+  assert.equal(p.state().open, true);
 });

@@ -1619,8 +1619,8 @@
     }
   }
 
-  function setupChatMenuScroller(viewport) {
-    let width = 0, ready = false, settledOpen = false, targetOpen = null, focusSearch = false;
+  function setupChatMenuScroller(viewport, { initialOpen = false } = {}) {
+    let width = 0, ready = false, settledOpen = initialOpen, targetOpen = null, focusSearch = false;
     let lastWheelAt = -Infinity, owner = null;
     const atClosed = () => viewport.scrollLeft >= width - 0.5;
     const settle = (event) => {
@@ -1644,10 +1644,10 @@
       if (!nextWidth) return;
       width = nextWidth;
       if (!ready) {
-        viewport.scrollTo({ left: width, behavior: "instant" });
+        viewport.scrollTo({ left: settledOpen ? 0 : width, behavior: "instant" });
         ready = true;
         viewport.classList.add("ready");
-        finishChatMenuScroll(false);
+        finishChatMenuScroll(settledOpen);
       } else if (!chatMenuMoving) {
         viewport.scrollTo({ left: settledOpen ? 0 : width, behavior: "instant" });
       }
@@ -10479,7 +10479,7 @@
       } finally { els.windowMode.disabled = false; }
     });
     els.chatMenuGuard.addEventListener("click", closeChatMenu);
-    chatMenuScroller = setupChatMenuScroller(els.chatMenuViewport);
+    chatMenuScroller = setupChatMenuScroller(els.chatMenuViewport, { initialOpen: !!window.RKPanelWindow?.detached });
     els.chatMenuViewport.addEventListener("wheel", chatMenuScroller.onWheel, { passive: false });
     els.chatMenuList.addEventListener("scroll", scheduleChatHistoryLoad, { passive: true });
     window.addEventListener("resize", scheduleChatHistoryLoad);
