@@ -13,7 +13,7 @@ function restore({ savedId = null, resume = null, submitted = false } = {}) {
     chats: new Map([["a", old]]), order: ["a"], activeId: "a",
     backgroundRestoring: false, backgroundRestoreStates: [], connected: true, hostReady: true,
     els: { stack: { appendChild() {} } }, clearTimeout,
-    makeChat: (opts) => ({ ...opts, codexHasSubmittedTurn: !!opts.sessionId,
+    makeChat: (opts) => ({ ...opts, empty: !opts.sessionId, codexHasSubmittedTurn: !!opts.sessionId,
       messagesEl: element(), permCards: new Map(), queue: [] }),
     requestHistoryPage: (chat) => requests.push(chat.sessionId),
     renderTabs() {}, updateTabDots() {}, syncComposer() {}, savePrefs() {},
@@ -31,23 +31,26 @@ function restore({ savedId = null, resume = null, submitted = false } = {}) {
     started: true, running: false, submitted, turnIds: [] }] });
   scope.onHostMessage({ type: "backgroundRestoreEnd" });
   const chat = scope.chats.get("a");
-  return { requests, persistedId: scope.resumableSessionId(chat) };
+  return { requests, empty: chat.empty, persistedId: scope.resumableSessionId(chat) };
 }
 
 test("an older worker's idle snapshot cannot erase the saved thread or skip its history", () => {
   const r = restore({ savedId: "saved-thread", resume: "saved-thread" });
+  assert.equal(r.empty, false, "saved history must not become a new chat while loading");
   assert.equal(r.persistedId, "saved-thread");
   assert.deepEqual(r.requests, ["saved-thread"]);
 });
 
 test("a resumed worker session restores history even when the panel has no saved tab", () => {
   const r = restore({ resume: "saved-thread" });
+  assert.equal(r.empty, false, "saved history must not become a new chat while loading");
   assert.equal(r.persistedId, "saved-thread");
   assert.deepEqual(r.requests, ["saved-thread"]);
 });
 
 test("a saved thread survives a snapshot without the original start options", () => {
   const r = restore({ savedId: "saved-thread" });
+  assert.equal(r.empty, false, "saved history must not become a new chat while loading");
   assert.equal(r.persistedId, "saved-thread");
   assert.deepEqual(r.requests, ["saved-thread"]);
 });
@@ -55,5 +58,6 @@ test("a saved thread survives a snapshot without the original start options", ()
 test("an unused prewarmed thread stays unsaved and does not load history", () => {
   const r = restore();
   assert.equal(r.persistedId, null);
+  assert.equal(r.empty, true, "an unused session must keep the empty-chat logo and setup visible");
   assert.deepEqual(r.requests, []);
 });

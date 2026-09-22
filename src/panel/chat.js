@@ -5664,6 +5664,8 @@
         // saved ID so reopening an idle chat cannot erase its history link.
         const savedSessionId = state.spec.resume || (old && resumableSessionId(old));
         chat.codexHasSubmittedTurn = !!state.submitted || !!savedSessionId && savedSessionId === chat.sessionId;
+        // An unused prewarmed Codex session has an ID but no conversation.
+        if (state.agent === "codex" && !chat.codexHasSubmittedTurn) chat.empty = true;
         chat.tabsContextSent = state.submitted;
         if (state.agent === "codex") chat.backgroundTurnIds = new Set(state.turnIds || []);
         chat.replayed = false;
@@ -9803,8 +9805,11 @@
   function updateEmptyMark() {
     if (!els.emptyMark) return;
     const chat = chats.get(activeId);
-    // Queued and shell messages can appear before the chat loses its empty flag.
-    const show = !!(chat && chat.empty && !chat.turnRunning && !chat.messagesEl.childElementCount);
+    // A completed history load leaves its hidden navigation button in the DOM.
+    // It is not a message; queued bubbles and shell output still count.
+    const hasContent = chat && [...chat.messagesEl.children].some((node) => node !== chat.historyNav || !node.hidden);
+    const show = !!(chat && (chat.empty || chat.historyLoaded) && !chat.turnRunning
+      && !chat.historyRequest && !chat.historyError && !chat.historyCursor && !hasContent);
     els.emptyMark.classList.toggle("hidden", !show);
   }
 
