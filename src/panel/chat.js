@@ -4837,7 +4837,7 @@
       if (qi + 1 < questions.length) {
         qi++;
         renderQuestion();
-        card.focus();
+        entry.focusAnswer();
       } else {
         // The host merges updatedInput over the original input it stashed, so
         // only the answers travel — never a truncated copy of the questions.
@@ -4849,6 +4849,7 @@
       const q = questions[qi];
       const multi = !!q.multiSelect;
       const options = Array.isArray(q.options) ? q.options.filter((o) => o && o.label) : [];
+      const textOnly = options.length === 0;
       const chosen = new Set();
       body.textContent = "";
       entry.rows = [];
@@ -4860,11 +4861,12 @@
       const list = el("div", "perm-opts");
       const rows = [];
 
-      const otherWrap = el("div", "ask-other hidden");
+      const otherWrap = el("div", textOnly ? "ask-other" : "ask-other hidden");
       const otherInput = el("input", "ask-other-input");
       otherInput.type = "text";
-      otherInput.placeholder = multi ? "Add your own answer…" : "Type your answer…";
+      otherInput.placeholder = multi && !textOnly ? "Add your own answer…" : "Type your answer…";
       otherWrap.appendChild(otherInput);
+      entry.focusAnswer = () => textOnly ? otherInput.focus() : card.focus();
 
       function confirmMulti() {
         const picked = options.filter((_, i) => chosen.has(i)).map((o) => o.label);
@@ -4915,21 +4917,23 @@
         entry.rows.push(row);
       });
 
-      // Trailing free-text row — AskUserQuestion always offers "Other".
-      const otherRow = el("button", "perm-opt ask-opt");
-      otherRow.type = "button";
-      otherRow.appendChild(el("span", "perm-caret", "❯"));
-      otherRow.appendChild(el("span", "perm-num", options.length + 1 + "."));
-      otherRow.appendChild(el("span", "perm-opt-label", "Other…"));
-      otherRow.addEventListener("mouseenter", () => {
-        entry.selected = options.length;
-        paintPerm(entry);
-      });
-      otherRow.addEventListener("click", () => activate(options.length));
-      list.appendChild(otherRow);
-      entry.rows.push(otherRow);
+      // Questions without choices show the input directly.
+      if (!textOnly) {
+        const otherRow = el("button", "perm-opt ask-opt");
+        otherRow.type = "button";
+        otherRow.appendChild(el("span", "perm-caret", "❯"));
+        otherRow.appendChild(el("span", "perm-num", options.length + 1 + "."));
+        otherRow.appendChild(el("span", "perm-opt-label", "Other…"));
+        otherRow.addEventListener("mouseenter", () => {
+          entry.selected = options.length;
+          paintPerm(entry);
+        });
+        otherRow.addEventListener("click", () => activate(options.length));
+        list.appendChild(otherRow);
+        entry.rows.push(otherRow);
 
-      body.appendChild(list);
+        body.appendChild(list);
+      }
       body.appendChild(otherWrap);
 
       otherInput.addEventListener("keydown", (e) => {
@@ -4943,6 +4947,7 @@
           }
         } else if (e.key === "Escape") {
           e.preventDefault();
+          if (textOnly) { dismiss(); return; }
           otherWrap.classList.add("hidden");
           otherInput.value = "";
           card.focus();
@@ -4950,14 +4955,20 @@
       });
 
       entry.hasChosen = () => chosen.size > 0 || !!otherInput.value.trim();
-      hint.textContent = multi
+      entry.hintText = textOnly ? "enter confirms · esc dismisses" : multi
         ? "click or 1-9 toggles · enter confirms · esc dismisses"
         : "1-9 / ↑↓ + enter selects · esc dismisses";
+      hint.textContent = entry.hintText;
       paintPerm(entry);
     }
 
     card.addEventListener("keydown", (e) => {
       if (entry.sending || entry.readOnly) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        dismiss();
+        return;
+      }
       const n = entry.rows.length;
       if (!n) return;
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -4973,9 +4984,6 @@
       } else if (e.key === " " && entry.confirm) {
         e.preventDefault();
         if (entry.selected < n - 1) entry.activate(entry.selected);
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        dismiss();
       } else if (/^[1-9]$/.test(e.key)) {
         const i = Number(e.key) - 1;
         if (i < n) {
@@ -4992,7 +5000,7 @@
       hint.removeAttribute("role");
       card.setAttribute("aria-busy", String(sending));
       for (const field of card.querySelectorAll("button, input")) field.disabled = sending;
-      hint.textContent = sending ? "Sending answer…" : "1-9 / ↑↓ + enter selects · esc dismisses";
+      hint.textContent = sending ? "Sending answer…" : entry.hintText;
     };
     entry.setError = (message) => {
       entry.setSending(false);
@@ -5038,7 +5046,7 @@
     if (!entry.readOnly && !mountChat.historyPage) noteWaitingAsk(chat, wasWaiting);
     if (chat.id === activeId && !mountChat.historyPage) {
       scrollToBottom(chat);
-      if (!entry.readOnly && (!els.input || !els.input.value.trim())) card.focus();
+      if (!entry.readOnly && (!els.input || !els.input.value.trim())) entry.focusAnswer();
     }
   }
 
