@@ -34,7 +34,7 @@ async function host() {
     clearTimeout: (timer) => timers.delete(timer),
   });
   const source = readFileSync(new URL("../../src/host/codex-host.mjs", import.meta.url), "utf8");
-  const module = new SourceTextModule(source + `\nexport { browserClients, cancelBrowserWorkflows, handle, loadSkills, loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, restartSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
+  const module = new SourceTextModule(source + `\nexport { browserClients, cancelBrowserWorkflows, handle, loadModels, loadSkills, loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, restartSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
   await module.link((name) => {
     const values = imports[name];
     assert.ok(values, `unexpected import: ${name}`);
@@ -515,4 +515,50 @@ test("turn boundaries and emitted replies carry the same id for background repla
   assert.equal(h.messages.findLast((m) => m.type === "event").turnId, "new-turn");
   h.api.handleNotification("turn/completed", { threadId: s.threadId, turn: { id: "new-turn", status: "completed" } });
   assert.equal(h.messages.findLast((m) => m.data?.type === "result").turnId, "new-turn");
+});
+
+
+test("model catalog includes every page, preserves efforts and honors the configured default", async () => {
+  const h = await host();
+  const model = (id, efforts) => ({ id, displayName: id, supportedReasoningEfforts: efforts.map(reasoningEffort => ({ reasoningEffort })), defaultReasoningEffort: "medium" });
+  h.respond(req => {
+    if (req.method === "config/read") return { config: { model: "gpt-6-sol", model_reasoning_effort: "high" } };
+    assert.equal(req.method, "model/list");
+    if (!req.params.cursor) return { data: [model("gpt-6-astra", ["max", "ultra"]), { id: "hidden", hidden: true }], nextCursor: "second" };
+    assert.equal(req.params.cursor, "second");
+    return { data: [model("gpt-6-sol", ["max", "ultra"]), model("gpt-6-luna", ["max"]), model("gpt-6-sol", ["max", "ultra"])], nextCursor: null };
+  });
+  await Promise.all([h.api.loadModels(), h.api.loadModels()]);
+  const catalog = h.messages.findLast(m => m.type === "models");
+  assert.deepEqual(catalog.models.map(m => m.id), ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]);
+  assert.equal(catalog.defaultModel, "gpt-6-sol");
+  assert.equal(catalog.defaultEffort, "high");
+  assert.equal(h.api.effortForModel("gpt-6-sol", "ultra"), "ultra");
+  assert.equal(h.api.effortForModel("gpt-6-luna", "ultra"), null);
+  assert.equal(h.requests.filter(r => r.method === "model/list").length, 2);
+});
+
+test("failed model refresh preserves the last complete catalog and allows retry", async () => {
+  const h = await host();
+  h.respond(req => req.method === "config/read" ? { config: {} } : { data: [{ id: "gpt-6-astra", isDefault: true }] });
+  await h.api.loadModels();
+  h.respond(req => {
+    if (req.method === "config/read") return { config: {} };
+    if (req.params.cursor) throw new Error("offline");
+    return { data: [{ id: "incomplete" }], nextCursor: "second" };
+  });
+  await h.api.loadModels();
+  assert.equal(h.api.MODELS[0].id, "gpt-6-astra");
+  assert.equal(h.messages.at(-1).type, "modelsError");
+  h.respond(req => req.method === "config/read" ? { config: {} } : { data: [{ id: "gpt-6-sol", isDefault: true }] });
+  await h.api.loadModels();
+  assert.equal(h.messages.at(-1).defaultModel, "gpt-6-sol");
+});
+
+test("repeated model cursors stop and report an error", async () => {
+  const h = await host();
+  h.respond(req => req.method === "config/read" ? { config: {} } : { data: [], nextCursor: "again" });
+  await h.api.loadModels();
+  assert.equal(h.requests.filter(r => r.method === "model/list").length, 2);
+  assert.equal(h.messages.at(-1).type, "modelsError");
 });

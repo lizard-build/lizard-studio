@@ -48,7 +48,7 @@ const codexSpawner = createCodexSpawner({ hostDir: HOST_DIR, nodePath: process.e
 
 // Bumped on every change the panel needs to know about. Reported in
 // `agentReady`. Claude's own HOST_VERSION is separate and untouched.
-const CODEX_HOST_VERSION = 10;
+const CODEX_HOST_VERSION = 11;
 
 // The browser bridge numbers its requests from here so the router can tell our
 // `browserResult` replies from claude's by value alone, and never has to parse
@@ -580,10 +580,29 @@ function pickDefaultModel(rows, configModel) {
   return rows.length ? rows[0].id : "";
 }
 
-async function loadModels() {
+let modelsLoading = null;
+function loadModels() {
+  if (!modelsLoading) modelsLoading = refreshModels().finally(() => { modelsLoading = null; });
+  return modelsLoading;
+}
+
+async function listModels() {
+  const rows = new Map(), cursors = new Set();
+  let cursor = null;
+  do {
+    const page = await rpc("model/list", cursor ? { cursor } : {}, 30000);
+    if (!Array.isArray(page?.data)) throw new Error("Invalid model catalog");
+    for (const row of page.data) if (row?.id) rows.set(row.id, row);
+    cursor = page.nextCursor || null;
+    if (cursor && cursors.has(cursor)) throw new Error("Repeated model catalog cursor");
+    if (cursor) cursors.add(cursor);
+  } while (cursor);
+  return [...rows.values()];
+}
+
+async function refreshModels() {
   try {
-    const [res, cfg] = await Promise.all([rpc("model/list", {}, 30000), readConfigDefaults()]);
-    const rows = (res && res.data) || [];
+    const [rows, cfg] = await Promise.all([listModels(), readConfigDefaults()]);
     const windows = readModelWindows(app.codexHome);
     MODELS = rows
       .filter((m) => m && m.id && !m.hidden)
@@ -610,12 +629,13 @@ async function loadModels() {
           ? { model: m.upgradeInfo.model || m.upgrade || null, note: m.upgradeInfo.migrationMarkdown || "", retirementAt: m.upgradeInfo.retirementAt || null }
           : null,
       }));
-    if (!DEFAULT_MODEL) DEFAULT_MODEL = pickDefaultModel(MODELS, cfg.model);
+    DEFAULT_MODEL = pickDefaultModel(MODELS, cfg.model);
     DEFAULT_EFFORT = cfg.effort;
-    if (MODELS.length) send({ type: "models", agent: "codex", models: MODELS, defaultModel: DEFAULT_MODEL, defaultEffort: DEFAULT_EFFORT });
+    send({ type: "models", agent: "codex", models: MODELS, defaultModel: DEFAULT_MODEL, defaultEffort: DEFAULT_EFFORT });
     log("model catalog:", MODELS.length, "models, default", DEFAULT_MODEL, "effort", DEFAULT_EFFORT || "(model's own)");
   } catch (err) {
     log("model/list failed:", err && err.message);
+    send({ type: "modelsError", agent: "codex", error: "Couldn’t refresh models. Try again." });
   }
 }
 
@@ -1943,6 +1963,9 @@ function handle(msg) {
     case "authCancel": cancelLogin(msg.id); break;
     case "prewarm":
       startAppServer().then(() => { if (msg.cwd) runPrewarm(msg.cwd); }).catch((err) => log("prewarm start failed:", err && err.message));
+      break;
+    case "refreshModels":
+      startAppServer().then(loadModels).catch(() => send({ type: "modelsError", agent: "codex", error: "Couldn’t connect to ChatGPT. Try again." }));
       break;
     case "planUsage":
       refreshPlanUsage();

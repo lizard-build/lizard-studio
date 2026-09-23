@@ -102,6 +102,7 @@
   // is simply nothing to pick from.
   let CODEX_MODELS = [];
   let CODEX_DEFAULT_MODEL = "";
+  const codexCatalog = { at: 0, fetching: false, error: "", timer: null };
   // `model_reasoning_effort` from the user's config.toml, if they set one. It
   // is where the Codex CLI itself opens, so the first Codex chat opens there
   // too. Null means each model's own default.
@@ -764,7 +765,7 @@
     menu.classList.remove("is-closing");
     menu.classList.remove("hidden");
     openPopover(menu);
-    const first = menu.querySelector("button.current, button");
+    const first = menu.querySelector("button.current") || menu.querySelector("button:not(:disabled)");
     if (first) first.focus();
   }
   function closeMenu(menu) {
@@ -809,8 +810,9 @@
     // restoring `animation` also restarts it, which is what we want anyway.
     menu.style.animation = "none";
     menu.style.setProperty("--pop-shift", "0px");
-    const m = menu.getBoundingClientRect(); // forces layout — unshifted, unscaled
     const t = trigger.getBoundingClientRect();
+    menu.style.setProperty("--model-menu-room", Math.max(120, t.top - POP_EDGE - 8) + "px");
+    const m = menu.getBoundingClientRect(); // forces layout — unshifted, unscaled
     // Slide the panel back inside. Both edges have to be honoured at once —
     // correcting only the overhanging one pushes the panel off the other side.
     // A panel too wide for the viewport pins to the left and overhangs right,
@@ -5983,14 +5985,9 @@
       // Codex publishes its own model list; this is where the picker learns it.
       case "models":
         if (msg.agent === "codex" && Array.isArray(msg.models)) {
-          CODEX_MODELS = msg.models.map((m) => ({
-            id: m.id,
-            label: m.label || m.id,
-            efforts: m.efforts || [],
-            effortInfo: m.effortInfo || {},
-            defaultEffort: m.defaultEffort || null,
-            upgrade: m.upgrade || null,
-          }));
+          clearTimeout(codexCatalog.timer);
+          Object.assign(codexCatalog, { at: Date.now(), fetching: false, error: "", timer: null });
+          CODEX_MODELS = msg.models.filter((m) => m && m.id).map(normalizeCodexModel);
           CODEX_DEFAULT_MODEL = msg.defaultModel || CODEX_MODELS[0]?.id || "";
           CODEX_DEFAULT_EFFORT = msg.defaultEffort || null;
           for (const m of msg.models) if (m.contextWindow) CODEX_CONTEXT_LIMITS[m.id] = m.contextWindow;
@@ -6009,6 +6006,13 @@
           syncComposer();
           if (els.modelMenu && !els.modelMenu.classList.contains("hidden")) renderModelMenu();
           if (els.effortMenu && menuIsOpen(els.effortMenu)) renderEffortMenu();
+        }
+        break;
+      case "modelsError":
+        if (msg.agent === "codex") {
+          clearTimeout(codexCatalog.timer);
+          Object.assign(codexCatalog, { fetching: false, error: msg.error || "Couldn’t refresh models. Try again.", timer: null });
+          if (els.modelMenu && menuIsOpen(els.modelMenu)) renderModelMenu();
         }
         break;
       // Codex's plan limits, sent after every turn — no probe, no parsing.
@@ -7614,54 +7618,131 @@
     // The composer pill already reflects the active model — no transcript note.
   }
 
-  // Row builder for the model picker — each row carries the Claude logo, its
-  // label, and a check on the active one. (Effort has its own slider panel.)
-  function renderPickerMenu(menu, title, items, currentId, onPick, agent) {
-    menu.innerHTML = "";
-    menu.appendChild(el("div", "model-head", title));
-    for (const it of items) {
-      const isCur = it.id === currentId;
-      const row = el("button", "model-item" + (isCur ? " current" : ""));
-      row.type = "button";
-      row.setAttribute("aria-pressed", String(isCur));
-      const logo = el("span", "model-item-logo");
-      // Whose model this is. The Anthropic mark next to a GPT model was simply
-      // wrong — and OpenAI's own mark has no colour to speak of, so it takes
-      // the row's text colour, which is how it appears on any dark surface.
-      // A custom model belongs to neither of them: it is an endpoint the user
-      // typed in, so it gets the sparkle rather than borrowing OpenAI's knot.
-      const isCustom = agent === "codex" && !!customModel(it.id);
-      logo.innerHTML = isCustom
-        ? ICON("sparkle", 15)
-        : agent === "codex"
-          ? HARNESS_ICON("codex", 15)
-          : window.RKClaudeHTML(15);
-      row.appendChild(logo);
-      row.appendChild(el("span", "model-item-label", it.label));
-      // Codex flags a model on its way out and names the one to move to. Its
-      // own note goes on hover — the row still works until the date passes.
-      if (it.upgrade && it.upgrade.note) row.title = it.upgrade.note.trim();
-      const ic = el("span", "model-item-ic");
-      if (isCur) ic.innerHTML = ICON("check", 13);
-      row.appendChild(ic);
-      row.addEventListener("click", () => {
-        closeMenu(menu);
-        const c = chats.get(activeId);
-        if (c) onPick(c, it.id);
-      });
-      menu.appendChild(row);
+  function normalizeCodexModel(m) {
+    // Only known GPT names need spacing; preserve future and custom names.
+    const label = m.label || m.id;
+    return {
+      ...m,
+      label: /^gpt-\d+(?:\.\d+)?-(astra|sol|luna|terra)$/i.test(label)
+        ? label.replace(/-(astra|sol|luna|terra)$/i, (_, name) => " " + name[0].toUpperCase() + name.slice(1).toLowerCase()).replace(/^gpt/i, "GPT")
+        : label,
+      description: m.description || "",
+      efforts: m.efforts || [],
+      effortInfo: m.effortInfo || {},
+      defaultEffort: m.defaultEffort || null,
+      upgrade: m.upgrade || null,
+    };
+  }
+
+  function modelGroups(items, agent) {
+    if (agent !== "codex") return [{ label: "", items }];
+    const groups = new Map();
+    for (const item of items) {
+      const family = item.custom ? "Custom models" : item.id.match(/^gpt-(\d+(?:\.\d+)?)(?:-|$)/i);
+      const label = typeof family === "string" ? family : family ? "GPT-" + family[1] : "Other models";
+      if (!groups.has(label)) groups.set(label, []);
+      groups.get(label).push(item);
     }
+    return [...groups].sort(([a], [b]) => {
+      const ag = a.startsWith("GPT-"), bg = b.startsWith("GPT-");
+      if (ag && bg) return b.localeCompare(a, undefined, { numeric: true });
+      if (ag !== bg) return ag ? -1 : 1;
+      return a === "Custom models" ? 1 : b === "Custom models" ? -1 : 0;
+    }).map(([label, rows]) => ({ label, items: rows }));
+  }
+
+  function renderPickerMenu(menu, title, items, currentId, onPick, agent) {
+    const focused = menu.contains(document.activeElement);
+    const scrollTop = menu.querySelector(".model-list")?.scrollTop || 0;
+    const focusedId = document.activeElement?.dataset?.modelId;
+    const focusRefresh = document.activeElement?.classList.contains("model-refresh");
+    menu.innerHTML = "";
+    menu.classList.toggle("model-menu-catalog", agent === "codex");
+    const header = el("div", "model-head", title);
+    menu.appendChild(header);
+    if (agent === "codex") {
+      const refresh = el("button", "model-refresh", codexCatalog.fetching ? "Refreshing…" : "Refresh");
+      refresh.type = "button";
+      refresh.disabled = codexCatalog.fetching;
+      refresh.addEventListener("click", () => refreshCodexModels());
+      header.appendChild(refresh);
+    }
+    const list = el("div", "model-list");
+    menu.appendChild(list);
+    for (const group of modelGroups(items, agent)) {
+      if (group.label) list.appendChild(el("div", "model-group", group.label));
+      for (const it of group.items) {
+        const isCur = it.id === currentId;
+        const row = el("button", "model-item" + (isCur ? " current" : ""));
+        row.type = "button";
+        row.dataset.modelId = it.id;
+        row.setAttribute("aria-pressed", String(isCur));
+        const logo = el("span", "model-item-logo");
+        logo.innerHTML = it.custom ? ICON("sparkle", 15)
+          : agent === "codex" ? HARNESS_ICON("codex", 15) : window.RKClaudeHTML(15);
+        row.appendChild(logo);
+        const copy = el("span", "model-item-copy");
+        const name = el("span", "model-item-name");
+        name.appendChild(el("span", "model-item-label", it.label));
+        if (agent === "codex" && it.id && it.id === CODEX_DEFAULT_MODEL)
+          name.appendChild(el("span", "model-default", "Default"));
+        copy.appendChild(name);
+        if (it.description) copy.appendChild(el("span", "model-description", it.description));
+        row.appendChild(copy);
+        if (it.upgrade?.note) row.title = it.upgrade.note.trim();
+        const ic = el("span", "model-item-ic");
+        if (isCur) ic.innerHTML = ICON("check", 13);
+        row.appendChild(ic);
+        row.addEventListener("click", () => {
+          closeMenu(menu);
+          const c = chats.get(activeId);
+          if (c) onPick(c, it.id);
+        });
+        list.appendChild(row);
+      }
+    }
+    if (agent === "codex" && codexCatalog.error) {
+      const error = el("div", "model-catalog-error", codexCatalog.error);
+      error.setAttribute("role", "status");
+      menu.appendChild(error);
+    }
+    list.scrollTop = scrollTop;
+    if (focused) {
+      const target = focusRefresh ? menu.querySelector(".model-refresh:not(:disabled)")
+        : [...list.querySelectorAll("button")].find((row) => row.dataset.modelId === focusedId);
+      (target || menu).focus({ preventScroll: true });
+    }
+  }
+
+  function refreshCodexModels() {
+    if (codexCatalog.fetching) return;
+    codexCatalog.fetching = true;
+    codexCatalog.error = "";
+    codexCatalog.timer = setTimeout(() => {
+      codexCatalog.fetching = false;
+      codexCatalog.timer = null;
+      codexCatalog.error = "Refresh timed out. Update the local helper and try again.";
+      if (menuIsOpen(els.modelMenu)) renderModelMenu();
+    }, 45000);
+    if (!post({ type: "refreshModels", agent: "codex" })) {
+      clearTimeout(codexCatalog.timer);
+      Object.assign(codexCatalog, { fetching: false, timer: null, error: "Connect to ChatGPT to refresh models." });
+    }
+    if (menuIsOpen(els.modelMenu)) renderModelMenu();
   }
 
   function toggleModelMenu() {
     if (menuIsOpen(els.modelMenu)) return hideModelMenu();
+    const chat = chats.get(activeId);
+    if (chat?.harness === "codex" && Date.now() - codexCatalog.at > 300000) refreshCodexModels();
     renderModelMenu();
     openMenu(els.modelMenu);
   }
   function renderModelMenu() {
     const chat = chats.get(activeId);
     const agent = (chat && chat.harness) || DEFAULT_HARNESS;
-    renderPickerMenu(els.modelMenu, "Model", modelsFor(agent), chat && chat.model, applyModel, agent);
+    renderPickerMenu(els.modelMenu, agent === "codex" ? "ChatGPT models" : "Model", modelsFor(agent), chat && chat.model, applyModel, agent);
+    if (menuIsOpen(els.modelMenu) && els.modelBtn) anchorPopover(els.modelMenu, els.modelBtn);
   }
   function hideModelMenu() {
     closeMenu(els.modelMenu);
