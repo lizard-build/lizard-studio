@@ -6,6 +6,8 @@ import vm from "node:vm";
 const flush = () => new Promise(setImmediate);
 function runtime() {
   let now = 100000;
+  const intervals = new Set();
+  let keepAliveCalls = 0;
   const native = [], counts = [], results = [], timers = new Set(), browserCalls = [], detached = [];
   const storage = { rkChatV2: { tabs: [], activeId: "a", draft: "keep" } };
   function port(name) {
@@ -19,13 +21,14 @@ function runtime() {
     };
   }
   const chrome = {
-    runtime: { id: "test", getURL: (p) => "chrome-extension://test/" + p, connectNative() { const p = port("native"); native.push(p); return p; } },
+    runtime: { getPlatformInfo(cb) { keepAliveCalls++; cb({ os: "mac" }); }, id: "test", getURL: (p) => "chrome-extension://test/" + p, connectNative() { const p = port("native"); native.push(p); return p; } },
     storage: { local: {
       get(keys, cb) { cb(structuredClone(storage)); },
       set(value, cb) { Object.assign(storage, structuredClone(value)); cb?.(); },
     } },
   };
   const scope = { chrome, console, Date: { now: () => now },
+    setInterval(fn, ms) { const timer = { fn, ms }; intervals.add(timer); return timer; }, clearInterval(t) { intervals.delete(t); },
     setTimeout(fn, ms) { const t = { fn, ms }; timers.add(t); return t; }, clearTimeout(t) { timers.delete(t); },
   };
   vm.runInNewContext(readFileSync(new URL("../../src/session-runtime.js", import.meta.url), "utf8"), scope);
@@ -42,7 +45,7 @@ function runtime() {
     p.emit({ type: "prompt", agent: "codex", id, text: "Work " + id });
   }
   async function settle() { await flush(); for (const t of [...timers]) { timers.delete(t); await t.fn(); } await flush(); }
-  return { panel, start, native, counts, results, storage, settle, browserCalls, detached, port, sessions, advance: ms => { now += ms; } };
+  return { chrome, intervals, keepAliveCalls: () => keepAliveCalls, panel, start, native, counts, results, storage, settle, browserCalls, detached, port, sessions, advance: ms => { now += ms; } };
 }
 const result = (id) => ({ type: "event", id, data: { type: "result", result: "Done" } });
 
@@ -336,4 +339,50 @@ test("an acknowledged prompt keeps its submission time when turnStarted arrives 
   r.native[0].emit({ type: "promptResult", id: "a", requestId: "request", ok: true, startedTurn: true });
   p.disconnect();
   assert.equal(r.panel().sent[0].sessions[0].turnStartedAt, 100000);
+});
+
+test("a silent turn keeps the worker awake without any open panel, then releases its timer", async () => {
+  const r = runtime(), p = r.panel(); r.start(p);
+  assert.equal(r.intervals.size, 1);
+  assert.equal(r.keepAliveCalls(), 1);
+  p.disconnect();
+  for (let i = 0; i < 30; i++) {
+    r.advance(20000);
+    for (const timer of r.intervals) { assert.equal(timer.ms, 20000); timer.fn(); }
+  }
+  assert.equal(r.keepAliveCalls(), 31);
+  assert.equal(r.native[0].closed, false);
+  assert.equal(r.native[0].sent.filter(m => m.type === "prompt").length, 1);
+  r.native[0].emit(result("a"));
+  assert.equal(r.intervals.size, 0);
+  await r.settle();
+  assert.equal(r.native[0].closed, true);
+  assert.ok(r.storage.studioSessionDiagnostics.some(e => e.event === "idle-release"));
+});
+
+test("waiting for approval stays alive even with a zero yellow badge", () => {
+  const r = runtime(), p = r.panel(); r.start(p);
+  r.native[0].emit({ type: "permission", id: "a", requestId: "approval" });
+  p.disconnect();
+  assert.equal(r.counts.at(-1), 0);
+  assert.equal(r.intervals.size, 1);
+  for (const timer of r.intervals) timer.fn();
+  assert.equal(r.keepAliveCalls(), 2);
+  r.native[0].disconnect();
+  assert.equal(r.intervals.size, 0);
+});
+
+test("a disconnected host keeps Chrome's reason and transport metadata, not chat content", async () => {
+  const r = runtime(), p = r.panel(); r.start(p);
+  r.chrome.runtime.lastError = { message: "Native host has exited." };
+  r.native[0].disconnect();
+  delete r.chrome.runtime.lastError;
+  await r.settle();
+  const entry = r.storage.studioSessionDiagnostics.find(e => e.event === "native-disconnected");
+  assert.equal(entry.error, "Native host has exited.");
+  assert.equal(entry.busy, 1);
+  assert.equal(entry.panels, 1);
+  assert.ok(entry.workerId);
+  assert.ok(!JSON.stringify(r.storage.studioSessionDiagnostics).includes("Work a"));
+  assert.equal(r.intervals.size, 0);
 });

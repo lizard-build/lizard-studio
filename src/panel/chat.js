@@ -491,6 +491,7 @@
   let connected = false;
   let hostReady = false;
   let reconnectTimer = null;
+  let lastTransportError = null;
   let mounted = false;
   let home = null;
   // Host protocol version last reported in `ready` (0 until the host connects).
@@ -5629,16 +5630,20 @@
       scheduleReconnect();
       return;
     }
-    port.onMessage.addListener(onHostMessage);
     const attachingPort = port;
+    attachingPort.onMessage.addListener((msg) => {
+      if (port === attachingPort) onHostMessage(msg);
+    });
     (window.RKPanelWindow?.sourceWindow || chrome.windows.getCurrent)((win) => {
       if (port !== attachingPort || !Number.isInteger(win?.id)) return;
-      try { attachingPort.postMessage({ type: "attach", windowId: win.id, contextTabId: window.RKPanelWindow?.sourceTabId }); } catch (_) {}
+      try { attachingPort.postMessage({ type: "attach", windowId: win.id, contextTabId: window.RKPanelWindow?.sourceTabId, previousDisconnect: lastTransportError }); lastTransportError = null; } catch (_) {}
     });
     port.onDisconnect.addListener(() => {
-      // Read (and discard) lastError so Chrome doesn't log "Unchecked
-      // runtime.lastError" — e.g. the not-yet-installed "host not found" case.
-      void chrome.runtime.lastError;
+      const reason = chrome.runtime.lastError?.message || "Panel connection closed without an error";
+      // An old port can report its disconnect after a replacement is attached.
+      // It must not clear the replacement or stop its running chats.
+      if (port !== attachingPort) return;
+      lastTransportError = reason;
       port = null;
       connected = false;
       reportChatActivity();

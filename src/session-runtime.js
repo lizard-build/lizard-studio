@@ -4,6 +4,28 @@
 // Each window keeps its own host and browser-tool state.
 globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, prefsStore, resultStatus = () => {} }) {
   const runtimes = new Map();
+  const workerId = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+  let diagnosticWrites = Promise.resolve();
+  let keepAliveTimer = null;
+  const KEEP_ALIVE_MS = 20000;
+  function diagnose(r, event, error) {
+    // Keep only transport metadata, never prompts, tool output or credentials.
+    const entry = { at: Date.now(), workerId, event, windowId: r?.windowId,
+      panels: r?.panels.size, sessions: r?.sessions.size,
+      busy: r ? [...r.sessions.values()].filter(busy).length : 0,
+      browserCalls: r?.browserCalls };
+    if (error) entry.error = String(error).slice(0, 300);
+    diagnosticWrites = diagnosticWrites.then(() => new Promise((resolve) => {
+      chrome.storage.local.get(["studioSessionDiagnostics"], (data) => {
+        void chrome.runtime.lastError;
+        const previous = Array.isArray(data?.studioSessionDiagnostics) ? data.studioSessionDiagnostics : [];
+        chrome.storage.local.set({ studioSessionDiagnostics: [...previous.slice(-49), entry] }, () => {
+          void chrome.runtime.lastError;
+          resolve();
+        });
+      });
+    })).catch(() => {});
+  }
   const panels = () => [...runtimes.values()].flatMap((r) => [...r.panels]);
   const ownerOf = (id) => [...runtimes.values()].find((r) => r.sessions.has(id));
   const stateFor = (s, panel) => ({ id: s.id, agent: s.agent, spec: s.spec, sessionId: s.sessionId,
@@ -20,7 +42,31 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
   const send = (port, message) => { try { port.postMessage(message); } catch (_) {} };
   const busy = (s) => s.running || s.permissions.size > 0 || s.queue.length > 0 || s.pendingPrompts.size > 0;
   const count = (r) => [...r.sessions.values()].filter((s) => (s.running || s.pendingPrompts.size > 0 || s.queue.length > 0 && !s.queue[0]?.held) && !s.permissions.size && !s.failed).length;
-  function update() { activity([...runtimes.values()].reduce((n, r) => n + count(r), 0)); }
+  const hasWork = () => [...runtimes.values()].some(r => r.browserCalls || [...r.sessions.values()].some(busy));
+  function keepAlive() {
+    if (!hasWork()) return;
+    // Page timers can be throttled when a tab is hidden. An extension API call
+    // from the worker resets Chrome's idle timer even during a silent model wait.
+    try {
+      chrome.runtime.getPlatformInfo(() => {
+        const error = chrome.runtime.lastError?.message;
+        if (error) diagnose(null, "keepalive-error", error);
+      });
+    } catch (error) { diagnose(null, "keepalive-error", error.message); }
+  }
+  function update() {
+    if (hasWork()) {
+      if (keepAliveTimer === null) {
+        keepAlive();
+        keepAliveTimer = setInterval(keepAlive, KEEP_ALIVE_MS);
+      }
+    } else if (keepAliveTimer !== null) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    }
+    activity([...runtimes.values()].reduce((n, r) => n + count(r), 0));
+  }
+  diagnose(null, "worker-start");
   function remember(r) {
     // Hosts save transcripts. Persist the thread id as soon as it arrives, even
     // when the panel closed before the first reply. Do not rewrite UI drafts.
@@ -57,6 +103,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
       await remember(r);
       if (panels().length || [...r.sessions.values()].some(busy) || r.browserCalls) return;
       if (runtimes.get(r.windowId) !== r) return;
+      diagnose(r, "idle-release");
       runtimes.delete(r.windowId);
       r.browser.detachAllCdp();
       r.native.disconnect();
@@ -85,8 +132,9 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     if (runtimes.get(r.windowId) !== r) return;
     if (msg.type === "browser") {
       ++r.browserCalls;
+      update();
       r.browser.handleBrowserOp(msg, (reply) => send(r.native, reply)).finally(() => {
-        --r.browserCalls; releaseIfIdle(r);
+        --r.browserCalls; update(); releaseIfIdle(r);
       });
       return;
     }
@@ -158,10 +206,12 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     r.browser = createBrowser({ windowId });
     r.native = chrome.runtime.connectNative("com.lizard.code");
     runtimes.set(windowId, r);
+    diagnose(r, "native-connected");
     r.native.onMessage.addListener((msg) => receive(r, msg));
     r.native.onDisconnect.addListener(() => {
-      void chrome.runtime.lastError;
+      const reason = chrome.runtime.lastError?.message || "Native connection closed without an error";
       if (runtimes.get(windowId) !== r) return;
+      diagnose(r, "native-disconnected", reason);
       for (const session of r.sessions.values()) for (const panel of panels()) {
         if (!r.panels.has(panel)) send(panel, { type: "sharedEvent", message: { type: "exit", id: session.id, code: 1 } });
       }
@@ -176,7 +226,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
   function attach(port, windowId) {
     let r;
     try { r = runtimes.get(windowId) || create(windowId); }
-    catch (_) { port.disconnect(); return null; }
+    catch (error) { diagnose(null, "native-connect-failed", error.message); port.disconnect(); return null; }
     clearTimeout(r.idleTimer);
     r.panels.add(port);
     // An ordered snapshot precedes new live messages on the same port. Replays
@@ -271,6 +321,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
       if (!r) {
         if (msg?.type === "attach" && Number.isInteger(msg.windowId) && msg.windowId >= 0) {
           r = attach(port, msg.windowId);
+          if (r && typeof msg.previousDisconnect === "string") diagnose(r, "panel-reconnected", msg.previousDisconnect);
           if (Number.isInteger(msg.contextTabId)) r?.browser.setContextTab?.(msg.contextTabId);
         }
         return;
@@ -280,6 +331,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     port.onDisconnect.addListener(() => {
       if (!r) return;
       r.panels.delete(port);
+      diagnose(r, "panel-disconnected", chrome.runtime.lastError?.message);
       for (const runtime of runtimes.values()) {
         for (const s of runtime.sessions.values()) {
           if (s.controller === port) { s.controller = panels()[0] || null; roles(s); }
