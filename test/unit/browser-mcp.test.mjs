@@ -36,8 +36,23 @@ const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve()
 test("MCP publishes workflow schemas alongside existing browser tools", async () => {
   const r = await relay(); await r.api.handle({ id: 1, method: "tools/list" });
   const names = r.output[0].result.tools.map((t) => t.name);
-  for (const name of ["browser_click", "browser_run", "browser_fill_form", "browser_check_pages", "browser_cancel"]) assert.ok(names.includes(name), name);
+  for (const name of ["browser_click", "browser_run", "browser_fill_form", "browser_check_pages", "browser_cancel", "browser_dialog", "browser_handle_dialog"]) assert.ok(names.includes(name), name);
   assert.equal(new Set(names).size, names.length);
+});
+
+test("MCP relays an explicit dialog answer and preserves recovery errors", async () => {
+  const r = await relay();
+  await r.api.handle({ id: 1, method: "tools/list" });
+  const schema = r.output[0].result.tools.find(t => t.name === "browser_handle_dialog").inputSchema;
+  assert.deepEqual(Array.from(schema.required), ["tabId", "dialogId", "accept"]);
+  const args = { tabId: 11, dialogId: "dialog-1", accept: false };
+  await r.api.handle({ id: 2, method: "tools/call", params: { name: "browser_handle_dialog", arguments: args } });
+  assert.equal(r.requests[0].op, "handle_dialog");
+  assert.deepEqual(r.requests[0].args, args);
+  r.respond(() => ({ ok: false, error: 'BROWSER_DIALOG_OPEN: {"dialogId":"dialog-2","type":"beforeunload"}. Call browser_handle_dialog.' }));
+  await r.api.handle({ id: 3, method: "tools/call", params: { name: "browser_navigate", arguments: { url: "https://test.invalid/" } } });
+  assert.equal(r.output.at(-1).result.isError, true);
+  assert.match(r.output.at(-1).result.content[0].text, /dialog-2.*beforeunload.*browser_handle_dialog/);
 });
 
 test("one MCP request performs multiple bridge operations and returns one compact result", async () => {
