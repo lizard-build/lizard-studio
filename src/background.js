@@ -126,6 +126,10 @@ const panelPorts = new Map();
 let nativeRunningCount = 0;
 const sessions = createStudioSessions({ chrome, prefsStore, createBrowser: createStudioBrowser, activity(count) {
   nativeRunningCount = count;
+  for (const [port, windowId] of panelPorts) {
+    if (windowId == null) continue;
+    try { port.postMessage({ cmd: "sessionActivity", count }); } catch (_) {}
+  }
   refreshActionActivity();
 } });
 let appliedCount = null;
@@ -232,6 +236,7 @@ chrome.runtime.onConnect.addListener((port) => {
     if (msg?.type !== "panelReady" || !Number.isInteger(msg.windowId) || msg.windowId < 0) return;
     if (!panelPorts.has(port) || panelPorts.get(port) !== null) return;
     panelPorts.set(port, msg.windowId);
+    try { port.postMessage({ cmd: "sessionActivity", count: nativeRunningCount }); } catch (_) {}
     showToolbarOnActiveTab(msg.windowId);
     refreshSelection(msg.windowId);
   });

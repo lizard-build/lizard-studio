@@ -4,6 +4,43 @@
 // keep a port open to the service worker so it can ask us to close.
 
 (function () {
+  let faviconCount = 0;
+  let faviconLogo = null;
+  function updateFavicon(count) {
+    if (!Number.isSafeInteger(count) || count < 0) return;
+    faviconCount = count;
+    const icon = document.getElementById("studio-favicon");
+    if (!icon) return;
+    const plainIcon = chrome.runtime.getURL("icons/icon48.png");
+    if (!count) { icon.href = plainIcon; return; }
+    if (!faviconLogo) {
+      faviconLogo = new Image();
+      // Use the latest count if sessions change while the logo loads.
+      faviconLogo.onload = () => updateFavicon(faviconCount);
+      faviconLogo.onerror = () => { faviconLogo = null; icon.href = plainIcon; };
+      faviconLogo.src = plainIcon;
+      return;
+    }
+    if (!faviconLogo.complete || !faviconLogo.naturalWidth) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 32;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(faviconLogo, 0, 0, 32, 32);
+    const text = count > 999 ? "999+" : String(count);
+    ctx.font = `bold ${text.length > 2 ? 10 : 16}px sans-serif`;
+    const width = Math.min(32, Math.max(18, Math.ceil(ctx.measureText(text).width) + 6));
+    ctx.fillStyle = "#fbbf24";
+    ctx.beginPath();
+    ctx.roundRect(32 - width, 15, width, 17, 5);
+    ctx.fill();
+    ctx.fillStyle = "#121212";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, 32 - width / 2, 24, width - 4);
+    icon.href = canvas.toDataURL("image/png");
+  }
+
   let activityPort = null;
   function sendActivity() {
     if (!activityPort) return;
@@ -31,17 +68,10 @@
       setTimeout(connectBg, 500);
       return;
     }
-    (window.RKPanelWindow?.sourceWindow || chrome.windows.getCurrent)((win) => {
-      if (disconnected || chrome.runtime.lastError || !win || !Number.isInteger(win.id)) return;
-      try {
-        bg.postMessage({ type: "panelReady", windowId: win.id });
-        activityPort = bg;
-        sendActivity();
-      } catch (_) {}
-    });
     bg.onMessage.addListener((m) => {
       if (!m) return;
       if (m.cmd === "close") window.close();
+      else if (m.cmd === "sessionActivity") updateFavicon(m.count);
       else if (m.cmd === "liveSelection") window.RKChat?.setLiveSelection(m.selection);
       else if (m.cmd === "pickElement" && window.RKChat && window.RKChat.addContext) {
         window.RKChat.addContext(m.element);
@@ -53,9 +83,18 @@
     bg.onDisconnect.addListener(() => {
       disconnected = true;
       if (activityPort === bg) activityPort = null;
+      updateFavicon(0);
       window.RKChat?.setLiveSelection(null);
       void chrome.runtime.lastError; // read it, or every SW recycle logs "Unchecked runtime.lastError"
       setTimeout(connectBg, 500);
+    });
+    (window.RKPanelWindow?.sourceWindow || chrome.windows.getCurrent)((win) => {
+      if (disconnected || chrome.runtime.lastError || !win || !Number.isInteger(win.id)) return;
+      try {
+        bg.postMessage({ type: "panelReady", windowId: win.id });
+        activityPort = bg;
+        sendActivity();
+      } catch (_) {}
     });
   }
   connectBg();
