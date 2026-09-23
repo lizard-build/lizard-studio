@@ -2205,6 +2205,15 @@
   // an edit rewinds the conversation to it. Local-only bubbles (e.g. the
   // synthetic "/login" one) pass no opts and stay plain.
   function userBubble(chat, text, attachments, opts) {
+    const questionReply = chat.harness === "codex" && !attachments?.length && !opts?.contexts?.length
+      && (opts?.questionReplyId || opts?.replayQuestionReply);
+    if (questionReply) {
+      const entry = mergeAsyncQuestionAnswer(chat, text, opts.questionReplyId);
+      if (entry) {
+        if (opts.real && !chat.historyPage) ++chat.turnIndexCounter;
+        return entry.card;
+      }
+    }
     const row = el("div", "msg msg-user");
     const bubble = buildBubble(text, attachments, opts && opts.contexts);
     row.appendChild(bubble);
@@ -2214,6 +2223,12 @@
       if (chat.harness !== "codex") wireEditableBubble(chat, bubble, turnIndex, text, attachments);
     }
     append(chat, row);
+    if (questionReply) {
+      // Newest-first history can load an answer before the question's page.
+      const owner = chat.historyOwner || chat;
+      if (!owner.asyncAnswerBubbles) owner.asyncAnswerBubbles = new Set();
+      owner.asyncAnswerBubbles.add({ row, text, questionId: opts.questionReplyId });
+    }
     return row;
   }
 
@@ -4669,6 +4684,52 @@
   // Claude Code's own picker returns (multi-select labels joined with ", ",
   // "Other" free text passed through verbatim). Questions (up to 4) are shown
   // one at a time; Esc dismisses the whole ask like the "No" option.
+  function parseAsyncQuestionAnswer(entry, text) {
+    if (entry.answerText && entry.answerText !== text) return null;
+    const answers = Object.create(null);
+    let rest = text;
+    for (let i = 0; i < entry.questions.length; i++) {
+      const q = entry.questions[i];
+      const prefix = q.question + "\n";
+      if (!rest.startsWith(prefix)) return null;
+      rest = rest.slice(prefix.length);
+      const next = entry.questions[i + 1];
+      const end = next ? rest.indexOf("\n\n" + next.question + "\n") : rest.length;
+      if (end < 0) return null;
+      const answer = rest.slice(0, end);
+      if (!answer.trim()) return null;
+      answers[q.id] = answer;
+      rest = next ? rest.slice(end + 2) : "";
+    }
+    return entry.questions.length ? answers : null;
+  }
+
+  function mergeAsyncQuestionAnswer(chat, text, questionId) {
+    const owner = chat.historyOwner || chat;
+    // Prefer an explicit id in live/shared events. Older saved transcripts
+    // contain only the exact question-and-answer text sent to Codex.
+    const entries = questionId ? [owner.asyncQuestions?.get(questionId)]
+      : [...(owner.asyncQuestions?.values() || [])].reverse();
+    for (const entry of entries) {
+      if (!entry) continue;
+      const answers = parseAsyncQuestionAnswer(entry, text);
+      if (!answers) continue;
+      entry.applyAnswer(answers, text);
+      return entry;
+    }
+    return null;
+  }
+
+  function mergeEarlierQuestionAnswers(chat) {
+    const owner = chat.historyOwner || chat;
+    for (const pending of owner.asyncAnswerBubbles || []) {
+      if (!pending.row.parentNode) { owner.asyncAnswerBubbles.delete(pending); continue; }
+      if (!mergeAsyncQuestionAnswer(owner, pending.text, pending.questionId)) continue;
+      pending.row.remove();
+      owner.asyncAnswerBubbles.delete(pending);
+    }
+  }
+
   function showAsyncQuestion(chat, event) {
     const owner = chat.historyOwner || chat;
     if (!owner.asyncQuestions) owner.asyncQuestions = new Map();
@@ -4679,6 +4740,7 @@
       requestId: event.questionId, async: true, readOnly: !!event.readOnly,
       input: { questions: event.questions },
     }, chat);
+    mergeEarlierQuestionAnswers(owner);
   }
 
   function sendAsyncQuestionAnswer(chat, entry, text) {
@@ -4691,7 +4753,7 @@
     entry.sentText = text;
     entry.promptRequestId = newId();
     entry.setSending(true);
-    if (!post({ type: "prompt", agent: "codex", id: chat.id, text, promptRequestId: entry.promptRequestId })) {
+    if (!post({ type: "prompt", agent: "codex", id: chat.id, text, questionReplyId: entry.questionId, promptRequestId: entry.promptRequestId })) {
       entry.setError("Host disconnected. Your answer was not sent.");
       return false;
     }
@@ -4705,8 +4767,7 @@
       entry.setError(msg.error || "Couldn't send your answer. Try again.");
       return;
     }
-    entry.complete("Answer sent");
-    userBubble(chat, entry.sentText, null, { real: !!msg.startedTurn });
+    userBubble(chat, entry.sentText, null, { real: !!msg.startedTurn, questionReplyId: entry.questionId });
     chat.codexHasSubmittedTurn = true;
     chat.empty = false;
     touchChat(chat);
@@ -4730,7 +4791,7 @@
 
     const card = el("div", "perm-card ask-card");
     card.tabIndex = 0;
-    const entry = { card, selected: 0, rows: [], readOnly: !!msg.readOnly, sending: false };
+    const entry = { card, questionId: requestId, questions, selected: 0, rows: [], readOnly: !!msg.readOnly, sending: false };
 
     const title = el("div", "perm-title");
     const ic = el("span", "perm-title-ic");
@@ -4961,6 +5022,11 @@
       }
       hint.textContent = status;
       hint.removeAttribute("role");
+    };
+    entry.applyAnswer = (values, text) => {
+      Object.assign(answers, values);
+      entry.answerText = text;
+      entry.complete("Answer sent");
     };
     const wasWaiting = tabDotWaiting(chat);
     if (msg.async) chat.asyncQuestions.set(requestId, entry);
@@ -5766,8 +5832,7 @@
         const text = String(event.text || "").replace(CTX_MARK_RE, "").trim();
         const attachments = (event.images || []).map((img) => ({ mediaType: img.mediaType,
           dataUrl: `data:${img.mediaType || "image/png"};base64,${img.data || ""}` }));
-        userBubble(chat, text, attachments, { real: true });
-        for (const question of chat.asyncQuestions?.values() || []) if (!question.readOnly) question.complete("Answer sent");
+        userBubble(chat, text, attachments, { real: true, questionReplyId: event.questionReplyId, replayQuestionReply: true });
         chat.empty = false;
       } else onHostMessage(event);
       return;
@@ -6456,7 +6521,7 @@
             commandBubbleText(content) || content.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
           // Don't replay bare `/usage` command bubbles (their output is skipped
           // above, so the lone command echo would dangle).
-          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts });
+          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts, replayQuestionReply: true });
         } else if (Array.isArray(content)) {
           const texts = [];
           for (const b of content) {
@@ -6473,7 +6538,7 @@
           const joined = texts.join("\n\n");
           const stripped =
             commandBubbleText(joined) || joined.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
-          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts });
+          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts, replayQuestionReply: true });
         }
       } else if (ev.type === "assistant") {
         // Each replayed assistant message refreshes the context reading; the
@@ -6757,6 +6822,7 @@
     chat._bashIdx = 0;
     chat.bashMode = false;
     chat.asyncQuestions?.clear();
+    chat.asyncAnswerBubbles?.clear();
     chat.queue = []; // stale prompts from the wiped conversation shouldn't replay
     if (chat.id === activeId) {
       renderTurnStatus(chat);

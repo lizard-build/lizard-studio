@@ -225,7 +225,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
       if (msg.type === "prompt") {
         if (!s.running) { s.journal = []; s.turnIds.clear(); }
         s.submitted = true; s.failed = false;
-        const entry = { type: "backgroundPrompt", id: s.id, text: msg.text, images: msg.images, accepted: !msg.promptRequestId };
+        const entry = { type: "backgroundPrompt", id: s.id, text: msg.text, images: msg.images, questionReplyId: msg.questionReplyId, accepted: !msg.promptRequestId };
         if (msg.promptRequestId) s.pendingPrompts.set(msg.promptRequestId, { entry, queueId: msg.backgroundQueueId, origin });
         else s.running = true;
         if (s.agent === "codex") s.journal.push(entry);

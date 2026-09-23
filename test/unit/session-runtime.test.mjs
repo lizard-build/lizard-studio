@@ -282,3 +282,13 @@ test('a rejected steer never appears as an accepted prompt in another window', (
   r.native[0].emit({ type: 'promptResult', id: 'a', requestId: 'steer', ok: false });
   assert.ok(!b.sent.some(m => m.type === 'sharedPrompt' && m.message.text === 'Correction'));
 });
+
+test('accepted question replies keep their question id in other windows and after reconnect', () => {
+  const r = runtime(), a = r.panel(1), b = r.panel(2); r.start(a);
+  a.emit({ type: 'prompt', id: 'a', text: 'Question?\nAnswer', promptRequestId: 'answer', questionReplyId: 'question-id' });
+  assert.ok(!b.sent.some(m => m.type === 'sharedPrompt' && m.message.questionReplyId));
+  r.native[0].emit({ type: 'promptResult', id: 'a', requestId: 'answer', ok: true });
+  assert.equal(b.sent.find(m => m.type === 'sharedPrompt' && m.message.questionReplyId)?.message.questionReplyId, 'question-id');
+  const c = r.panel(3);
+  assert.ok(c.sent.some(m => m.type === 'backgroundReplay' && m.message.questionReplyId === 'question-id'));
+});
