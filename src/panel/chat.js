@@ -1159,6 +1159,7 @@
     if (connected && hostReady && !chat.started && !chat.sessionFailure) startChatSession(chat);
     // Re-render a restored/re-opened conversation from its on-disk transcript.
     maybeReplay(chat);
+    window.dispatchEvent(new Event("rk-chat-view"));
     // The scroll is already where it belongs (restoreScroll above) — doing it
     // again a frame later is what used to yank the panel from the top of the
     // conversation down to the end, in full view.
@@ -1392,6 +1393,11 @@
   }
 
   // ---- tab bar --------------------------------------------------------------
+  function getVisibleChatId() {
+    const chat = chats.get(activeId);
+    return !document.hidden && connected && !backgroundRestoring && chat &&
+      !chat.historyRequest && !chat.historyError && chat.messagesEl?.childElementCount ? chat.id : null;
+  }
   function getRunningChatCount() {
     if (!connected) return 0;
     return [...chats.values()].filter((chat) => tabDotRunning(chat) && !tabDotWaiting(chat)).length;
@@ -1457,6 +1463,7 @@
       node.classList.toggle("dot-unseen", !waiting && !running && !!chat.unseen);
     }
     renderChatMenuList(); // the menu wears the same dots
+    window.dispatchEvent(new Event("rk-chat-view"));
   }
   // A fresh permission/question ask just landed — paint the tab's blue waiting
   // dot, and chime for attention like a finished session does. `wasWaiting` is
@@ -6471,6 +6478,7 @@
     } else box.scrollTop = oldTop;
     chat.scrollTop = box.scrollTop;
     if (chat.id === activeId) syncComposer();
+    window.dispatchEvent(new Event("rk-chat-view"));
   }
 
   // Render a chunk of past messages (the host streams them in order across one or
@@ -11318,5 +11326,5 @@
   }
 
 
-  window.RKChat = { mount, activate, deactivate, addContext, addImage, getRunningChatCount, setLiveSelection };
+  window.RKChat = { mount, activate, deactivate, addContext, addImage, getRunningChatCount, getVisibleChatId, setLiveSelection };
 })();
