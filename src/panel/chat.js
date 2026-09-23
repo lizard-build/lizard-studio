@@ -1151,13 +1151,14 @@
     renderTabs();
     syncComposer();
     const chat = chats.get(id);
+    for (const entry of chat.queue) if (!entry.el && !chat.backgroundDeferred) entry.el = renderQueuedBubble(chat, entry);
     // The next new chat opens on whatever you were last working in. Recording
     // it here rather than only in the harness chip means it follows the tab you
     // were actually using, which is what "the same as last time" means to
     // someone who has been switching between two of them.
     if (chat.harness) lastHarness = chat.harness;
     // Lazily spin up the session the first time a tab is shown.
-    if (connected && hostReady && !chat.started && !chat.sessionFailure) startChatSession(chat);
+    if (connected && hostReady && !chat.started && !chat.sessionFailure && !chat.backgroundDeferred) startChatSession(chat);
     // Re-render a restored/re-opened conversation from its on-disk transcript.
     maybeReplay(chat);
     window.dispatchEvent(new Event("rk-chat-view"));
@@ -1397,7 +1398,7 @@
   function getVisibleChatId() {
     const chat = chats.get(activeId);
     return !document.hidden && connected && !backgroundRestoring && chat &&
-      !chat.historyRequest && !chat.historyError && chat.messagesEl?.childElementCount ? chat.id : null;
+      !chat.backgroundDeferred && !chat.historyRequest && !chat.historyError && chat.messagesEl?.childElementCount ? chat.id : null;
   }
   function getRunningChatCount() {
     if (!connected) return 0;
@@ -1425,7 +1426,7 @@
   }
 
   function tabDotWaiting(chat) {
-    return !!(chat.permCards && chat.permCards.size) || (!chat.turnRunning && !!pendingAsyncQuestion(chat));
+    return !!chat.backgroundWaiting || !!(chat.permCards && chat.permCards.size) || (!chat.turnRunning && !!pendingAsyncQuestion(chat));
   }
   function syncBackgroundQueues() {
     if (!connected || backgroundRestoring || sharedRendering || applyingSharedPrefs) return;
@@ -5636,7 +5637,7 @@
     });
     (window.RKPanelWindow?.sourceWindow || chrome.windows.getCurrent)((win) => {
       if (port !== attachingPort || !Number.isInteger(win?.id)) return;
-      try { attachingPort.postMessage({ type: "attach", windowId: win.id, contextTabId: window.RKPanelWindow?.sourceTabId, previousDisconnect: lastTransportError }); lastTransportError = null; } catch (_) {}
+      try { attachingPort.postMessage({ type: "attach", windowId: win.id, contextTabId: window.RKPanelWindow?.sourceTabId, lazyReplay: true, activeId, previousDisconnect: lastTransportError }); lastTransportError = null; } catch (_) {}
     });
     port.onDisconnect.addListener(() => {
       const reason = chrome.runtime.lastError?.message || "Panel connection closed without an error";
@@ -5654,6 +5655,9 @@
       }
       codexUsage.fetching = false;
       for (const c of chats.values()) {
+        c.backgroundDeferred = false;
+        c.backgroundReplayRequested = false;
+        c.backgroundWaiting = false;
         failAsyncQuestionSends(c);
         c.started = false;
         if (c.historyRequest) historyFailed(c, c.historyRequest);
@@ -5753,6 +5757,20 @@
 
   function onHostMessage(msg) {
     if (!msg) return;
+    if (msg.type === "backgroundSessionState") {
+      const chat = chats.get(msg.id);
+      if (!chat?.backgroundDeferred) return;
+      if (chat.turnRunning && !msg.running && !msg.failed) chat.unseen = true;
+      chat.turnRunning = msg.running;
+      chat.turnStartedAt = msg.turnStartedAt;
+      chat.started = msg.started;
+      chat.backgroundWaiting = msg.waiting;
+      chat.codexHasSubmittedTurn = msg.submitted;
+      if (msg.sessionId) chat.sessionId = msg.sessionId;
+      updateTabDots();
+      return;
+    }
+    if ((msg.type === "sharedPrompt" || msg.type === "sharedEvent") && chats.get(msg.message?.id)?.backgroundDeferred) return;
     if (msg.type === "sharedQueue") {
       const chat = chats.get(msg.id);
       if (!chat || !chat.sessionObserver) return;
@@ -5760,7 +5778,7 @@
       try {
         for (const entry of chat.queue) entry.el?.remove();
         chat.queue = msg.entries || [];
-        for (const entry of chat.queue) entry.el = renderQueuedBubble(chat, entry);
+        if (!chat.backgroundDeferred) for (const entry of chat.queue) entry.el = renderQueuedBubble(chat, entry);
         updateTabDots();
       } finally { sharedRendering = false; }
       return;
@@ -5819,6 +5837,8 @@
         chat.messagesEl.classList.toggle("hidden", chat.id !== activeId);
         chat.started = state.started;
         chat.sessionObserver = !!state.observer;
+        chat.backgroundDeferred = !!state.replayDeferred;
+        chat.backgroundWaiting = chat.backgroundDeferred && !!state.waiting;
         // Older workers did not mark resumed threads as submitted. Keep the
         // saved ID so reopening an idle chat cannot erase its history link.
         const savedSessionId = state.spec.resume || (old && resumableSessionId(old));
@@ -5852,8 +5872,8 @@
         if (chat.turnRunning) { chat.turnRunning = false; resumeTurnIfIdle(chat, state.turnStartedAt); }
         chat.replayed = false;
         maybeReplay(chat);
-        for (const entry of chat.queue) entry.el = renderQueuedBubble(chat, entry);
-        if (chat.started && !chat.turnRunning && !state.failed && !chat.permCards.size) dispatchNextQueued(chat);
+        if (!chat.backgroundDeferred) for (const entry of chat.queue) entry.el = renderQueuedBubble(chat, entry);
+        if (!chat.backgroundDeferred && chat.started && !chat.turnRunning && !state.failed && !chat.permCards.size) dispatchNextQueued(chat);
       }
       backgroundRestoreStates = [];
       renderTabs(); updateTabDots(); syncComposer(); savePrefs();
@@ -6359,7 +6379,13 @@
   // on-disk JSONL and replay it, once, the first time we have a live host.
   function maybeReplay(chat) {
     if (backgroundRestoring) return;
-    if (!chat || chat.replayed) return;
+    if (!chat || chat.id !== activeId || chat.replayed) return;
+    if (chat.backgroundDeferred) {
+      if (!chat.backgroundReplayRequested && connected && hostReady) {
+        chat.backgroundReplayRequested = post({ type: "backgroundReplaySession", id: chat.id });
+      }
+      return;
+    }
     if (resumableSessionId(chat)) {
       if (!connected || !hostReady) return;
       if (chat.harness === "codex") {
@@ -9257,6 +9283,8 @@
     refreshUsageUI();
     setRunningUI(chat.turnRunning);
     syncBashMode(chat);
+    if (els.composerBox) els.composerBox.inert = !!chat.backgroundDeferred;
+    if (chat.backgroundDeferred) els.input.placeholder = "Loading messages…";
     renderTurnStatus(chat);
     if (chat.turnRunning) startStatusTicker();
     syncBranch(chat);
@@ -10437,9 +10465,9 @@
       chooseHarness(chat, available.id);
     }
     if (!chat || !harnessReady[chat.harness] || chat.sessionFailure) return;
-    if (!chat.started) startChatSession(chat);
+    if (!chat.started && !chat.backgroundDeferred) startChatSession(chat);
     maybeReplay(chat);
-    if (chat.started && !chat.turnRunning) dispatchNextQueued(chat);
+    if (!chat.backgroundDeferred && chat.started && !chat.turnRunning) dispatchNextQueued(chat);
   }
 
   // The `claude` install commands, one per shell. Detection picks a default; the
@@ -10545,6 +10573,8 @@
     // a file path — tell the renderer to mark them up (see openClickedPath).
     R.enablePathLinks();
     root.innerHTML = TEMPLATE;
+    root.inert = true;
+    root.setAttribute("aria-busy", "true");
     els.tabs = root.querySelector("#chat-tabs");
     els.setup = root.querySelector("#chat-setup");
     els.stack = root.querySelector("#chat-stack");
@@ -11000,35 +11030,36 @@
       }).observe(els.input);
     }
 
-    // Pull the model catalog before restoring tabs, so a tab saved on a model
-    // that only exists in the remote list still resolves to its real label.
-    globalThis.RKPanelStartup?.mark("catalog-cache");
-    loadModelCatalog(() => {
-      // Custom models are part of the catalog for label-resolution purposes, so
-      // they have to land before tabs are restored too.
-      globalThis.RKPanelStartup?.mark("custom-models-cache");
-      loadCustomModels(() => {
-      // Restore tabs (or open a first one), then render.
-      globalThis.RKPanelStartup?.mark("saved-chats");
-      loadPrefs(() => {
-        globalThis.RKPanelStartup?.mark("render-chats");
-        if (!order.length) {
-          const first = makeChat({ cwd: lastCwd });
-          chats.set(first.id, first);
-          order.push(first.id);
-          activeId = first.id;
-        }
-        for (const id of order) {
-          const chat = chats.get(id);
-          els.stack.appendChild(chat.messagesEl);
-          for (const entry of chat.queue) entry.el = renderQueuedBubble(chat, entry);
-        }
-        renderTabs();
-        setActive(activeId);
-        onReady?.();
-      });
-      });
-    });
+    // Paint the shell before reading saved chats. Keep it read-only until the
+    // snapshot arrives so early input cannot replace a saved draft.
+    els.input.placeholder = "Loading chats…";
+    els.chatMenuList.replaceChildren(el("div", "chat-menu-empty", "Loading chats…"));
+    globalThis.RKPanelStartup?.shellReady();
+    setTimeout(() => {
+      globalThis.RKPanelStartup?.mark("catalog-cache");
+      let catalogsPending = 2;
+      const catalogsReady = () => {
+        if (--catalogsPending) return;
+        globalThis.RKPanelStartup?.mark("saved-chats");
+        loadPrefs(() => {
+          globalThis.RKPanelStartup?.mark("render-chats");
+          if (!order.length) {
+            const first = makeChat({ cwd: lastCwd });
+            chats.set(first.id, first);
+            order.push(first.id);
+            activeId = first.id;
+          }
+          for (const id of order) els.stack.appendChild(chats.get(id).messagesEl);
+          renderTabs();
+          setActive(activeId);
+          els.root.inert = false;
+          els.root.removeAttribute("aria-busy");
+          onReady?.();
+        });
+      };
+      loadModelCatalog(catalogsReady);
+      loadCustomModels(catalogsReady);
+    }, 0);
   }
 
   let started = false;

@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../../src/panel/chat.js", import.meta.url), "utf8");
 
-function restore({ savedId = null, resume = null, submitted = false, running = false, turnStartedAt } = {}) {
+function restore({ savedId = null, resume = null, submitted = false, running = false, turnStartedAt, waiting = false, replayDeferred = false } = {}) {
   const requests = [];
   const element = () => ({ replaceWith() {}, classList: { toggle() {} } });
   const old = { id: "a", harness: "codex", sessionId: savedId, codexHasSubmittedTurn: !!savedId, messagesEl: element() };
@@ -30,7 +30,7 @@ function restore({ savedId = null, resume = null, submitted = false, running = f
   ].join("\n"), scope);
   scope.onHostMessage({ type: "backgroundRestoreStart", sessions: [{ id: "a", agent: "codex",
     spec: { cwd: "/project", resume }, sessionId: resume || savedId || "unused-thread",
-    started: true, running, turnStartedAt, submitted, turnIds: [] }] });
+    started: true, running, turnStartedAt, submitted, waiting, replayDeferred, turnIds: [] }] });
   scope.onHostMessage({ type: "backgroundRestoreEnd" });
   const chat = scope.chats.get("a");
   return { chat, requests, empty: chat.empty, persistedId: scope.resumableSessionId(chat) };
@@ -75,4 +75,25 @@ test("an older worker without a timestamp still gets a valid timer", () => {
   const before = Date.now();
   const { chat } = restore({ savedId: "saved-thread", submitted: true, running: true });
   assert.ok(chat.turnStartedAt >= before && chat.turnStartedAt <= Date.now());
+});
+
+test("a restored chat uses replayed permission cards instead of retaining a stale waiting flag", () => {
+  const { chat } = restore({ savedId: "saved-thread", waiting: true });
+  assert.equal(chat.backgroundWaiting, false);
+});
+
+test("history loads only for the selected chat and requests deferred live replay once", () => {
+  const requests = [], scope = { backgroundRestoring: false, connected: true, hostReady: true, activeId: "a",
+    resumableSessionId: chat => chat.sessionId,
+    requestHistoryPage: chat => requests.push(chat.id), post: msg => { requests.push(msg); return true; } };
+  vm.createContext(scope);
+  vm.runInContext(source.slice(source.indexOf("  function maybeReplay(chat)"), source.indexOf("  function historyNav(chat)")), scope);
+  const a = { id: "a", harness: "codex", sessionId: "thread-a" };
+  const b = { id: "b", harness: "codex", sessionId: "thread-b", backgroundDeferred: true };
+  scope.maybeReplay(b); assert.equal(requests.length, 0); assert.equal(b.replayed, undefined);
+  scope.maybeReplay(a); assert.deepEqual(requests, ["a"]);
+  scope.activeId = "b"; scope.maybeReplay(b); scope.maybeReplay(b);
+  assert.equal(requests.length, 2); assert.equal(requests[1].type, "backgroundReplaySession");
+  b.backgroundDeferred = false; scope.maybeReplay(b);
+  assert.equal(requests.at(-1), "b");
 });

@@ -152,3 +152,22 @@ test('host activation waits for restored chats while the panel can already close
 test('mount failure leaves the background bridge alive and reports the startup failure', () => {
   assert.deepEqual(shell({ broken: true }).state(), { activated: 0, ready: 0, bridge: 1, failed: 1 });
 });
+
+test('the shell appears before saved chats finish loading without declaring a completed handoff', () => {
+  const p = setup(); let handoffs = 0;
+  p.scope.window.RKPanelWindow = { ready() { handoffs++; } };
+  p.api.shellReady();
+  assert.equal(p.nodes.get('panel-startup').hidden, true);
+  assert.equal(p.api.snapshot().finished, false);
+  assert.equal(handoffs, 0);
+  p.api.ready();
+  assert.equal(p.api.snapshot().finished, true);
+  assert.equal(handoffs, 1);
+});
+
+test('a failed restore after showing the shell still exposes Retry', () => {
+  const p = setup(); p.api.shellReady();
+  p.api.fail(new Error('storage failed'));
+  assert.equal(p.nodes.get('panel-startup').hidden, false);
+  assert.equal(p.nodes.get('panel-startup-retry').hidden, false);
+});

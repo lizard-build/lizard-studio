@@ -20,12 +20,14 @@
     if (finished || failed) return;
     message.textContent = "Opening chats is taking longer than expected.";
     retry.hidden = false;
+    screen.hidden = false;
     report("Still waiting");
   }, 10000);
 
   function fail(error) {
     if (finished || failed) return;
     failed = true;
+    screen.hidden = false;
     clearTimeout(slowTimer);
     observer?.disconnect();
     message.textContent = "Couldn't open chats. Try again.";
@@ -45,6 +47,21 @@
     snapshot() {
       return { timeOrigin: performance.timeOrigin, stage, finished, failed, timings: { ...timings } };
     },
+    shellReady() {
+      if (finished || failed) return;
+      const viewport = document.getElementById("chat-menu-viewport");
+      if (!viewport) return;
+      const reveal = () => {
+        if (!viewport.classList.contains("ready")) return;
+        screen.hidden = true;
+        mark("shell-visible");
+        observer?.disconnect();
+      };
+      observer?.disconnect();
+      observer = new MutationObserver(reveal);
+      observer.observe(viewport, { attributes: true, attributeFilter: ["class"] });
+      reveal();
+    },
     ready() {
       if (finished || failed) return;
       const viewport = document.getElementById("chat-menu-viewport");
@@ -62,6 +79,7 @@
         window.RKPanelWindow?.ready();
       };
       if (!viewport) { fail(new Error("Chat viewport missing")); return; }
+      observer?.disconnect();
       observer = new MutationObserver(reveal);
       observer.observe(viewport, { attributes: true, attributeFilter: ["class"] });
       reveal();

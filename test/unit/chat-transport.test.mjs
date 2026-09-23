@@ -18,7 +18,7 @@ function panel() {
     windows: { getCurrent: cb => cb({ id: 1 }) },
   };
   const scope = { chrome, window: {}, chats: new Map([['a', chat]]), port: null,
-    reconnectTimer: null, lastTransportError: null, RECONNECT_MS: 1200,
+    activeId: "a", reconnectTimer: null, lastTransportError: null, RECONNECT_MS: 1200,
     HARNESSES: [{ id: 'codex' }], harnessReady: {}, harnessChecked: {},
     connected: true, hostReady: true, codexUsage: {}, expectHostRestart: false,
     onHostMessage: msg => received.push(msg), systemNote: (_, text) => notes.push(text),

@@ -4,6 +4,7 @@
 // Each window keeps its own host and browser-tool state.
 globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, prefsStore, resultStatus = () => {} }) {
   const runtimes = new Map();
+  const deferredReplays = new WeakMap();
   const workerId = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
   let diagnosticWrites = Promise.resolve();
   let keepAliveTimer = null;
@@ -29,6 +30,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
   const panels = () => [...runtimes.values()].flatMap((r) => [...r.panels]);
   const ownerOf = (id) => [...runtimes.values()].find((r) => r.sessions.has(id));
   const stateFor = (s, panel) => ({ id: s.id, agent: s.agent, spec: s.spec, sessionId: s.sessionId,
+    replayDeferred: !!deferredReplays.get(panel)?.has(s.id), waiting: s.permissions.size > 0,
     observer: s.controller !== panel, started: s.started, running: s.running, turnStartedAt: s.turnStartedAt, failed: s.failed,
     submitted: s.submitted, queue: s.queue.map((entry) => entry.ui), turnIds: [...s.turnIds] });
   function startTurn(s, startedAt = Date.now()) {
@@ -127,6 +129,11 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     const entry = s.queue.shift();
     forward(r, entry.message);
   }
+  function sendDeferredState(panel, s) {
+    send(panel, { type: "backgroundSessionState", id: s.id, running: s.running,
+      started: s.started, failed: s.failed, waiting: s.permissions.size > 0,
+      turnStartedAt: s.turnStartedAt, submitted: s.submitted, sessionId: s.sessionId });
+  }
   function receive(r, msg) {
     if (!msg || typeof msg !== "object") return;
     if (runtimes.get(r.windowId) !== r) return;
@@ -195,7 +202,9 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
       }
     }
     for (const panel of s ? panels() : r.panels) {
-      send(panel, s && panel !== s.controller ? { type: "sharedEvent", message: msg } : msg);
+      if (s && deferredReplays.get(panel)?.has(s.id)) {
+        sendDeferredState(panel, s);
+      } else send(panel, s && panel !== s.controller ? { type: "sharedEvent", message: msg } : msg);
     }
     if (s) drain(r, s);
     update(); releaseIfIdle(r);
@@ -223,7 +232,14 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     });
     return r;
   }
-  function attach(port, windowId) {
+  function replaySession(port, s) {
+    for (const msg of s.agent === "codex" ? s.journal : []) {
+      if (msg.type === "backgroundPrompt" && msg.accepted === false) continue;
+      send(port, { type: "backgroundReplay", message: msg });
+    }
+    for (const msg of s.permissions.values()) send(port, { type: "backgroundReplay", message: msg });
+  }
+  function attach(port, windowId, options = {}) {
     let r;
     try { r = runtimes.get(windowId) || create(windowId); }
     catch (error) { diagnose(null, "native-connect-failed", error.message); port.disconnect(); return null; }
@@ -232,22 +248,25 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     // An ordered snapshot precedes new live messages on the same port. Replays
     // only paint the UI; no permission, prompt or browser action is repeated.
     const allSessions = [...runtimes.values()].flatMap((item) => [...item.sessions.values()]);
-    for (const s of allSessions) if (!s.controller) s.controller = port;
+    deferredReplays.set(port, new Set(options.lazyReplay ? allSessions.filter(s => s.id !== options.activeId).map(s => s.id) : []));
+    for (const s of allSessions) if (!s.controller && !deferredReplays.get(port).has(s.id)) s.controller = port;
     send(port, { type: "backgroundRestoreStart", sessions: allSessions.map((s) => stateFor(s, port)) });
     for (const msg of r.ready.values()) send(port, msg);
-    for (const s of allSessions) {
-      for (const msg of s.agent === "codex" ? s.journal : []) {
-        if (msg.type === "backgroundPrompt" && msg.accepted === false) continue;
-        send(port, { type: "backgroundReplay", message: msg });
-      }
-      for (const msg of s.permissions.values()) send(port, { type: "backgroundReplay", message: msg });
-    }
+    for (const s of allSessions) if (!deferredReplays.get(port).has(s.id)) replaySession(port, s);
     send(port, { type: "backgroundRestoreEnd" });
     return r;
   }
   function forward(r, msg, origin = null) {
     r = ownerOf(msg.id) || r;
     const existing = r.sessions.get(msg.id);
+    if (msg.type === "backgroundReplaySession") {
+      if (!existing || !origin || !deferredReplays.get(origin)?.delete(msg.id)) return;
+      if (!existing.controller) existing.controller = origin;
+      send(origin, { type: "backgroundRestoreStart", sessions: [stateFor(existing, origin)] });
+      replaySession(origin, existing);
+      send(origin, { type: "backgroundRestoreEnd" });
+      return;
+    }
     if (msg.type === "start" && existing?.started && origin && existing.controller !== origin) {
       send(origin, { type: "sharedSession", session: stateFor(existing, origin) });
       return;
@@ -306,6 +325,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
       if (msg.type === "close" || msg.type === "stop") r.sessions.delete(msg.id);
     }
     send(r.native, msg);
+    if (s) for (const panel of panels()) if (deferredReplays.get(panel)?.has(s.id)) sendDeferredState(panel, s);
     update(); releaseIfIdle(r);
   }
   function connect(port) {
@@ -320,7 +340,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     port.onMessage.addListener((msg) => {
       if (!r) {
         if (msg?.type === "attach" && Number.isInteger(msg.windowId) && msg.windowId >= 0) {
-          r = attach(port, msg.windowId);
+          r = attach(port, msg.windowId, msg);
           if (r && typeof msg.previousDisconnect === "string") diagnose(r, "panel-reconnected", msg.previousDisconnect);
           if (Number.isInteger(msg.contextTabId)) r?.browser.setContextTab?.(msg.contextTabId);
         }
@@ -334,7 +354,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
       diagnose(r, "panel-disconnected", chrome.runtime.lastError?.message);
       for (const runtime of runtimes.values()) {
         for (const s of runtime.sessions.values()) {
-          if (s.controller === port) { s.controller = panels()[0] || null; roles(s); }
+          if (s.controller === port) { s.controller = panels().find(p => !deferredReplays.get(p)?.has(s.id)) || null; roles(s); }
           drain(runtime, s);
         }
         releaseIfIdle(runtime);

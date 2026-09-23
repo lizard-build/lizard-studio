@@ -37,8 +37,8 @@ function runtime() {
       browserCalls.push({ windowId, msg }); reply({ type: "browserResult", bid: msg.bid, ok: true });
     } }),
   });
-  function panel(windowId = 1) {
-    const p = port("studio-session"); p.sender = { id: "test", url: "chrome-extension://test/src/panel/panel.html" }; sessions.connect(p); p.emit({ type: "attach", windowId }); return p;
+  function panel(windowId = 1, options = {}) {
+    const p = port("studio-session"); p.sender = { id: "test", url: "chrome-extension://test/src/panel/panel.html" }; sessions.connect(p); p.emit({ type: "attach", windowId, ...options }); return p;
   }
   function start(p, id = "a") {
     p.emit({ type: "start", agent: "codex", id, cwd: "/project" });
@@ -385,4 +385,52 @@ test("a disconnected host keeps Chrome's reason and transport metadata, not chat
   assert.ok(entry.workerId);
   assert.ok(!JSON.stringify(r.storage.studioSessionDiagnostics).includes("Work a"));
   assert.equal(r.intervals.size, 0);
+});
+
+test("opening many large chats replays only the selected chat until another is opened", () => {
+  const r = runtime(), original = r.panel();
+  for (let i = 0; i < 80; i++) {
+    r.start(original, "chat-" + i);
+    r.native[0].emit({ type: "event", id: "chat-" + i, data: { type: "assistant", text: "x".repeat(50000) } });
+  }
+  original.disconnect();
+  const nativeBefore = r.native[0].sent.length;
+  const lazy = r.panel(1, { lazyReplay: true, activeId: "chat-0" });
+  const snapshot = lazy.sent.find(m => m.type === "backgroundRestoreStart");
+  assert.equal(snapshot.sessions.length, 80);
+  assert.equal(snapshot.sessions.filter(s => s.replayDeferred).length, 79);
+  assert.ok(lazy.sent.filter(m => m.type === "backgroundReplay").every(m => m.message.id === "chat-0"));
+  assert.ok(JSON.stringify(lazy.sent).length < 100000, "hidden transcripts must not cross the panel port");
+  assert.equal(r.native[0].sent.length, nativeBefore);
+  r.native[0].emit({ type: "permission", id: "chat-1", requestId: "ask" });
+  assert.equal(lazy.sent.at(-1).type, "backgroundSessionState");
+  assert.equal(lazy.sent.at(-1).waiting, true);
+  const before = lazy.sent.length;
+  lazy.emit({ type: "backgroundReplaySession", id: "chat-1" });
+  const restored = lazy.sent.slice(before);
+  assert.equal(restored[0].sessions[0].replayDeferred, false);
+  assert.equal(restored[0].sessions[0].observer, false);
+  assert.ok(restored.some(m => m.message?.data?.text?.length === 50000));
+  assert.ok(restored.some(m => m.message?.type === "permission"));
+  assert.equal(restored.at(-1).type, "backgroundRestoreEnd");
+  assert.equal(r.native[0].sent.length, nativeBefore, "opening a chat must not resend any prompt");
+  const once = lazy.sent.length;
+  lazy.emit({ type: "backgroundReplaySession", id: "chat-1" });
+  assert.equal(lazy.sent.length, once);
+});
+
+test("a hidden deferred chat completes and drains its queue without rendering its transcript", () => {
+  const r = runtime(), original = r.panel(); r.start(original, "a"); r.start(original, "b");
+  original.emit({ type: "backgroundQueue", id: "b", entries: [{ ui: { text: "Next", backgroundId: "q" },
+    message: { type: "prompt", id: "b", agent: "codex", text: "Next" } }] });
+  original.disconnect();
+  const lazy = r.panel(1, { lazyReplay: true, activeId: "a" });
+  r.native[0].emit(result("b"));
+  assert.equal(r.native[0].sent.at(-1).text, "Next");
+  assert.ok(lazy.sent.some(m => m.type === "backgroundSessionState" && m.id === "b" && !m.running));
+  assert.ok(!lazy.sent.some(m => m.type === "backgroundReplay" && m.message.id === "b"));
+  lazy.emit({ type: "backgroundReplaySession", id: "b" });
+  const snapshot = lazy.sent.filter(m => m.type === "backgroundRestoreStart").at(-1).sessions[0];
+  assert.equal(snapshot.running, true);
+  assert.equal(snapshot.queue.length, 0);
 });
