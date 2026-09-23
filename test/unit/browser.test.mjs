@@ -276,3 +276,162 @@ test("an active Studio tab cannot replace the page used by browser tools", async
   assert.equal(p.pinnedTabBySession.get("chat-a"), 11);
   assert.equal(p.replies[0].ok, true);
 });
+
+const openDialog = (p, type = "beforeunload", tabId = 11) => p.listeners.debuggerEvent({ tabId }, "Page.javascriptDialogOpening", {
+  type, message: "Changes may not be saved.", url: "https://test.invalid/", defaultPrompt: type === "prompt" ? "default" : "",
+});
+
+test("beforeunload interrupts navigation immediately and can be cancelled without replay", async () => {
+  const p = panel(), send = p.chrome.debugger.sendCommand, responses = [];
+  let lateNavigation, navigations = 0;
+  p.chrome.debugger.sendCommand = (target, method, args, cb) => {
+    if (method === "Page.navigate") { navigations++; lateNavigation = cb; openDialog(p); return; }
+    if (method === "Page.handleJavaScriptDialog") {
+      responses.push(args);
+      p.listeners.debuggerEvent(target, "Page.javascriptDialogClosed", { result: args.accept });
+    }
+    send(target, method, args, cb);
+  };
+  await p.call("navigate", { url: "https://test.invalid/next" });
+  assert.equal(p.replies[0].ok, false);
+  assert.match(p.replies[0].error, /BROWSER_DIALOG_OPEN.*browser_handle_dialog/);
+  const dialog = p.replies[0].data.dialog;
+  assert.equal(dialog.type, "beforeunload");
+  assert.equal(p.detachments.length, 0);
+  assert.ok([...p.timers].every(t => t.ms === 180000), "no navigation or step timer remains");
+  await p.call("dialog", { tabId: 11 });
+  assert.equal(p.replies[1].data.dialog.dialogId, dialog.dialogId);
+  await p.call("handle_dialog", { tabId: 11, dialogId: dialog.dialogId, accept: false });
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].accept, false);
+  lateNavigation({});
+  await p.flush();
+  assert.equal(p.replies.length, 3, "late navigation must not reply twice");
+  await p.call("snapshot", { tabId: 11 });
+  assert.equal(p.replies[3].ok, true);
+  assert.equal(navigations, 1);
+  assert.equal(p.attachments.length, 1);
+});
+
+test("a dialog during the load wait cancels that wait without reading the blocked page", async () => {
+  const p = panel(), send = p.chrome.debugger.sendCommand;
+  p.chrome.debugger.sendCommand = (target, method, args, cb) => {
+    send(target, method, args, cb);
+    if (method === "Page.reload") queueMicrotask(() => openDialog(p));
+  };
+  await p.call("reload");
+  assert.match(p.replies[0].error, /BROWSER_DIALOG_OPEN/);
+  assert.equal(p.commands.includes("Runtime.evaluate"), false);
+  assert.ok([...p.timers].every(t => t.ms === 180000));
+});
+
+test("a dialog interrupts JavaScript and blocks later page actions without detaching", async () => {
+  const p = panel(), send = p.chrome.debugger.sendCommand;
+  p.chrome.debugger.sendCommand = (target, method, args, cb) => {
+    if (method === "Runtime.evaluate") { openDialog(p, "confirm"); return; }
+    send(target, method, args, cb);
+  };
+  await p.call("eval", { expression: "confirm('Continue?')" });
+  const commands = p.commands.length;
+  for (const op of ["snapshot", "dom", "click", "reload", "tab_close"]) {
+    await p.call(op, { tabId: 11, x: 1, y: 1 });
+    assert.match(p.replies.at(-1).error, /BROWSER_DIALOG_OPEN/);
+  }
+  assert.equal(p.commands.length, commands);
+  await p.expire(180000);
+  assert.equal(p.detachments.length, 0, "idle cleanup must preserve the pending dialog");
+});
+
+test("a dialog present during setup can be answered before setup resumes", async () => {
+  const p = panel(), send = p.chrome.debugger.sendCommand;
+  let first = true;
+  p.chrome.debugger.sendCommand = (target, method, args, cb) => {
+    if (method === "Page.enable" && first) { first = false; openDialog(p, "alert"); return; }
+    send(target, method, args, cb);
+  };
+  await p.call("dialog");
+  const dialog = p.replies[0].data.dialog;
+  assert.equal(dialog.type, "alert");
+  assert.equal(p.commands.includes("Runtime.enable"), false);
+  await p.call("handle_dialog", { tabId: 11, dialogId: dialog.dialogId, accept: true });
+  await p.call("snapshot");
+  assert.equal(p.replies[2].ok, true);
+  assert.equal(p.attachments.length, 1);
+  assert.ok(p.commands.includes("Runtime.enable"));
+});
+
+test("dialog replies require a current id, explicit tab and boolean decision", async () => {
+  const p = panel();
+  await p.call("snapshot");
+  openDialog(p);
+  await p.call("dialog");
+  const old = p.replies.at(-1).data.dialog;
+  openDialog(p, "confirm");
+  await p.call("dialog");
+  const dialog = p.replies.at(-1).data.dialog;
+  for (const args of [
+    { tabId: 11, dialogId: old.dialogId, accept: true },
+    { dialogId: dialog.dialogId, accept: true },
+    { tabId: 11, dialogId: dialog.dialogId, accept: "false" },
+    { tabId: 11, dialogId: dialog.dialogId, accept: true, promptText: "text" },
+  ]) {
+    await p.call("handle_dialog", args);
+    assert.equal(p.replies.at(-1).ok, false);
+  }
+  assert.equal(p.commands.includes("Page.handleJavaScriptDialog"), false);
+});
+
+test("prompt response preserves text and cannot clear a following dialog", async () => {
+  const p = panel(), send = p.chrome.debugger.sendCommand;
+  await p.call("snapshot");
+  openDialog(p, "prompt");
+  await p.call("dialog");
+  const dialog = p.replies.at(-1).data.dialog;
+  assert.equal(dialog.defaultPrompt, "default");
+  p.chrome.debugger.sendCommand = (target, method, args, cb) => {
+    if (method === "Page.handleJavaScriptDialog") {
+      assert.equal(args.promptText, "Typed value");
+      p.listeners.debuggerEvent(target, "Page.javascriptDialogClosed", {});
+      openDialog(p, "alert");
+    }
+    send(target, method, args, cb);
+  };
+  await p.call("handle_dialog", { tabId: 11, dialogId: dialog.dialogId, accept: true, promptText: "Typed value" });
+  assert.equal(p.replies.at(-1).ok, true);
+  assert.equal(p.replies.at(-1).data.dialog.type, "alert");
+  assert.notEqual(p.replies.at(-1).data.dialog.dialogId, dialog.dialogId);
+});
+
+test("a failed dialog response keeps its state and attachment for recovery", async () => {
+  const p = panel(), send = p.chrome.debugger.sendCommand;
+  await p.call("snapshot");
+  openDialog(p);
+  await p.call("dialog");
+  const dialog = p.replies.at(-1).data.dialog;
+  p.chrome.debugger.sendCommand = (target, method, args, cb) => {
+    if (method !== "Page.handleJavaScriptDialog") send(target, method, args, cb);
+  };
+  const handling = p.call("handle_dialog", { tabId: 11, dialogId: dialog.dialogId, accept: false });
+  await p.flush();
+  await p.expire(5000);
+  await handling;
+  assert.match(p.replies.at(-1).error, /timed out/);
+  assert.equal(p.detachments.length, 0);
+  await p.call("dialog");
+  assert.equal(p.replies.at(-1).data.dialog.dialogId, dialog.dialogId);
+});
+
+test("a dialog blocks only its own tab and a manual response restores reads", async () => {
+  const p = panel();
+  p.chrome.tabs.get = (id, cb) => cb({ id, windowId: 1, url: "https://test.invalid/", active: false });
+  await p.call("snapshot", { tabId: 11 });
+  await p.call("snapshot", { tabId: 12 });
+  openDialog(p);
+  await p.call("snapshot", { tabId: 12 });
+  assert.equal(p.replies.at(-1).ok, true);
+  p.listeners.debuggerEvent({ tabId: 11 }, "Page.javascriptDialogClosed", {});
+  await p.call("snapshot", { tabId: 11 });
+  assert.equal(p.replies.at(-1).ok, true);
+  await p.call("dialog", { tabId: 11 });
+  assert.equal(p.replies.at(-1).data.dialog, null);
+});
