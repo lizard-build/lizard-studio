@@ -124,15 +124,44 @@ chrome.commands.onCommand.addListener((command) => {
 // another window may become active between selecting content and delivering it.
 const panelPorts = new Map();
 let nativeRunningCount = 0;
-const sessions = createStudioSessions({ chrome, prefsStore, createBrowser: createStudioBrowser, activity(count) {
-  nativeRunningCount = count;
+const unreadResults = new Map(); // chat id -> result token; shared across windows
+const changedUnread = new Set();
+let unreadLoaded = false;
+let unreadSave = Promise.resolve();
+let resultSerial = 0;
+const resultPrefix = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+const UNREAD_KEY = "studioUnreadResults";
+function activityMessage() {
+  return { cmd: "sessionActivity", count: nativeRunningCount, unread: [...unreadResults] };
+}
+function publishActivity() {
+  const message = activityMessage();
   for (const [port, windowId] of panelPorts) {
     if (windowId == null) continue;
-    try { port.postMessage({ cmd: "sessionActivity", count }); } catch (_) {}
+    try { port.postMessage(message); } catch (_) {}
   }
   refreshActionActivity();
+}
+function saveUnread() {
+  if (!unreadLoaded || !chrome.storage?.session) return;
+  const entries = [...unreadResults];
+  unreadSave = unreadSave.then(() => chrome.storage.session.set({ [UNREAD_KEY]: entries }))
+    .catch((error) => console.error("[RK] Save unread results", error));
+}
+function resultStatus(id, unread) {
+  if (typeof id !== "string" || !id) return;
+  if (!unreadLoaded) changedUnread.add(id);
+  if (unread) unreadResults.set(id, resultPrefix + "-" + ++resultSerial);
+  else if (!unreadResults.delete(id)) return;
+  saveUnread();
+  publishActivity();
+}
+const sessions = createStudioSessions({ chrome, prefsStore, createBrowser: createStudioBrowser, resultStatus, activity(count) {
+  nativeRunningCount = count;
+  publishActivity();
 } });
 let appliedCount = null;
+let appliedKind = null;
 let badgeUpdate = Promise.resolve();
 
 function refreshActionActivity() {
@@ -144,20 +173,41 @@ function refreshActionActivity() {
       await chrome.action.setIcon({
         path: Object.fromEntries(Object.entries(manifest.icons).map(([size, path]) => [size, chrome.runtime.getURL(path)])),
       });
-      await chrome.action.setBadgeBackgroundColor({ color: "#fbbf24" });
       await chrome.action.setBadgeTextColor({ color: "#121212" });
     }
-    const count = nativeRunningCount;
-    if (count === appliedCount) return;
+    const count = nativeRunningCount || unreadResults.size;
+    const kind = nativeRunningCount ? "running" : unreadResults.size ? "unread" : "idle";
+    if (count === appliedCount && kind === appliedKind) return;
+    await chrome.action.setBadgeBackgroundColor({ color: kind === "unread" ? "#10b981" : "#fbbf24" });
     await chrome.action.setBadgeText({ text: count ? (count > 999 ? "999+" : String(count)) : "" });
     await chrome.action.setTitle({ title: count
-      ? `Lizard Studio — ${count} ${count === 1 ? "session" : "sessions"} running`
+      ? kind === "running" ? `Lizard Studio — ${count} ${count === 1 ? "session" : "sessions"} running`
+        : `Lizard Studio — ${count} unread ${count === 1 ? "result" : "results"}`
       : manifest.action.default_title });
     appliedCount = count;
+    appliedKind = kind;
   }).catch((error) => console.error("[RK] session badge", error));
 }
 // Clear stale badges until the native runtime reports active sessions.
 refreshActionActivity();
+// Session storage survives worker shutdown without retaining results after the
+// browser session ends. Do not overwrite results received during this read.
+let restoredUnread = false;
+Promise.resolve(chrome.storage?.session?.get(UNREAD_KEY)).then((data) => {
+  for (const entry of Array.isArray(data?.[UNREAD_KEY]) ? data[UNREAD_KEY] : []) {
+    if (!Array.isArray(entry) || entry.length !== 2) continue;
+    const [id, token] = entry;
+    if (typeof id === "string" && typeof token === "string" && !changedUnread.has(id)) {
+      unreadResults.set(id, token);
+      restoredUnread = true;
+    }
+  }
+}).catch((error) => console.error("[RK] Load unread results", error)).finally(() => {
+  unreadLoaded = true;
+  changedUnread.clear();
+  saveUnread();
+  if (restoredUnread) publishActivity();
+});
 
 function panelsForWindow(windowId) {
   if (!Number.isInteger(windowId) || windowId < 0) return [];
@@ -226,9 +276,15 @@ function selectionChanged(selection, sender) {
 chrome.runtime.onConnect.addListener((port) => {
   if (sessions.connect(port)) return;
   if (port.name !== "rk-sidepanel") return;
+  if (port.sender?.id !== chrome.runtime.id || port.sender?.url?.split(/[?#]/)[0] !== chrome.runtime.getURL("src/panel/panel.html")) return;
   ensurePanelBehavior();
   panelPorts.set(port, null);
   port.onMessage.addListener((msg) => {
+    if (msg?.type === "resultRead") {
+      if (panelPorts.get(port) == null || typeof msg.token !== "string") return;
+      if (unreadResults.get(msg.id) === msg.token) resultStatus(msg.id, false);
+      return;
+    }
     if (msg?.type === "chatActivity") {
       if (panelPorts.get(port) == null || !Number.isSafeInteger(msg.count) || msg.count < 0) return;
       return;
@@ -236,7 +292,7 @@ chrome.runtime.onConnect.addListener((port) => {
     if (msg?.type !== "panelReady" || !Number.isInteger(msg.windowId) || msg.windowId < 0) return;
     if (!panelPorts.has(port) || panelPorts.get(port) !== null) return;
     panelPorts.set(port, msg.windowId);
-    try { port.postMessage({ cmd: "sessionActivity", count: nativeRunningCount }); } catch (_) {}
+    try { port.postMessage(activityMessage()); } catch (_) {}
     showToolbarOnActiveTab(msg.windowId);
     refreshSelection(msg.windowId);
   });

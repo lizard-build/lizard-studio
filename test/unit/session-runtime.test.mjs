@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 const flush = () => new Promise(setImmediate);
 function runtime() {
-  const native = [], counts = [], timers = new Set(), browserCalls = [], detached = [];
+  const native = [], counts = [], results = [], timers = new Set(), browserCalls = [], detached = [];
   const storage = { rkChatV2: { tabs: [], activeId: "a", draft: "keep" } };
   function port(name) {
     const messages = [], disconnects = [];
@@ -28,7 +28,7 @@ function runtime() {
     setTimeout(fn, ms) { const t = { fn, ms }; timers.add(t); return t; }, clearTimeout(t) { timers.delete(t); },
   };
   vm.runInNewContext(readFileSync(new URL("../../src/session-runtime.js", import.meta.url), "utf8"), scope);
-  const sessions = scope.createStudioSessions({ chrome, activity: (n) => counts.push(n),
+  const sessions = scope.createStudioSessions({ chrome, activity: (n) => counts.push(n), resultStatus: (id, unread) => results.push({ id, unread }),
     createBrowser: ({ windowId }) => ({ detachAllCdp: () => detached.push(windowId), async handleBrowserOp(msg, reply) {
       browserCalls.push({ windowId, msg }); reply({ type: "browserResult", bid: msg.bid, ok: true });
     } }),
@@ -41,9 +41,20 @@ function runtime() {
     p.emit({ type: "prompt", agent: "codex", id, text: "Work " + id });
   }
   async function settle() { await flush(); for (const t of [...timers]) { timers.delete(t); await t.fn(); } await flush(); }
-  return { panel, start, native, counts, storage, settle, browserCalls, detached, port, sessions };
+  return { panel, start, native, counts, results, storage, settle, browserCalls, detached, port, sessions };
 }
 const result = (id) => ({ type: "event", id, data: { type: "result", result: "Done" } });
+
+test("results are recorded with no panel and replaying a session does not mark it read", async () => {
+  const r = runtime(), p = r.panel(); r.start(p, "a");
+  p.disconnect(); r.native[0].emit(result("a")); await r.settle();
+  assert.deepEqual(r.results.at(-1), { id: "a", unread: true });
+  const reopened = r.panel();
+  reopened.emit({ type: "start", agent: "codex", id: "a", resume: "thread-a" });
+  assert.deepEqual(r.results.at(-1), { id: "a", unread: true });
+  reopened.emit({ type: "prompt", agent: "codex", id: "a", text: "Continue" });
+  assert.deepEqual(r.results.at(-1), { id: "a", unread: false });
+});
 
 test("a resumed chat keeps its saved history across panel reloads without a new prompt", async () => {
   const r = runtime(), p = r.panel();

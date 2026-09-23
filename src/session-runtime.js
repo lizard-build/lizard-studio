@@ -2,7 +2,7 @@
 
 // Native ports belong to the worker, never to a disposable panel page.
 // Each window keeps its own host and browser-tool state.
-globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, prefsStore }) {
+globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, prefsStore, resultStatus = () => {} }) {
   const runtimes = new Map();
   const panels = () => [...runtimes.values()].flatMap((r) => [...r.panels]);
   const ownerOf = (id) => [...runtimes.values()].find((r) => r.sessions.has(id));
@@ -125,6 +125,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
       if (s.agent === "codex" && ["event", "error", "promptResult"].includes(msg.type)
           && !(msg.type === "event" && msg.data?.subtype === "init")) s.journal.push(msg);
       if (msg.type === "event" && msg.data?.type === "result" || msg.type === "interrupted" || msg.type === "exit") {
+        if (msg.type === "event") resultStatus(s.id, true);
         s.running = false;
         s.failed = !!msg.data?.is_error || msg.type === "exit" || msg.type === "interrupted";
         s.permissions.clear();
@@ -200,6 +201,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     }
     if (msg.type === "permissionResult" && existing && !existing.permissions.has(msg.requestId)) return;
     if (msg.type === "backgroundQueue" && existing?.controller && existing.controller !== origin) return;
+    if (["prompt", "restartSession", "close", "stop"].includes(msg.type) || msg.type === "start" && !msg.resume) resultStatus(msg.id, false);
     const s = getSession(r, msg);
     if (s && origin && (!s.controller || ["prompt", "restartSession"].includes(msg.type))) {
       s.controller = origin;

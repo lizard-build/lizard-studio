@@ -5,18 +5,21 @@
 
 (function () {
   let faviconCount = 0;
+  let faviconUnread = 0;
   let faviconLogo = null;
-  function updateFavicon(count) {
-    if (!Number.isSafeInteger(count) || count < 0) return;
+  function updateFavicon(count, unread = 0) {
+    if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(unread) || unread < 0) return;
     faviconCount = count;
+    faviconUnread = unread;
+    const badgeCount = count || unread;
     const icon = document.getElementById("studio-favicon");
     if (!icon) return;
     const plainIcon = chrome.runtime.getURL("icons/icon48.png");
-    if (!count) { icon.href = plainIcon; return; }
+    if (!badgeCount) { icon.href = plainIcon; return; }
     if (!faviconLogo) {
       faviconLogo = new Image();
       // Use the latest count if sessions change while the logo loads.
-      faviconLogo.onload = () => updateFavicon(faviconCount);
+      faviconLogo.onload = () => updateFavicon(faviconCount, faviconUnread);
       faviconLogo.onerror = () => { faviconLogo = null; icon.href = plainIcon; };
       faviconLogo.src = plainIcon;
       return;
@@ -27,10 +30,10 @@
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.drawImage(faviconLogo, 0, 0, 32, 32);
-    const text = count > 999 ? "999+" : String(count);
+    const text = badgeCount > 999 ? "999+" : String(badgeCount);
     ctx.font = `bold ${text.length > 2 ? 10 : 16}px sans-serif`;
     const width = Math.min(32, Math.max(18, Math.ceil(ctx.measureText(text).width) + 6));
-    ctx.fillStyle = "#fbbf24";
+    ctx.fillStyle = count ? "#fbbf24" : "#10b981";
     ctx.beginPath();
     ctx.roundRect(32 - width, 15, width, 17, 5);
     ctx.fill();
@@ -42,12 +45,24 @@
   }
 
   let activityPort = null;
+  let unreadTokens = new Map();
+  function acknowledgeResult() {
+    if (!activityPort) return;
+    const id = window.RKChat?.getVisibleChatId?.();
+    const token = unreadTokens.get(id);
+    if (token) {
+      try { activityPort.postMessage({ type: "resultRead", id, token }); } catch (_) {}
+    }
+  }
   function sendActivity() {
     if (!activityPort) return;
     const count = window.RKChat?.getRunningChatCount?.() || 0;
     try { activityPort.postMessage({ type: "chatActivity", count }); } catch (_) {}
+    acknowledgeResult();
   }
   window.addEventListener("rk-chat-activity", sendActivity);
+  window.addEventListener("rk-chat-view", acknowledgeResult);
+  document.addEventListener?.("visibilitychange", acknowledgeResult);
   // Re-send state and keep the worker connected while a panel owns live chats.
   setInterval(sendActivity, 20000);
 
@@ -71,7 +86,12 @@
     bg.onMessage.addListener((m) => {
       if (!m) return;
       if (m.cmd === "close") window.close();
-      else if (m.cmd === "sessionActivity") updateFavicon(m.count);
+      else if (m.cmd === "sessionActivity") {
+        unreadTokens = new Map((Array.isArray(m.unread) ? m.unread : [])
+          .filter(entry => Array.isArray(entry) && entry.length === 2 && entry.every(value => typeof value === "string")));
+        updateFavicon(m.count, unreadTokens.size);
+        acknowledgeResult();
+      }
       else if (m.cmd === "liveSelection") window.RKChat?.setLiveSelection(m.selection);
       else if (m.cmd === "pickElement" && window.RKChat && window.RKChat.addContext) {
         window.RKChat.addContext(m.element);
@@ -83,6 +103,7 @@
     bg.onDisconnect.addListener(() => {
       disconnected = true;
       if (activityPort === bg) activityPort = null;
+      unreadTokens.clear();
       updateFavicon(0);
       window.RKChat?.setLiveSelection(null);
       void chrome.runtime.lastError; // read it, or every SW recycle logs "Unchecked runtime.lastError"

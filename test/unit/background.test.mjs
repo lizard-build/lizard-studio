@@ -4,35 +4,36 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 function worker(options = {}) {
-  const { writeBadge, executeScript = async () => [], setPanelBehavior = async () => {}, timer = setTimeout, log = console } = typeof options === "function" ? { executeScript: options } : options;
+  const { writeBadge, sessionStorage, executeScript = async () => [], setPanelBehavior = async () => {}, timer = setTimeout, log = console } = typeof options === "function" ? { executeScript: options } : options;
   const listeners = {}, tabsSent = [], opened = [], contexts = [], icons = [], titles = [], badges = [], backgrounds = [], textColors = [];
   const event = (name) => ({ addListener(fn) { (listeners[name] ||= []).push(fn); } });
   const tabs = [{ id: 11, windowId: 101, active: true }, { id: 22, windowId: 202, active: true }];
   const chrome = {
     scripting: { executeScript },
-    runtime: { getManifest: () => ({ content_scripts: [{ js: [] }], icons: { 16: "icons/icon16.png", 48: "icons/icon48.png", 128: "icons/icon128.png" }, action: { default_title: "Studio idle" } }), getURL: (path) => `chrome-extension://test/${path}`, onInstalled: event("installed"), onStartup: event("startup"), onConnect: event("connect"), onMessage: event("message"), getContexts: async () => contexts },
+    storage: { session: sessionStorage },
+    runtime: { id: "test", getManifest: () => ({ content_scripts: [{ js: [] }], icons: { 16: "icons/icon16.png", 48: "icons/icon48.png", 128: "icons/icon128.png" }, action: { default_title: "Studio idle" } }), getURL: (path) => `chrome-extension://test/${path}`, onInstalled: event("installed"), onStartup: event("startup"), onConnect: event("connect"), onMessage: event("message"), getContexts: async () => contexts },
     tabs: { query: (query, cb) => cb(tabs.filter((tab) => Object.entries(query).every(([key, value]) => key === "currentWindow" || tab[key] === value))), sendMessage: async (id, msg) => tabsSent.push({ id, ...msg }), onRemoved: event("removed"), onUpdated: event("updated"), onActivated: event("activated") },
     sidePanel: { setPanelBehavior, open: async (opts) => opened.push(opts) },
     action: { onClicked: event("clicked"), setIcon: async (icon) => icons.push(icon), setTitle: async ({ title }) => titles.push(title), setBadgeText: async ({ text }) => { if (writeBadge) await writeBadge(text); badges.push(text); }, setBadgeBackgroundColor: async ({ color }) => backgrounds.push(color), setBadgeTextColor: async ({ color }) => textColors.push(color) }, commands: { onCommand: event("command") },
     windows: { WINDOW_ID_CURRENT: -2, WINDOW_ID_NONE: -1, onFocusChanged: event("focus") },
     declarativeNetRequest: { updateSessionRules: async () => {} },
   };
-  let nativeActivity;
+  let nativeActivity, nativeResult;
   vm.runInNewContext(readFileSync(new URL("../../src/background.js", import.meta.url), "utf8"), {
     chrome, console: log, setTimeout: timer, clearTimeout, importScripts() {}, createStudioBrowser() {}, StudioPrefsSync: { createStore() { return {}; } },
-    createStudioSessions({ activity }) { nativeActivity = activity; return { connect() { return false; } }; },
+    createStudioSessions({ activity, resultStatus }) { nativeActivity = activity; nativeResult = resultStatus; return { connect() { return false; } }; },
   });
   const fire = (name, ...args) => (listeners[name] || []).map((fn) => fn(...args));
   function panel(windowId, ready = true) {
     const received = [], disconnect = [], messages = [];
-    const port = { name: "rk-sidepanel", postMessage: (m) => received.push(m), onMessage: { addListener: (fn) => messages.push(fn) }, onDisconnect: { addListener: (fn) => disconnect.push(fn) } };
+    const port = { name: "rk-sidepanel", sender: { id: "test", url: "chrome-extension://test/src/panel/panel.html" }, postMessage: (m) => received.push(m), onMessage: { addListener: (fn) => messages.push(fn) }, onDisconnect: { addListener: (fn) => disconnect.push(fn) } };
     fire("connect", port);
     const identify = (id = windowId) => messages.forEach((fn) => fn({ type: "panelReady", windowId: id }));
     if (ready) { identify(); received.length = 0; }
-    return { received, identify, activity: (count) => messages.forEach((fn) => fn({ type: "chatActivity", count })), close: () => disconnect.forEach((fn) => fn()) };
+    return { received, identify, read: (id, token) => messages.forEach(fn => fn({ type: "resultRead", id, token })), activity: (count) => messages.forEach((fn) => fn({ type: "chatActivity", count })), close: () => disconnect.forEach((fn) => fn()) };
   }
   const message = (msg, windowId) => fire("message", msg, { tab: { windowId, id: 11 } }, () => {});
-  return { activity: (count) => nativeActivity(count), panel, message, fire, tabsSent, opened, tabs, contexts, icons, titles, badges, backgrounds, textColors };
+  return { result: (id, unread = true) => nativeResult(id, unread), activity: (count) => nativeActivity(count), panel, message, fire, tabsSent, opened, tabs, contexts, icons, titles, badges, backgrounds, textColors };
 }
 
 test("attachments, selected elements, and close only reach the source window", () => {
@@ -86,6 +87,103 @@ test("the panel identifies its own window on every worker connection", () => {
 });
 
 const flush = () => new Promise(setImmediate);
+
+const activityState = panel => panel.received.filter(m => m.cmd === "sessionActivity").at(-1);
+
+test("running sessions take priority, including when unread count has the same number", async () => {
+  const w = worker(), a = w.panel(101), b = w.panel(202);
+  w.result("one"); w.result("two"); await flush();
+  assert.equal(w.badges.at(-1), "2"); assert.equal(w.backgrounds.at(-1), "#10b981");
+  assert.equal(activityState(a).unread.length, 2); assert.equal(activityState(b).unread.length, 2);
+  w.activity(2); await flush();
+  assert.equal(w.badges.at(-1), "2"); assert.equal(w.backgrounds.at(-1), "#fbbf24");
+  w.activity(0); await flush();
+  assert.equal(w.badges.at(-1), "2"); assert.equal(w.backgrounds.at(-1), "#10b981");
+  const token = activityState(a).unread.find(([id]) => id === "one")[1];
+  a.read("one", token); await flush();
+  assert.equal(w.badges.at(-1), "1"); assert.match(w.titles.at(-1), /1 unread result$/);
+  b.read("one", token); await flush(); assert.equal(w.badges.at(-1), "1");
+  const [id, lastToken] = activityState(b).unread[0];
+  b.read(id, lastToken); await flush(); assert.equal(w.badges.at(-1), "");
+});
+
+test("a stale acknowledgement cannot mark a newer result as read", async () => {
+  const w = worker(), p = w.panel(101);
+  w.result("one"); const old = activityState(p).unread[0][1];
+  w.result("one"); p.read("one", old); await flush();
+  assert.equal(w.badges.at(-1), "1");
+  assert.notEqual(activityState(p).unread[0][1], old);
+  p.close(); await flush(); assert.equal(w.badges.at(-1), "1");
+});
+
+test("unread results survive a worker restart without restoring a stale overwritten result", async () => {
+  const data = {};
+  const sessionStorage = { get: async () => structuredClone(data), set: async value => Object.assign(data, structuredClone(value)) };
+  const w = worker({ sessionStorage });
+  w.result("finished"); await flush();
+  const reopened = worker({ sessionStorage }); await flush();
+  assert.equal(reopened.badges.at(-1), "1"); assert.equal(reopened.backgrounds.at(-1), "#10b981");
+  let release;
+  const delayed = worker({ sessionStorage: { get: () => new Promise(resolve => { release = resolve; }), set: sessionStorage.set } });
+  delayed.result("finished", false);
+  delayed.result("new");
+  release({ studioUnreadResults: [["finished", "old-token"]] }); await flush();
+  assert.equal(delayed.badges.at(-1), "1");
+  assert.deepEqual(data.studioUnreadResults.map(([id]) => id), ["new"]);
+});
+
+test("web content cannot subscribe to result ids through the panel port", () => {
+  const w = worker(), received = [];
+  w.fire("connect", { name: "rk-sidepanel", sender: { id: "test", url: "https://example.test" },
+    postMessage: m => received.push(m), onMessage: { addListener() { throw new Error("untrusted listener"); } } });
+  w.result("private-chat"); assert.equal(received.length, 0);
+});
+
+test("only a visible, loaded chat can acknowledge a result", () => {
+  const source = readFileSync(new URL("../../src/panel/chat.js", import.meta.url), "utf8");
+  const chat = { id: "a", messagesEl: { childElementCount: 1 } };
+  const scope = { chats: new Map([["a", chat]]), activeId: "a", connected: true, backgroundRestoring: false, document: { hidden: false } };
+  vm.createContext(scope);
+  vm.runInContext(source.slice(source.indexOf("  function getVisibleChatId()"), source.indexOf("  function getRunningChatCount()")), scope);
+  assert.equal(scope.getVisibleChatId(), "a");
+  scope.document.hidden = true; assert.equal(scope.getVisibleChatId(), null);
+  scope.document.hidden = false;
+  chat.historyRequest = {}; assert.equal(scope.getVisibleChatId(), null);
+  chat.historyRequest = null;
+  chat.historyError = true; assert.equal(scope.getVisibleChatId(), null);
+  chat.historyError = false;
+  scope.backgroundRestoring = true; assert.equal(scope.getVisibleChatId(), null);
+});
+
+test("favicon changes from yellow to green and acknowledges only the visible result", () => {
+  let receive;
+  const sent = [], images = [], colors = [], labels = [], events = {};
+  const icon = {};
+  const ctx = { drawImage() {}, measureText: text => ({ width: text.length * 7 }), beginPath() {}, roundRect() {},
+    fill() { colors.push(this.fillStyle); }, fillText: text => labels.push(text) };
+  let visible = null;
+  const chrome = { runtime: { id: "test", getURL: path => "chrome-extension://test/" + path,
+    connect: () => ({ postMessage: msg => sent.push(msg), onMessage: { addListener: fn => { receive = fn; } }, onDisconnect: { addListener() {} } }) },
+    windows: { getCurrent: cb => cb({ id: 101 }) } };
+  vm.runInNewContext(readFileSync(new URL("../../src/panel/panel.js", import.meta.url), "utf8"), {
+    chrome, Image: class { constructor() { images.push(this); } },
+    document: { getElementById: id => id === "studio-favicon" ? icon : null, addEventListener: (name, fn) => { events[name] = fn; },
+      createElement: () => ({ getContext: () => ctx, toDataURL: () => "data:image/png;base64,test" }) },
+    window: { RKChat: { getVisibleChatId: () => visible }, addEventListener: (name, fn) => { events[name] = fn; } },
+    setInterval() {}, setTimeout() {},
+  });
+  const unread = [["a", "token-a"], ["b", "token-b"]];
+  receive({ cmd: "sessionActivity", count: 2, unread });
+  images[0].complete = true; images[0].naturalWidth = 48; images[0].onload();
+  assert.equal(labels.at(-1), "2"); assert.equal(colors.at(-1), "#fbbf24");
+  receive({ cmd: "sessionActivity", count: 0, unread });
+  assert.equal(labels.at(-1), "2"); assert.equal(colors.at(-1), "#10b981");
+  assert.ok(!sent.some(m => m.type === "resultRead"));
+  visible = "b"; events["rk-chat-view"]();
+  assert.equal(sent.at(-1).id, "b"); assert.equal(sent.at(-1).token, "token-b");
+  receive({ cmd: "sessionActivity", count: 0, unread: [] });
+  assert.equal(icon.href, "chrome-extension://test/icons/icon48.png");
+});
 
 test("the yellow badge follows native sessions even after all panels close", async () => {
   const w = worker(), a = w.panel(101), b = w.panel(202);
