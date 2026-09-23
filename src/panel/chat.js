@@ -1811,21 +1811,6 @@
     return rows;
   }
 
-  // Date headings down the list, so "newest first" is legible without reading
-  // every timestamp. Buckets are calendar days, not rolling 24h windows —
-  // something from 11pm last night is "Yesterday", not "Today".
-  function menuBucket(ts) {
-    if (!ts) return "Older";
-    const now = new Date();
-    const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    const day = 86400000;
-    if (ts >= midnight) return "Today";
-    if (ts >= midnight - day) return "Yesterday";
-    if (ts >= midnight - 7 * day) return "Previous 7 days";
-    if (ts >= midnight - 30 * day) return "Previous 30 days";
-    return "Older";
-  }
-
   function scheduleChatHistoryLoad() {
     if (historyLoadFrame !== null) return;
     historyLoadFrame = requestAnimationFrame(() => {
@@ -1857,7 +1842,7 @@
     let bucket = null;
     const visibleCount = rows.filter((entry) => entry.open).length + historyVisibleLimit;
     for (const entry of rows.slice(0, visibleCount)) {
-      const b = entry.open ? "Active" : q ? "History" : menuBucket(entry.ts);
+      const b = entry.open ? "Active" : "History";
       if (b !== bucket) {
         bucket = b;
         list.appendChild(el("div", "chat-menu-group", b));
