@@ -5,6 +5,7 @@ import vm from "node:vm";
 
 const flush = () => new Promise(setImmediate);
 function runtime() {
+  let now = 100000;
   const native = [], counts = [], results = [], timers = new Set(), browserCalls = [], detached = [];
   const storage = { rkChatV2: { tabs: [], activeId: "a", draft: "keep" } };
   function port(name) {
@@ -24,7 +25,7 @@ function runtime() {
       set(value, cb) { Object.assign(storage, structuredClone(value)); cb?.(); },
     } },
   };
-  const scope = { chrome, console,
+  const scope = { chrome, console, Date: { now: () => now },
     setTimeout(fn, ms) { const t = { fn, ms }; timers.add(t); return t; }, clearTimeout(t) { timers.delete(t); },
   };
   vm.runInNewContext(readFileSync(new URL("../../src/session-runtime.js", import.meta.url), "utf8"), scope);
@@ -41,7 +42,7 @@ function runtime() {
     p.emit({ type: "prompt", agent: "codex", id, text: "Work " + id });
   }
   async function settle() { await flush(); for (const t of [...timers]) { timers.delete(t); await t.fn(); } await flush(); }
-  return { panel, start, native, counts, results, storage, settle, browserCalls, detached, port, sessions };
+  return { panel, start, native, counts, results, storage, settle, browserCalls, detached, port, sessions, advance: ms => { now += ms; } };
 }
 const result = (id) => ({ type: "event", id, data: { type: "result", result: "Done" } });
 
@@ -302,4 +303,37 @@ test('accepted question replies keep their question id in other windows and afte
   assert.equal(b.sent.find(m => m.type === 'sharedPrompt' && m.message.questionReplyId)?.message.questionReplyId, 'question-id');
   const c = r.panel(3);
   assert.ok(c.sent.some(m => m.type === 'backgroundReplay' && m.message.questionReplyId === 'question-id'));
+});
+
+for (const agent of ["claude", "codex"]) test(`${agent} keeps elapsed time across reloads and steering, then starts a new timer`, () => {
+  const r = runtime(), p = r.panel();
+  p.emit({ type: "start", id: "a", agent });
+  p.emit({ type: "prompt", id: "a", agent, text: "Work" });
+  r.advance(11000);
+  r.native[0].emit({ type: "turnStarted", id: "a", turnId: "one" });
+  p.disconnect();
+  const reopened = r.panel();
+  assert.equal(reopened.sent[0].sessions[0].turnStartedAt, 100000);
+  reopened.emit({ type: "prompt", id: "a", text: "Also do this", promptRequestId: "steer" });
+  r.native[0].emit({ type: "promptResult", id: "a", requestId: "steer", ok: true, startedTurn: false });
+  reopened.disconnect();
+  const again = r.panel();
+  assert.equal(again.sent[0].sessions[0].turnStartedAt, 100000);
+  r.native[0].emit(result("a"));
+  r.advance(9000);
+  again.emit({ type: "prompt", id: "a", text: "Next" });
+  again.disconnect();
+  assert.equal(r.panel().sent[0].sessions[0].turnStartedAt, 120000);
+});
+
+test("an acknowledged prompt keeps its submission time when turnStarted arrives first", () => {
+  const r = runtime(), p = r.panel();
+  p.emit({ type: "start", id: "a", agent: "codex" });
+  p.emit({ type: "prompt", id: "a", text: "Work", promptRequestId: "request" });
+  r.advance(5000);
+  r.native[0].emit({ type: "turnStarted", id: "a", turnId: "one" });
+  r.advance(5000);
+  r.native[0].emit({ type: "promptResult", id: "a", requestId: "request", ok: true, startedTurn: true });
+  p.disconnect();
+  assert.equal(r.panel().sent[0].sessions[0].turnStartedAt, 100000);
 });

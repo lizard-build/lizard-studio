@@ -7,8 +7,12 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
   const panels = () => [...runtimes.values()].flatMap((r) => [...r.panels]);
   const ownerOf = (id) => [...runtimes.values()].find((r) => r.sessions.has(id));
   const stateFor = (s, panel) => ({ id: s.id, agent: s.agent, spec: s.spec, sessionId: s.sessionId,
-    observer: s.controller !== panel, started: s.started, running: s.running, failed: s.failed,
+    observer: s.controller !== panel, started: s.started, running: s.running, turnStartedAt: s.turnStartedAt, failed: s.failed,
     submitted: s.submitted, queue: s.queue.map((entry) => entry.ui), turnIds: [...s.turnIds] });
+  function startTurn(s, startedAt = Date.now()) {
+    if (!s.running) s.turnStartedAt = startedAt;
+    s.running = true;
+  }
   function roles(s) {
     for (const panel of panels()) send(panel, { type: "sessionRole", id: s.id, observer: s.controller !== panel });
   }
@@ -65,7 +69,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     if (!s) {
       if (!["start", "restartSession", "prompt"].includes(msg.type) &&
           !(msg.type === "backgroundQueue" && msg.entries?.length)) return null;
-      s = { id: msg.id, agent: msg.agent || "claude", spec: {}, running: false, started: false,
+      s = { id: msg.id, agent: msg.agent || "claude", spec: {}, running: false, turnStartedAt: 0, started: false,
         submitted: false, failed: false, queue: [], sessionId: null, journal: [], pendingPrompts: new Map(), historyRequests: [], turnIds: new Set(), permissions: new Map() };
       r.sessions.set(msg.id, s);
     }
@@ -101,14 +105,17 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
           ...request, excludeTurnIds: [...new Set([...(request.excludeTurnIds || []), ...s.turnIds])],
         });
       }
-      if (msg.type === "turnStarted") s.running = true;
+      if (msg.type === "turnStarted") {
+        startTurn(s, [...s.pendingPrompts.values()][0]?.startedAt);
+        msg = { ...msg, turnStartedAt: s.turnStartedAt };
+      }
       if (msg.type === "promptResult") {
         const pending = s.pendingPrompts.get(msg.requestId);
         if (pending) {
           s.pendingPrompts.delete(msg.requestId);
           pending.entry.accepted = !!msg.ok;
           if (msg.ok) {
-            if (msg.startedTurn) s.running = true;
+            if (msg.startedTurn) startTurn(s, pending.startedAt);
             for (const panel of panels()) if (panel !== pending.origin) send(panel, { type: "sharedPrompt", message: pending.entry });
             s.queue = s.queue.filter((q) => q.ui.backgroundId !== pending.queueId || !pending.queueId);
             for (const panel of panels()) if (panel !== pending.origin) send(panel, { type: "sharedQueue", id: s.id, entries: s.queue.map((entry) => entry.ui) });
@@ -217,7 +224,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
       }
       if (msg.type === "start" || msg.type === "restartSession") {
         s.spec = { ...msg }; s.agent = msg.agent || s.agent;
-        s.started = true; s.running = false; s.failed = false; s.permissions.clear();
+        s.started = true; s.running = false; s.turnStartedAt = 0; s.failed = false; s.permissions.clear();
         s.sessionId = msg.resume || null;
         // A resumed thread already has history, even before another prompt.
         s.submitted = !!msg.resume;
@@ -228,8 +235,8 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
         if (!s.running) { s.journal = []; s.turnIds.clear(); }
         s.submitted = true; s.failed = false;
         const entry = { type: "backgroundPrompt", id: s.id, text: msg.text, images: msg.images, questionReplyId: msg.questionReplyId, accepted: !msg.promptRequestId };
-        if (msg.promptRequestId) s.pendingPrompts.set(msg.promptRequestId, { entry, queueId: msg.backgroundQueueId, origin });
-        else s.running = true;
+        if (msg.promptRequestId) s.pendingPrompts.set(msg.promptRequestId, { entry, queueId: msg.backgroundQueueId, origin, startedAt: Date.now() });
+        else startTurn(s);
         if (s.agent === "codex") s.journal.push(entry);
         if (!msg.promptRequestId) for (const panel of panels()) if (panel !== origin) send(panel, { type: "sharedPrompt", message: entry });
       }

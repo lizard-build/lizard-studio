@@ -3,6 +3,15 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
+function faviconDocument() {
+  let icon = null;
+  return {
+    getElementById: id => id === "studio-favicon" ? icon : null,
+    head: { appendChild(node) { icon = node; } },
+    createElement: () => ({ replaceWith(node) { icon = node; } }),
+  };
+}
+
 function worker(options = {}) {
   const { writeBadge, sessionStorage, executeScript = async () => [], setPanelBehavior = async () => {}, timer = setTimeout, log = console } = typeof options === "function" ? { executeScript: options } : options;
   const listeners = {}, tabsSent = [], opened = [], contexts = [], icons = [], titles = [], badges = [], backgrounds = [], textColors = [];
@@ -77,9 +86,9 @@ test("opening a panel in another window does not close an existing panel", async
 test("the panel identifies its own window on every worker connection", () => {
   const sent = [], callbacks = [], disconnects = [];
   const port = { postMessage: (msg) => sent.push(msg), onMessage: { addListener() {} }, onDisconnect: { addListener: (fn) => disconnects.push(fn) } };
-  const chrome = { runtime: { id: "test-extension", connect: () => port }, windows: { getCurrent: (cb) => cb({ id: 202 }) } };
+  const chrome = { runtime: { id: "test-extension", getURL: path => "chrome-extension://test/" + path, connect: () => port }, windows: { getCurrent: (cb) => cb({ id: 202 }) } };
   vm.runInNewContext(readFileSync(new URL("../../src/panel/panel.js", import.meta.url), "utf8"), {
-    chrome, document: { getElementById: () => null }, window: { addEventListener() {} }, setTimeout: (fn) => callbacks.push(fn), setInterval() {},
+    chrome, document: faviconDocument(), Image: class {}, window: { addEventListener() {} }, setTimeout: (fn) => callbacks.push(fn), setInterval() {},
   });
   assert.equal(sent[0].type, "panelReady"); assert.equal(sent[0].windowId, 202);
   disconnects[0](); callbacks[0]();
@@ -158,7 +167,7 @@ test("only a visible, loaded chat can acknowledge a result", () => {
 test("favicon changes from yellow to green and acknowledges only the visible result", () => {
   let receive;
   const sent = [], images = [], colors = [], labels = [], events = {};
-  const icon = {};
+  const document = faviconDocument();
   const ctx = { drawImage() {}, measureText: text => ({ width: text.length * 7 }), beginPath() {}, roundRect() {},
     fill() { colors.push(this.fillStyle); }, fillText: text => labels.push(text) };
   let visible = null;
@@ -167,8 +176,9 @@ test("favicon changes from yellow to green and acknowledges only the visible res
     windows: { getCurrent: cb => cb({ id: 101 }) } };
   vm.runInNewContext(readFileSync(new URL("../../src/panel/panel.js", import.meta.url), "utf8"), {
     chrome, Image: class { constructor() { images.push(this); } },
-    document: { getElementById: id => id === "studio-favicon" ? icon : null, addEventListener: (name, fn) => { events[name] = fn; },
-      createElement: () => ({ getContext: () => ctx, toDataURL: () => "data:image/png;base64,test" }) },
+    document: { ...document, addEventListener: (name, fn) => { events[name] = fn; },
+      createElement: tag => tag === "link" ? document.createElement(tag) : ({ getContext: () => ctx,
+        toDataURL: () => "data:image/png;base64," + colors.at(-1) + labels.at(-1) }) },
     window: { RKChat: { getVisibleChatId: () => visible }, addEventListener: (name, fn) => { events[name] = fn; } },
     setInterval() {}, setTimeout() {},
   });
@@ -176,13 +186,15 @@ test("favicon changes from yellow to green and acknowledges only the visible res
   receive({ cmd: "sessionActivity", count: 2, unread });
   images[0].complete = true; images[0].naturalWidth = 48; images[0].onload();
   assert.equal(labels.at(-1), "2"); assert.equal(colors.at(-1), "#fbbf24");
+  const yellowIcon = document.getElementById("studio-favicon");
   receive({ cmd: "sessionActivity", count: 0, unread });
+  assert.notEqual(document.getElementById("studio-favicon"), yellowIcon);
   assert.equal(labels.at(-1), "2"); assert.equal(colors.at(-1), "#10b981");
   assert.ok(!sent.some(m => m.type === "resultRead"));
   visible = "b"; events["rk-chat-view"]();
   assert.equal(sent.at(-1).id, "b"); assert.equal(sent.at(-1).token, "token-b");
   receive({ cmd: "sessionActivity", count: 0, unread: [] });
-  assert.equal(icon.href, "chrome-extension://test/icons/icon48.png");
+  assert.equal(document.getElementById("studio-favicon").href, "chrome-extension://test/icons/icon48.png");
 });
 
 test("the yellow badge follows native sessions even after all panels close", async () => {
@@ -226,11 +238,11 @@ test("the panel replays its count after reconnect and reports changes above zero
   const sent = [], retries = [], intervals = [], events = {}, disconnects = [], selections = [];
   let count = 2;
   const chrome = {
-    runtime: { id: "test", connect: () => ({ postMessage: (m) => sent.push(m), onMessage: { addListener() {} }, onDisconnect: { addListener: (fn) => disconnects.push(fn) } }) },
+    runtime: { id: "test", getURL: path => "chrome-extension://test/" + path, connect: () => ({ postMessage: (m) => sent.push(m), onMessage: { addListener() {} }, onDisconnect: { addListener: (fn) => disconnects.push(fn) } }) },
     windows: { getCurrent: (cb) => cb({ id: 101 }) },
   };
   vm.runInNewContext(readFileSync(new URL("../../src/panel/panel.js", import.meta.url), "utf8"), {
-    chrome, document: { getElementById: () => null },
+    chrome, document: faviconDocument(), Image: class {},
     window: { RKChat: { getRunningChatCount: () => count, setLiveSelection: (selection) => selections.push(selection) }, addEventListener: (name, fn) => { events[name] = fn; } },
     setTimeout: (fn) => retries.push(fn), setInterval: (fn) => intervals.push(fn),
   });
@@ -385,10 +397,35 @@ test("the detached shell routes page selections to its source window", () => {
   const sent = [];
   const port = { postMessage: m => sent.push(m), onMessage: { addListener() {} }, onDisconnect: { addListener() {} } };
   vm.runInNewContext(readFileSync(new URL("../../src/panel/panel.js", import.meta.url), "utf8"), {
-    chrome: { runtime: { id: "test", connect: () => port }, windows: { getCurrent() { throw Error("must not use popup window"); } } },
-    document: { getElementById: () => null },
+    chrome: { runtime: { id: "test", getURL: path => "chrome-extension://test/" + path, connect: () => port }, windows: { getCurrent() { throw Error("must not use popup window"); } } },
+    document: faviconDocument(), Image: class {},
     window: { addEventListener() {}, RKPanelWindow: { sourceWindow: cb => cb({ id: 7 }) } },
     setTimeout() {}, setInterval() {},
   });
   assert.equal(sent[0].type, "panelReady"); assert.equal(sent[0].windowId, 7);
+});
+
+test("favicon uses local activity until the worker sends the global state", () => {
+  let receive, disconnect, count = 3;
+  const events = {}, document = faviconDocument(), labels = [];
+  const ctx = { drawImage() {}, measureText: () => ({ width: 7 }), beginPath() {}, roundRect() {}, fill() {}, fillText: text => labels.push(text) };
+  const images = [];
+  vm.runInNewContext(readFileSync(new URL("../../src/panel/panel.js", import.meta.url), "utf8"), {
+    chrome: { runtime: { id: "test", getURL: p => "chrome-extension://test/" + p,
+      connect: () => ({ postMessage() {}, onMessage: { addListener: fn => { receive = fn; } },
+        onDisconnect: { addListener: fn => { disconnect = fn; } } }) }, windows: { getCurrent: cb => cb({ id: 1 }) } },
+    Image: class { constructor() { images.push(this); } },
+    document: { ...document, createElement: tag => tag === "link" ? document.createElement(tag) :
+      ({ getContext: () => ctx, toDataURL: () => "data:image/png;base64," + labels.at(-1) }) },
+    window: { RKChat: { getRunningChatCount: () => count, setLiveSelection() {} }, addEventListener: (name, fn) => { events[name] = fn; } },
+    setTimeout() {}, setInterval() {},
+  });
+  images[0].complete = true; images[0].naturalWidth = 48; images[0].onload();
+  assert.equal(labels.at(-1), "3");
+  assert.ok(document.getElementById("studio-favicon").href.startsWith("data:image/png"));
+  receive({ cmd: "sessionActivity", count: 5 });
+  count = 2; events["rk-chat-activity"]();
+  assert.equal(labels.at(-1), "5", "local chats must not overwrite the total across windows");
+  disconnect();
+  assert.equal(labels.at(-1), "2");
 });

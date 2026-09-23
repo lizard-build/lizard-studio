@@ -5113,14 +5113,14 @@
   // chunk as it lands instead of waiting for this leg's real end. Mirrors
   // deliverPrompt's turn-start bookkeeping, but only for the idle -> running
   // transition — a no-op mid-turn.
-  function resumeTurnIfIdle(chat) {
+  function resumeTurnIfIdle(chat, startedAt = Date.now()) {
     if (chat.turnRunning) return;
     chat.turnRunning = true;
     chat.unseen = false;
     updateTabDots();
     chat.turnStatusText = "";
     chat.compacting = false;
-    chat.turnStartedAt = Date.now();
+    chat.turnStartedAt = Number.isFinite(startedAt) && startedAt > 0 ? startedAt : Date.now();
     chat.turnTokens = 0;
     chat.curMsgTokens = 0;
     refreshStatusWord(chat);
@@ -5789,7 +5789,8 @@
       }
       chat.sessionObserver = state.observer;
       chat.started = state.started;
-      chat.turnRunning = state.running;
+      chat.turnRunning = false;
+      if (state.running) resumeTurnIfIdle(chat, state.turnStartedAt);
       if (state.sessionId) chat.sessionId = state.sessionId;
       chat.codexHasSubmittedTurn = state.submitted;
       if (state.agent === "codex" && !state.submitted) chat.empty = true;
@@ -5858,7 +5859,7 @@
         const chat = chats.get(state.id);
         if (!chat) continue;
         chat.turnRunning = state.running;
-        if (chat.turnRunning) { chat.turnRunning = false; resumeTurnIfIdle(chat); }
+        if (chat.turnRunning) { chat.turnRunning = false; resumeTurnIfIdle(chat, state.turnStartedAt); }
         chat.replayed = false;
         maybeReplay(chat);
         for (const entry of chat.queue) entry.el = renderQueuedBubble(chat, entry);
@@ -5872,7 +5873,7 @@
     if (msg.type === "turnStarted") {
       const chat = chats.get(msg.id);
       if (chat?.backgroundTurnIds && msg.turnId) chat.backgroundTurnIds.add(msg.turnId);
-      if (chat && sharedRendering) { resumeTurnIfIdle(chat); updateTabDots(); }
+      if (chat && sharedRendering) { resumeTurnIfIdle(chat, msg.turnStartedAt); updateTabDots(); }
       return;
     }
     connected = true;
@@ -10950,6 +10951,7 @@
     }
     els.input.addEventListener("blur", () => setTimeout(hideSlash, 120));
     els.input.addEventListener("keydown", (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
       // Slash menu captures navigation keys while open.
       if (slash.open) {
         if (e.key === "ArrowDown") { e.preventDefault(); moveSlash(1); return; }
@@ -10979,7 +10981,14 @@
       }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        sendPrompt();
+        // Holding Enter must not send the message and immediately steer it.
+        if (e.repeat) return;
+        const chat = chats.get(activeId);
+        const next = chat?.queue?.[0];
+        if (chat?.harness === "codex" && !chat.bashMode && !els.input.value.trim()
+            && !chat.contexts?.length && !chat.attachments?.length && next && !next.editing) {
+          steerQueuedPrompt(chat, next);
+        } else sendPrompt();
       }
       if (e.key === "Tab" && e.shiftKey) {
         e.preventDefault();

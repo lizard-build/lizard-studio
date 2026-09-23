@@ -7,20 +7,31 @@
   let faviconCount = 0;
   let faviconUnread = 0;
   let faviconLogo = null;
+  function setFavicon(href) {
+    const previous = document.getElementById("studio-favicon");
+    if (previous?.href === href) return;
+    const icon = document.createElement("link");
+    icon.id = "studio-favicon";
+    icon.rel = "icon";
+    icon.type = "image/png";
+    icon.href = href;
+    // Replace the candidate so Chrome refreshes the tab icon. Also support a
+    // panel whose HTML loaded before the favicon link was added in an update.
+    if (previous) previous.replaceWith(icon);
+    else document.head.appendChild(icon);
+  }
   function updateFavicon(count, unread = 0) {
     if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(unread) || unread < 0) return;
     faviconCount = count;
     faviconUnread = unread;
     const badgeCount = count || unread;
-    const icon = document.getElementById("studio-favicon");
-    if (!icon) return;
     const plainIcon = chrome.runtime.getURL("icons/icon48.png");
-    if (!badgeCount) { icon.href = plainIcon; return; }
+    if (!badgeCount) { setFavicon(plainIcon); return; }
     if (!faviconLogo) {
       faviconLogo = new Image();
       // Use the latest count if sessions change while the logo loads.
       faviconLogo.onload = () => updateFavicon(faviconCount, faviconUnread);
-      faviconLogo.onerror = () => { faviconLogo = null; icon.href = plainIcon; };
+      faviconLogo.onerror = () => { faviconLogo = null; setFavicon(plainIcon); };
       faviconLogo.src = plainIcon;
       return;
     }
@@ -41,10 +52,11 @@
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(text, 32 - width / 2, 24, width - 4);
-    icon.href = canvas.toDataURL("image/png");
+    setFavicon(canvas.toDataURL("image/png"));
   }
 
   let activityPort = null;
+  let hasWorkerActivity = false;
   let unreadTokens = new Map();
   function acknowledgeResult() {
     if (!activityPort) return;
@@ -55,8 +67,9 @@
     }
   }
   function sendActivity() {
-    if (!activityPort) return;
     const count = window.RKChat?.getRunningChatCount?.() || 0;
+    if (!hasWorkerActivity) updateFavicon(count);
+    if (!activityPort) return;
     try { activityPort.postMessage({ type: "chatActivity", count }); } catch (_) {}
     acknowledgeResult();
   }
@@ -87,6 +100,7 @@
       if (!m) return;
       if (m.cmd === "close") window.close();
       else if (m.cmd === "sessionActivity") {
+        hasWorkerActivity = true;
         unreadTokens = new Map((Array.isArray(m.unread) ? m.unread : [])
           .filter(entry => Array.isArray(entry) && entry.length === 2 && entry.every(value => typeof value === "string")));
         updateFavicon(m.count, unreadTokens.size);
@@ -104,7 +118,8 @@
       disconnected = true;
       if (activityPort === bg) activityPort = null;
       unreadTokens.clear();
-      updateFavicon(0);
+      hasWorkerActivity = false;
+      sendActivity();
       window.RKChat?.setLiveSelection(null);
       void chrome.runtime.lastError; // read it, or every SW recycle logs "Unchecked runtime.lastError"
       setTimeout(connectBg, 500);
@@ -118,6 +133,7 @@
       } catch (_) {}
     });
   }
+  sendActivity();
   connectBg();
   // Keep closing/reconnecting available even if restoring the UI fails.
   try {

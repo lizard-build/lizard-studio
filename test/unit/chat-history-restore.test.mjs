@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 const source = readFileSync(new URL("../../src/panel/chat.js", import.meta.url), "utf8");
 
-function restore({ savedId = null, resume = null, submitted = false } = {}) {
+function restore({ savedId = null, resume = null, submitted = false, running = false, turnStartedAt } = {}) {
   const requests = [];
   const element = () => ({ replaceWith() {}, classList: { toggle() {} } });
   const old = { id: "a", harness: "codex", sessionId: savedId, codexHasSubmittedTurn: !!savedId, messagesEl: element() };
@@ -18,20 +18,22 @@ function restore({ savedId = null, resume = null, submitted = false } = {}) {
     requestHistoryPage: (chat) => requests.push(chat.sessionId),
     renderTabs() {}, updateTabDots() {}, syncComposer() {}, savePrefs() {},
     prewarmHarnesses() {}, finishAgentCheck() {}, dispatchNextQueued() {},
+    refreshStatusWord() {}, setRunningUI() {}, startStatusTicker() {}, renderTurnStatus() {},
   };
   vm.createContext(scope);
   const section = (from, to) => source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
   vm.runInContext([
     section("  function resumableSessionId(chat)", "  function savePrefs(done)"),
     section("  function maybeReplay(chat)", "  function historyNav(chat)"),
+    section("  function resumeTurnIfIdle(", "  // The interrupt→respawn"),
     section("  function onHostMessage(msg)", '    if (msg.type === "turnStarted")') + "\n}",
   ].join("\n"), scope);
   scope.onHostMessage({ type: "backgroundRestoreStart", sessions: [{ id: "a", agent: "codex",
     spec: { cwd: "/project", resume }, sessionId: resume || savedId || "unused-thread",
-    started: true, running: false, submitted, turnIds: [] }] });
+    started: true, running, turnStartedAt, submitted, turnIds: [] }] });
   scope.onHostMessage({ type: "backgroundRestoreEnd" });
   const chat = scope.chats.get("a");
-  return { requests, empty: chat.empty, persistedId: scope.resumableSessionId(chat) };
+  return { chat, requests, empty: chat.empty, persistedId: scope.resumableSessionId(chat) };
 }
 
 test("an older worker's idle snapshot cannot erase the saved thread or skip its history", () => {
@@ -60,4 +62,17 @@ test("an unused prewarmed thread stays unsaved and does not load history", () =>
   assert.equal(r.persistedId, null);
   assert.equal(r.empty, true, "an unused session must keep the empty-chat logo and setup visible");
   assert.deepEqual(r.requests, []);
+});
+
+test("restoring a running chat keeps its original elapsed time", () => {
+  const start = Date.now() - 11000;
+  const { chat } = restore({ savedId: "saved-thread", submitted: true, running: true, turnStartedAt: start });
+  assert.equal(chat.turnRunning, true);
+  assert.equal(chat.turnStartedAt, start);
+});
+
+test("an older worker without a timestamp still gets a valid timer", () => {
+  const before = Date.now();
+  const { chat } = restore({ savedId: "saved-thread", submitted: true, running: true });
+  assert.ok(chat.turnStartedAt >= before && chat.turnStartedAt <= Date.now());
 });

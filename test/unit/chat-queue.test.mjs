@@ -16,9 +16,11 @@ function panel({ background = false } = {}) {
     id: "a", title: "Existing chat", started: true, contexts: [], attachments: [], queue: [],
     streamedMsgIds: new Set(), streamedText: new Map(), streamBlocks: new Map(), turnIndexCounter: 0,
   };
-  const input = { value: "" };
+  let keydown, normalSends = 0;
+  const input = { value: "", addEventListener: (name, fn) => { if (name === "keydown") keydown = fn; } };
   const scope = {
-    activeId: background ? "other" : "a", els: { input },
+    activeId: background ? "other" : "a", els: { input }, chats: new Map([["a", chat]]),
+    slash: { open: false }, sendPrompt: () => { normalSends++; },
     connected: true, hostReady: true, newId: () => "steer-" + sent.length,
     flushQueuedIfIdle: () => {}, resumeTurnIfIdle: () => { chat.turnRunning = true; },
     DEFAULT_TITLE: "New chat", USAGE_CMD_RE: /^\/usage$/, CTX_MARK_START: "<context>", CTX_MARK_END: "</context>",
@@ -38,8 +40,11 @@ function panel({ background = false } = {}) {
     section("  function setQueuedSteering(entry, sending)", "  function removeQueued(chat, entry, row)"),
     section("  function dispatchNextQueued(chat)", "  function setRunningUI(on)"),
   ].join("\n"), scope);
+  vm.runInContext(section('    els.input.addEventListener("keydown",', "    mounted = true;"), scope);
   return {
     chat, input, sent, bubbles,
+    normalSends: () => normalSends,
+    enter: (extra = {}) => keydown({ key: "Enter", preventDefault() {}, ...extra }),
     steer: (entry) => scope.steerQueuedPrompt(chat, entry),
     receipt: (msg) => scope.finishQueuedSteer(chat, msg),
     failSteer: () => scope.failQueuedSteers(chat),
@@ -176,4 +181,37 @@ test("steer leaves Claude queues alone and preserves failed sends", () => {
   p.chat.harness = "codex"; p.disconnect(); p.steer(p.chat.queue[0]);
   assert.equal(p.chat.queue[0].steering, false); assert.equal(p.chat.queue[0].steerFailed, true);
   assert.equal(p.chat.queue[0].text, "keep me");
+});
+
+test("Enter on an empty composer steers queued messages in order without duplicate sends", () => {
+  const p = panel(); p.chat.harness = "codex"; p.chat.turnRunning = true;
+  p.queue("first", [image("first")]); p.queue("second");
+  p.enter(); p.enter();
+  assert.equal(p.sent.length, 1);
+  assert.equal(p.sent[0].text, "first");
+  assert.deepEqual(p.sent[0].images.map(i => i.data), ["first"]);
+  p.receipt({ requestId: p.sent[0].promptRequestId, ok: true });
+  p.enter();
+  assert.equal(p.sent[1].text, "second");
+  assert.equal(p.normalSends(), 0);
+});
+
+test("held Enter, Shift+Enter and IME confirmation never steer", () => {
+  const p = panel(); p.chat.harness = "codex"; p.queue("keep queued");
+  for (const extra of [{ repeat: true }, { shiftKey: true }, { isComposing: true }, { keyCode: 229 }]) p.enter(extra);
+  assert.equal(p.sent.length, 0); assert.equal(p.normalSends(), 0);
+});
+
+test("drafts, files, context, bash mode, Claude and an edited queue entry keep normal Enter behavior", () => {
+  for (const change of [
+    p => { p.input.value = "new prompt"; },
+    p => { p.chat.attachments = [image("draft")]; },
+    p => { p.chat.contexts = [page("draft")]; },
+    p => { p.chat.bashMode = true; },
+    p => { p.chat.harness = "claude"; },
+    p => { p.chat.queue[0].editing = true; },
+  ]) {
+    const p = panel(); p.chat.harness = "codex"; p.queue("keep queued"); change(p); p.enter();
+    assert.equal(p.sent.length, 0); assert.equal(p.normalSends(), 1);
+  }
 });

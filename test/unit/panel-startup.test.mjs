@@ -127,10 +127,10 @@ function shell({ broken = false } = {}) {
   let restored, activated = 0, ready = 0, bridge = 0, failed = 0;
   const scope = {
     chrome: {
-      runtime: { id: 'test', connect() { bridge++; return { postMessage() {}, onMessage: { addListener() {} }, onDisconnect: { addListener() {} } }; } },
+      runtime: { id: 'test', getURL: path => path, connect() { bridge++; return { postMessage() {}, onMessage: { addListener() {} }, onDisconnect: { addListener() {} } }; } },
       windows: { getCurrent: cb => cb({ id: 1 }) },
     },
-    document: { getElementById: () => ({}) },
+    document: { getElementById: () => ({ replaceWith() {} }), createElement: () => ({}) },
     window: {
       addEventListener() {},
       RKPanelStartup: { mark() {}, ready() { ready++; }, fail() { failed++; } },
