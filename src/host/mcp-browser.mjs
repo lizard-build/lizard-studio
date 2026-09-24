@@ -18,6 +18,7 @@ import { basename } from "node:path";
 const PORT = parseInt(process.env.RK_BRIDGE_PORT || "0", 10);
 const TOKEN = process.env.RK_BRIDGE_TOKEN || "";
 const SESSION = process.env.RK_BRIDGE_SESSION || "default";
+const RECONNECT_HELP = "Retry the tool. If it still fails, reopen Lizard Studio in a Chrome tab or side panel.";
 
 // Exit when the parent claude process goes away (its death ends our stdin).
 // Without this the open TCP socket to the host keeps the event loop alive and
@@ -312,7 +313,7 @@ function connect() {
     // each request sit until its own timeout would stall claude for up to 30s
     // per tool call against a definitively dead connection.
     for (const resolve of pending.values()) {
-      resolve({ ok: false, error: "browser bridge disconnected (is the Lizard side panel open?)" });
+      resolve({ ok: false, error: "Lizard Studio lost its browser connection. " + RECONNECT_HELP });
     }
     pending.clear();
   });
@@ -350,7 +351,7 @@ function callHost(op, args) {
     timer = setTimeout(() => {
       if (pending.has(reqId)) {
         pending.delete(reqId);
-        resolve({ ok: false, error: "browser bridge timed out (is the Lizard side panel open?)" });
+        resolve({ ok: false, error: "Lizard Studio browser connection timed out. " + RECONNECT_HELP });
       }
     }, OP_TIMEOUT_MS[op] || 30000);
   });

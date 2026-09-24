@@ -55,6 +55,15 @@ test("MCP relays an explicit dialog answer and preserves recovery errors", async
   assert.match(r.output.at(-1).result.content[0].text, /dialog-2.*beforeunload.*browser_handle_dialog/);
 });
 
+test("a lost browser connection offers the tab as well as the side panel", async () => {
+  const r = await relay(); r.respond(() => null);
+  const pending = r.api.handle({ id: 7, method: "tools/call", params: { name: "browser_tabs", arguments: {} } });
+  await flush(); r.sock.emit("close"); await pending;
+  const error = r.output.at(-1).result.content[0].text;
+  assert.match(error, /Chrome tab or side panel/);
+  assert.equal(r.output.at(-1).result.isError, true);
+});
+
 test("one MCP request performs multiple bridge operations and returns one compact result", async () => {
   const r = await relay();
   await r.api.handle({ id: 2, method: "tools/call", params: { name: "browser_open_page", arguments: { url: "https://test.invalid/" } } });
