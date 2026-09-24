@@ -189,6 +189,24 @@ test("a failed resume preserves history and never starts an empty thread", async
   assert.equal(h.messages.at(-1).type, "exit");
 });
 
+test("a prompt queued during a failed session open gets a rejection", async () => {
+  const h = await host();
+  let rejectOpen;
+  h.respond((request) => request.method === "thread/start"
+    ? new Promise((resolve, reject) => { rejectOpen = reject; }) : {});
+  const opening = h.api.startSession({ id: "a", cwd: "/test/project" });
+  while (!rejectOpen) await Promise.resolve();
+  await h.api.sendPrompt({ id: "a", text: "hello", promptRequestId: "prompt-1" });
+  assert.equal(h.api.sessions.get("a").pending.length, 1);
+  rejectOpen(new Error("open failed"));
+  await opening;
+  assert.equal(h.api.sessions.get("a").pending.length, 0);
+  assert.deepEqual(h.messages.find((m) => m.type === "promptResult"), {
+    type: "promptResult", id: "a", requestId: "prompt-1", ok: false,
+    error: "The session couldn't be opened.",
+  });
+});
+
 test("ending a turn clears unanswered questions and does not emit a second result", async () => {
   const h = await host(), s = h.session();
   h.api.handleServerRequest(17, "item/tool/requestUserInput", { threadId: s.threadId, questions: [] });

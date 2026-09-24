@@ -32,7 +32,8 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
   const stateFor = (s, panel) => ({ id: s.id, agent: s.agent, spec: s.spec, sessionId: s.sessionId,
     replayDeferred: !!deferredReplays.get(panel)?.has(s.id), waiting: s.permissions.size > 0,
     observer: s.controller !== panel, started: s.started, running: s.running, turnStartedAt: s.turnStartedAt, failed: s.failed,
-    submitted: s.submitted, queue: s.queue.map((entry) => entry.ui), turnIds: [...s.turnIds] });
+    submitted: s.submitted, queue: s.queue.map((entry) => entry.ui), turnIds: [...s.turnIds],
+    fromDaemon: !!s.fromDaemon });
   function startTurn(s, startedAt = Date.now()) {
     if (!s.running) s.turnStartedAt = startedAt;
     s.running = true;
@@ -44,7 +45,18 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
   const send = (port, message) => { try { port.postMessage(message); } catch (_) {} };
   const busy = (s) => s.running || s.permissions.size > 0 || s.queue.length > 0 || s.pendingPrompts.size > 0;
   const count = (r) => [...r.sessions.values()].filter((s) => (s.running || s.pendingPrompts.size > 0 || s.queue.length > 0 && !s.queue[0]?.held) && !s.permissions.size && !s.failed).length;
-  const hasWork = () => [...runtimes.values()].some(r => r.browserCalls || [...r.sessions.values()].some(busy));
+  const activeWork = () => [...runtimes.values()].some(r => r.browserCalls || [...r.sessions.values()].some(
+    s => s.running || s.permissions.size || s.pendingPrompts.size || s.queue.length && !s.queue[0]?.held));
+  const hasWork = () => [...runtimes.values()].some(r => r.pendingSelfUpdate || r.browserCalls || [...r.sessions.values()].some(busy));
+  function flushSelfUpdates() {
+    if (activeWork()) return;
+    for (const r of runtimes.values()) {
+      if (!r.pendingSelfUpdate) continue;
+      const message = r.pendingSelfUpdate;
+      r.pendingSelfUpdate = null;
+      send(r.native, message);
+    }
+  }
   function keepAlive() {
     if (!hasWork()) return;
     // Page timers can be throttled when a tab is hidden. An extension API call
@@ -57,6 +69,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     } catch (error) { diagnose(null, "keepalive-error", error.message); }
   }
   function update() {
+    flushSelfUpdates();
     if (hasWork()) {
       if (keepAliveTimer === null) {
         keepAlive();
@@ -137,6 +150,41 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
   function receive(r, msg) {
     if (!msg || typeof msg !== "object") return;
     if (runtimes.get(r.windowId) !== r) return;
+    if (msg.type === "daemonSnapshot") {
+      if (r.restored) return;
+      r.fromDaemon = true;
+      for (const state of msg.sessions || []) {
+        if (!state?.id || r.sessions.has(state.id)) continue;
+        const s = getSession(r, { type: "start", id: state.id, agent: state.agent });
+        s.spec = state.spec || {};
+        s.fromDaemon = true;
+        s.started = !!state.started;
+        s.running = !!state.running;
+        s.failed = !!state.failed;
+        s.submitted = !!state.submitted;
+        s.sessionId = state.sessionId || null;
+        s.turnIds = new Set(state.turnIds || []);
+        if (s.running) s.turnStartedAt = state.turnStartedAt || Date.now();
+      }
+      update();
+      return;
+    }
+    if (msg.type === "daemonRestoreDone") {
+      if (r.restored) return;
+      r.restored = true;
+      clearTimeout(r.restoreTimer);
+      for (const [panel, options] of r.waitingPanels) restorePanel(panel, r, options);
+      r.waitingPanels.clear();
+      for (const [message, origin] of r.pendingMessages.splice(0)) {
+        const existing = r.sessions.get(message.id);
+        if (message.type === "start" && r.fromDaemon && existing?.started) {
+          send(origin, { type: "sharedSession", session: stateFor(existing, origin) });
+          continue;
+        }
+        forward(r, message, origin);
+      }
+      return;
+    }
     if (msg.type === "browser") {
       ++r.browserCalls;
       update();
@@ -196,12 +244,13 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
       }
     }
     if (msg.type === "agentExit") {
+      if (msg.agent === "claude") r.ready.delete("ready");
       r.ready.set("agentReady" + msg.agent, { type: "agentReady", agent: msg.agent, ok: false });
       for (const item of r.sessions.values()) if (item.agent === msg.agent) {
         item.running = false; item.started = false; item.failed = true; item.permissions.clear(); item.pendingPrompts.clear();
       }
     }
-    for (const panel of s ? panels() : r.panels) {
+    for (const panel of r.restored ? (s ? panels() : r.panels) : []) {
       if (s && deferredReplays.get(panel)?.has(s.id)) {
         sendDeferredState(panel, s);
       } else send(panel, s && panel !== s.controller ? { type: "sharedEvent", message: msg } : msg);
@@ -210,7 +259,8 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     update(); releaseIfIdle(r);
   }
   function create(windowId) {
-    const r = { windowId, panels: new Set(), sessions: new Map(), ready: new Map(),
+    const r = { windowId, panels: new Set(), sessions: new Map(), ready: new Map(), pendingSelfUpdate: null,
+      restored: false, fromDaemon: false, waitingPanels: new Map(), pendingMessages: [], restoreTimer: null,
       saving: Promise.resolve(), idleTimer: null, browserCalls: 0 };
     r.browser = createBrowser({ windowId });
     r.native = chrome.runtime.connectNative("com.lizard.code");
@@ -224,12 +274,16 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
       for (const session of r.sessions.values()) for (const panel of panels()) {
         if (!r.panels.has(panel)) send(panel, { type: "sharedEvent", message: { type: "exit", id: session.id, code: 1 } });
       }
-      runtimes.delete(windowId); clearTimeout(r.idleTimer);
+      runtimes.delete(windowId); clearTimeout(r.idleTimer); clearTimeout(r.restoreTimer);
       r.browser.detachAllCdp();
       remember(r);
       for (const panel of r.panels) { try { panel.disconnect(); } catch (_) {} }
       update();
     });
+    // Older installed hosts do not know the reconnect protocol. They still
+    // send ready normally; release the panel after a compatibility wait.
+    r.restoreTimer = setTimeout(() => receive(r, { type: "daemonRestoreDone" }), 10000);
+    send(r.native, { type: "runtimeAttach", windowId });
     return r;
   }
   function replaySession(port, s) {
@@ -245,6 +299,11 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     catch (error) { diagnose(null, "native-connect-failed", error.message); port.disconnect(); return null; }
     clearTimeout(r.idleTimer);
     r.panels.add(port);
+    if (!r.restored) { r.waitingPanels.set(port, options); return r; }
+    restorePanel(port, r, options);
+    return r;
+  }
+  function restorePanel(port, r, options = {}) {
     // An ordered snapshot precedes new live messages on the same port. Replays
     // only paint the UI; no permission, prompt or browser action is repeated.
     const allSessions = [...runtimes.values()].flatMap((item) => [...item.sessions.values()]);
@@ -254,10 +313,15 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     for (const msg of r.ready.values()) send(port, msg);
     for (const s of allSessions) if (!deferredReplays.get(port).has(s.id)) replaySession(port, s);
     send(port, { type: "backgroundRestoreEnd" });
-    return r;
   }
   function forward(r, msg, origin = null) {
     r = ownerOf(msg.id) || r;
+    if (msg.type === "selfUpdate" && activeWork()) {
+      r.pendingSelfUpdate = msg;
+      if (origin) send(origin, { type: "selfUpdate", deferred: true });
+      update();
+      return;
+    }
     const existing = r.sessions.get(msg.id);
     if (msg.type === "backgroundReplaySession") {
       if (!existing || !origin || !deferredReplays.get(origin)?.delete(msg.id)) return;
@@ -288,6 +352,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
       if (msg.type === "backgroundQueue") {
         s.agent = msg.agent || s.agent;
         s.queue = Array.isArray(msg.entries) ? msg.entries : [];
+        s.fromDaemon = false;
         for (const panel of panels()) if (panel !== origin) send(panel, { type: "sharedQueue", id: s.id, entries: s.queue.map((entry) => entry.ui) });
         update(); return;
       }
@@ -346,10 +411,14 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
         }
         return;
       }
-      if (runtimes.get(r.windowId) === r && r.panels.has(port)) forward(r, msg, port);
+      if (runtimes.get(r.windowId) === r && r.panels.has(port)) {
+        if (!r.restored) r.pendingMessages.push([msg, port]);
+        else forward(r, msg, port);
+      }
     });
     port.onDisconnect.addListener(() => {
       if (!r) return;
+      r.waitingPanels.delete(port);
       r.panels.delete(port);
       diagnose(r, "panel-disconnected", chrome.runtime.lastError?.message);
       for (const runtime of runtimes.values()) {

@@ -233,7 +233,7 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v27: the OpenAI host sends only supported model effort levels.
 // v28: paged ChatGPT history and lossless history message chunks.
 // v34: Codex turn ids let the worker restore a running panel without duplicate history.
-const HOST_VERSION = 34;
+const HOST_VERSION = 35;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -330,7 +330,7 @@ refreshBundledSkill();
 // The extension updates via git/store, but this runtime copy only via
 // install.sh — so when the panel sees a stale HOST_VERSION it sends
 // `selfUpdate` and we refresh ourselves from the npm registry, atomic-swap on
-// disk, then exit so Chrome relaunches the new copy when the panel reconnects.
+// disk, then restart once current work is done so the router runs the new copy.
 //
 // We deliberately do NOT fetch from a mutable branch (raw .../main/...): that
 // would make any push to `main` execute instantly on every user's machine with
@@ -374,6 +374,17 @@ function extractFromTarball(gzBuf, wanted) {
   return out;
 }
 
+let updateExitPending = false;
+let updateExitTimer = null;
+function maybeFinishUpdate() {
+  if (!updateExitPending || updateExitTimer || [...sessions.values()].some((s) => s.turnRunning)) return;
+  updateExitTimer = setTimeout(() => {
+    updateExitTimer = null;
+    if ([...sessions.values()].some((s) => s.turnRunning)) return;
+    shutdown(0);
+  }, 150);
+}
+
 async function selfUpdate(id) {
   try {
     // Resolve the newest published version and its immutable content hash.
@@ -411,9 +422,9 @@ async function selfUpdate(id) {
     send({ type: "selfUpdate", id, updated: changed, restarting: changed, version: meta.version });
     log("selfUpdate:", changed ? `updated to ${meta.version} — restarting` : "already up to date");
     if (changed) {
-      // Give the reply a beat to flush through stdout, then exit; the panel's
-      // reconnect relaunches the freshly written host.
-      setTimeout(() => shutdown(0), 150);
+      // Keep active turns alive. The router starts the new copy after this one exits.
+      updateExitPending = true;
+      maybeFinishUpdate();
     }
   } catch (err) {
     log("selfUpdate failed:", err && err.message);
@@ -1235,6 +1246,7 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
     // in the exit handler) and `pendingPrompt` is still safe to replay.
     sawInit: false,
     pendingPrompt: null,
+    turnRunning: false,
   };
 
   const args = [
@@ -1390,6 +1402,10 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
         }
       }
       send({ type: "event", id, data: obj });
+      if (obj.type === "result") {
+        s.turnRunning = false;
+        maybeFinishUpdate();
+      }
   });
   proc.stdout.on("data", (chunk) => feedStdout(chunk.toString("utf8")));
 
@@ -1402,6 +1418,7 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
     // Only drop the session if this is still the live process — a restart may
     // already have replaced it with a newer spawn under the same id.
     if (sessions.get(id) === s) sessions.delete(id);
+    maybeFinishUpdate();
     // A SIGTERM we issued ourselves (folder/model/mode change, close, shutdown)
     // is an expected restart, not a crash — stay quiet.
     if (proc._intentional) {
@@ -1967,7 +1984,10 @@ function sendPrompt(id, text, images) {
   }
   const t = String(text ?? "");
   if (t.trim() || !content.length) content.push({ type: "text", text: t });
-  writeToChild(id, { type: "user", message: { role: "user", content } });
+  if (writeToChild(id, { type: "user", message: { role: "user", content } })) {
+    const s = sessions.get(id);
+    if (s) s.turnRunning = true;
+  }
 }
 
 function interrupt(id) {

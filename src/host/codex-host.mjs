@@ -1466,6 +1466,14 @@ function effortFor(effort) {
 
 // ---- session control --------------------------------------------------------------
 
+function rejectPendingPrompts(s, message) {
+  for (const pending of s.pending.splice(0)) {
+    if (pending.promptRequestId) {
+      send({ type: "promptResult", id: s.id, requestId: pending.promptRequestId, ok: false, error: message });
+    }
+  }
+}
+
 async function startSession(msg) {
   const id = msg.id || "default";
   const cwd = msg.cwd;
@@ -1495,7 +1503,7 @@ async function startSession(msg) {
   } catch (err) {
     log("app-server start failed:", err && err.message);
     s.opening = false;
-    s.pending.length = 0;
+    rejectPendingPrompts(s, "Couldn't start ChatGPT.");
     send({ type: "error", id, message: `Couldn't start ChatGPT: ${err && err.message}` });
     endTurnWith(s, true, "Couldn't start ChatGPT.");
     send({ type: "exit", agent: "codex", id, code: 1, quiet: true });
@@ -1554,7 +1562,7 @@ async function startSession(msg) {
     log("thread start failed:", err && err.message);
     s.opening = false;
     send({ type: "error", id, code: err?.code, message: `Couldn't open a ChatGPT session: ${err && err.message}` });
-    s.pending.length = 0;
+    rejectPendingPrompts(s, "The session couldn't be opened.");
     endTurnWith(s, true, "The session couldn't be opened.");
     send({ type: "exit", agent: "codex", id, code: 1, quiet: true });
     return;
@@ -1782,6 +1790,7 @@ async function interrupt(msg) {
 function closeSession(id, opts) {
   const s = sessions.get(id);
   if (!s) return;
+  rejectPendingPrompts(s, "This session was closed before your message was sent.");
   cancelBrowserWorkflows(s.browserSession);
   if (s.silenceTimer) clearTimeout(s.silenceTimer);
   for (const reqId of s.asks.keys()) {

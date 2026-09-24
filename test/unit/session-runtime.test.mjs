@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 const flush = () => new Promise(setImmediate);
-function runtime() {
+function runtime({ autoRestore = true } = {}) {
   let now = 100000;
   const intervals = new Set();
   let keepAliveCalls = 0;
@@ -13,7 +13,12 @@ function runtime() {
   function port(name) {
     const messages = [], disconnects = [];
     return { name, sent: [], closed: false,
-      postMessage(msg) { this.sent.push(structuredClone(msg)); },
+      postMessage(msg) { this.sent.push(structuredClone(msg));
+        if (autoRestore && name === "native" && msg.type === "runtimeAttach") {
+          this.emit({ type: "daemonSnapshot", sessions: [] });
+          this.emit({ type: "daemonRestoreDone" });
+        }
+      },
       onMessage: { addListener(fn) { messages.push(fn); } },
       onDisconnect: { addListener(fn) { disconnects.push(fn); } },
       emit(msg) { messages.forEach((fn) => fn(structuredClone(msg))); },
@@ -48,6 +53,26 @@ function runtime() {
   return { chrome, intervals, keepAliveCalls: () => keepAliveCalls, panel, start, native, counts, results, storage, settle, browserCalls, detached, port, sessions, advance: ms => { now += ms; } };
 }
 const result = (id) => ({ type: "event", id, data: { type: "result", result: "Done" } });
+
+test("a new worker restores an active daemon turn before accepting panel commands", () => {
+  const r = runtime({ autoRestore: false }), p = r.panel();
+  p.emit({ type: "start", id: "a", agent: "codex", cwd: "/project" });
+  assert.deepEqual(r.native[0].sent.map((m) => m.type), ["runtimeAttach"]);
+  r.native[0].emit({ type: "daemonSnapshot", sessions: [{ id: "a", agent: "codex",
+    spec: { cwd: "/project" }, started: true, running: true, submitted: true,
+    sessionId: "thread-a", turnIds: ["turn-a"] }] });
+  r.native[0].emit({ type: "event", id: "a", turnId: "turn-a",
+    data: { type: "stream_event", event: { delta: { text: "Still working" } } } });
+  assert.equal(p.sent.length, 0, "replay stays behind the ordered restore snapshot");
+  r.native[0].emit({ type: "daemonRestoreDone" });
+  assert.equal(p.sent[0].sessions[0].running, true);
+  assert.equal(p.sent[0].sessions[0].fromDaemon, true);
+  assert.equal(p.sent[0].sessions[0].sessionId, "thread-a");
+  assert.ok(p.sent.some((m) => m.type === "backgroundReplay" && m.message.data?.event?.delta?.text === "Still working"));
+  assert.equal(r.native[0].sent.some((m) => m.type === "start"), false, "the existing turn is not started twice");
+  r.native[0].emit(result("a"));
+  assert.ok(p.sent.some((m) => m.type === "event" && m.data?.result === "Done"));
+});
 
 test("results are recorded with no panel and replaying a session does not mark it read", async () => {
   const r = runtime(), p = r.panel(); r.start(p, "a");
@@ -92,6 +117,15 @@ test("closing the last panel preserves every active session and releases only af
   r.native[0].emit(result("b")); await r.settle();
   assert.equal(r.counts.at(-1), 0); assert.equal(r.native[0].closed, true);
   assert.deepEqual(r.detached, [1]);
+});
+
+test("a helper update waits until running chats finish", () => {
+  const r = runtime(), p = r.panel(); r.start(p, "a");
+  p.emit({ type: "selfUpdate" });
+  assert.equal(r.native[0].sent.some((m) => m.type === "selfUpdate"), false);
+  assert.ok(p.sent.some((m) => m.type === "selfUpdate" && m.deferred));
+  r.native[0].emit(result("a"));
+  assert.equal(r.native[0].sent.filter((m) => m.type === "selfUpdate").length, 1);
 });
 
 test("reopening attaches to the same host and replays without sending prompts or tool actions", async () => {

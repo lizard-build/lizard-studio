@@ -53,10 +53,10 @@ test('a stale inherited router marker cannot bypass the legacy entry point', asy
 });
 
 test('router sends ChatGPT workspace requests to Codex and shared folder requests to Claude', async () => {
-  const spawned = [], timers = [];
+  const spawned = [], timers = [], notices = [], rawOutput = [];
   const proc = new EventEmitter();
   Object.assign(proc, { pid: 42, execPath: '/test/node', cwd: () => '/work', env: { PATH: '/test/bin' }, stdin: new EventEmitter(), stdout: new EventEmitter() });
-  proc.stdout.write = () => {};
+  proc.stdout.write = (frame) => { rawOutput.push(frame); };
   const imports = {
     './codex-spawn.mjs': { createHostSpawner: () => ({ close() {}, spawn: (bin, args, options) => {
       const child = new EventEmitter();
@@ -64,12 +64,14 @@ test('router sends ChatGPT workspace requests to Codex and shared folder request
       spawned.push({ bin, args, options, child });
       return child;
     } }) },
-    'node:fs': { existsSync: () => true },
+    'node:fs': { existsSync: () => true, chmodSync() {}, unlinkSync() {} },
+    'node:child_process': { spawn() { throw Error('unexpected detached spawn'); } },
+    'node:net': { default: {} },
     'node:path': path,
-    './hostkit.mjs': { HOST_DIR: '/test', makeLog: () => () => {}, frameReader: () => () => {}, frameRaw: (raw) => raw, writeFrame: () => {}, redact() {} },
+    './hostkit.mjs': { HOST_DIR: '/test', makeLog: () => () => {}, frameReader: () => () => {}, frameRaw: (raw) => raw, writeFrame: (_stream, obj) => { notices.push(obj); }, redact() {} },
   };
   const context = createContext({ process: proc, Buffer, setTimeout: (fn) => { timers.push(fn); return { unref() {} }; } });
-  const module = new SourceTextModule(readFileSync(new URL('../../src/host/router.mjs', import.meta.url), 'utf8') + '\nexport { route };', { context });
+  const module = new SourceTextModule(readFileSync(new URL('../../src/host/router.mjs', import.meta.url), 'utf8') + '\nexport { route, recordChildMessage, replayToBrowser };', { context });
   await module.link((name) => {
     const values = imports[name];
     assert.ok(values, name);
@@ -92,8 +94,20 @@ test('router sends ChatGPT workspace requests to Codex and shared folder request
   assert.deepEqual(codex.child.written.map((m) => m.type), ['start', 'restartSession']);
   assert.deepEqual(claude.child.written.map((m) => m.type), ['pickFolder']);
   assert.equal(codex.child.written[0].permissionMode, 'workspace');
+  send({ type: 'prompt', id: 'a', agent: 'codex', text: 'Check this' });
+  const stream = Buffer.from(JSON.stringify({ type: 'event', id: 'a', turnId: 'turn-a', data: { type: 'stream_event' } }));
+  module.namespace.recordChildMessage('codex', stream);
+  module.namespace.replayToBrowser();
+  assert.equal(notices.find((m) => m.type === 'daemonSnapshot').sessions[0].running, true);
+  assert.equal(notices.at(-1).type, 'daemonRestoreDone');
+  assert.ok(rawOutput.some((body) => body.equals(stream)), 'the active turn can replay after reconnect');
   send({ type: 'bashExec', id: 'a', agent: 'codex', execId: 'cmd', command: 'python report.py' });
   assert.equal(claude.child.written.at(-1).type, 'bashExec');
+  claude.child.emit('exit', 1, null);
+  assert.equal(codex.child.written.length, 3, 'Codex remains connected after Claude exits');
+  timers.at(-1)();
+  assert.equal(spawned.length, 3, 'the router restarts only Claude');
+  assert.equal(spawned.at(-1).args[0], '/test/claude-host.mjs');
 });
 
 test('Claude refuses misrouted agent operations without touching sessions', () => {

@@ -479,7 +479,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 34;
+  const EXPECTED_HOST_VERSION = 35;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -5557,6 +5557,10 @@
     const pod = hostActivity();
     if (pod) pod.start({ title: "Updating the helper", detail: "Fetching the newest version", progress: "indeterminate" });
   }
+  function hostUpdateWaiting() {
+    const pod = hostActivity();
+    if (pod) pod.update({ detail: "Waiting for current work to finish" });
+  }
   function hostUpdateRestarting(version) {
     const pod = hostActivity();
     if (pod) pod.update({ detail: version ? `Installed ${version} — restarting` : "Installed — restarting" });
@@ -5832,7 +5836,7 @@
           order.push(chat.id);
           els.stack.appendChild(chat.messagesEl);
         }
-        chat.queue = state.queue || [];
+        chat.queue = state.fromDaemon ? (old?.queue || []) : (state.queue || []);
         chats.set(chat.id, chat);
         chat.messagesEl.classList.toggle("hidden", chat.id !== activeId);
         chat.started = state.started;
@@ -6005,6 +6009,12 @@
         }
         break;
       case "selfUpdate":
+        if (msg.deferred) {
+          clearTimeout(hostUpdateTimer);
+          hostUpdateTimer = null;
+          hostUpdateWaiting();
+          break;
+        }
         // updated:true → the host is about to restart; keep the pod running
         // until the reconnect's `ready` re-evaluates the version. A reported
         // error is worth retrying; "already current yet still stale" is the
