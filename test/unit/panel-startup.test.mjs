@@ -65,6 +65,7 @@ test('slow loading keeps the screen and offers retry without reloading or skippi
   assert.equal(p.nodes.get('panel-startup-retry').hidden, false);
   assert.match(p.nodes.get('panel-startup-message').textContent, /longer/);
   assert.equal(p.reloads, 0);
+  assert.equal(p.reports.length, 0, 'a slow startup is not an extension error');
   await p.loaded();
   assert.equal(p.resources.at(-1).src, 'window-mode.js');
   p.api.ready();
@@ -77,6 +78,8 @@ test('a failed stylesheet does not mount a broken UI and retry needs an explicit
   p.resources[0].onerror(); await flush();
   assert.equal(p.resources.length, 1);
   assert.match(p.nodes.get('panel-startup-message').textContent, /Couldn't open/);
+  assert.match(p.reports[0][0], /Panel startup failed at styles: Could not load panel\.css/);
+  assert.equal(p.reports[0].length, 1, 'Chrome receives a readable string, not an object');
   p.api.ready();
   assert.equal(p.nodes.get('panel-startup').hidden, false);
   assert.equal(p.reloads, 0);

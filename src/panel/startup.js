@@ -11,7 +11,10 @@
     stage = name;
     timings[name] = Math.round(performance.now());
   };
-  const report = (error) => console.warn("[Lizard Studio] Panel startup", { stage, timings, error });
+  const report = (error) => {
+    const reason = typeof error === "string" ? error : typeof error?.message === "string" ? error.message : "Unknown error";
+    console.warn(`[Lizard Studio] Panel startup failed at ${stage}: ${reason.slice(0, 500)}`);
+  };
   retry.addEventListener("click", () => location.reload());
 
   // A slow read must not become a new, empty session or trigger a reload while
@@ -21,7 +24,6 @@
     message.textContent = "Opening chats is taking longer than expected.";
     retry.hidden = false;
     screen.hidden = false;
-    report("Still waiting");
   }, 10000);
 
   function fail(error) {
