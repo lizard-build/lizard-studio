@@ -146,7 +146,9 @@ function saveUnread() {
   if (!unreadLoaded || !chrome.storage?.session) return;
   const entries = [...unreadResults];
   unreadSave = unreadSave.then(() => chrome.storage.session.set({ [UNREAD_KEY]: entries }))
-    .catch((error) => console.error("[RK] Save unread results", error));
+    .catch((error) => {
+      if (error?.message !== "No SW") console.error("[RK] Save unread results", error);
+    });
 }
 function resultStatus(id, unread) {
   if (typeof id !== "string" || !id) return;
@@ -193,21 +195,33 @@ refreshActionActivity();
 // Session storage survives worker shutdown without retaining results after the
 // browser session ends. Do not overwrite results received during this read.
 let restoredUnread = false;
-Promise.resolve(chrome.storage?.session?.get(UNREAD_KEY)).then((data) => {
-  for (const entry of Array.isArray(data?.[UNREAD_KEY]) ? data[UNREAD_KEY] : []) {
-    if (!Array.isArray(entry) || entry.length !== 2) continue;
-    const [id, token] = entry;
-    if (typeof id === "string" && typeof token === "string" && !changedUnread.has(id)) {
-      unreadResults.set(id, token);
-      restoredUnread = true;
+const UNREAD_LOAD_RETRY_MS = [250, 1000, 3000];
+function loadUnread(attempt = 0) {
+  let request;
+  try { request = chrome.storage?.session?.get(UNREAD_KEY); }
+  catch (error) { request = Promise.reject(error); }
+  Promise.resolve(request).then((data) => {
+    for (const entry of Array.isArray(data?.[UNREAD_KEY]) ? data[UNREAD_KEY] : []) {
+      if (!Array.isArray(entry) || entry.length !== 2) continue;
+      const [id, token] = entry;
+      if (typeof id === "string" && typeof token === "string" && !changedUnread.has(id)) {
+        unreadResults.set(id, token);
+        restoredUnread = true;
+      }
     }
-  }
-}).catch((error) => console.error("[RK] Load unread results", error)).finally(() => {
-  unreadLoaded = true;
-  changedUnread.clear();
-  saveUnread();
-  if (restoredUnread) publishActivity();
-});
+    unreadLoaded = true;
+    changedUnread.clear();
+    saveUnread();
+    if (restoredUnread) publishActivity();
+  }).catch((error) => {
+    if (error?.message === "No SW") {
+      if (attempt < UNREAD_LOAD_RETRY_MS.length) setTimeout(() => loadUnread(attempt + 1), UNREAD_LOAD_RETRY_MS[attempt]);
+      return;
+    }
+    console.error("[RK] Load unread results", error);
+  });
+}
+loadUnread();
 
 function panelsForWindow(windowId) {
   if (!Number.isInteger(windowId) || windowId < 0) return [];

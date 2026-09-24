@@ -141,6 +141,34 @@ test("unread results survive a worker restart without restoring a stale overwrit
   assert.deepEqual(data.studioUnreadResults.map(([id]) => id), ["new"]);
 });
 
+test("No SW while loading unread results retries without erasing saved results", async () => {
+  const data = { studioUnreadResults: [["old", "old-token"]] }, timers = [], errors = [];
+  let reads = 0, writes = 0;
+  const storage = {
+    get: async () => {
+      if (++reads === 1) throw new Error("No SW");
+      return structuredClone(data);
+    },
+    set: async (value) => { writes++; Object.assign(data, structuredClone(value)); },
+  };
+  const w = worker({ sessionStorage: storage, timer: (fn, delay) => timers.push({ fn, delay }),
+    log: { error: (...args) => errors.push(args) } });
+  w.result("new"); await flush();
+  assert.equal(writes, 0);
+  assert.equal(timers[0].delay, 250);
+  timers[0].fn(); await flush(); await flush();
+  assert.deepEqual(data.studioUnreadResults.map(([id]) => id).sort(), ["new", "old"]);
+  assert.equal(errors.length, 0);
+});
+
+test("No SW while saving unread results does not create an extension error", async () => {
+  const errors = [];
+  const w = worker({ sessionStorage: { get: async () => ({}), set: async () => { throw new Error("No SW"); } },
+    log: { error: (...args) => errors.push(args) } });
+  await flush(); w.result("finished"); await flush();
+  assert.equal(errors.length, 0);
+});
+
 test("web content cannot subscribe to result ids through the panel port", () => {
   const w = worker(), received = [];
   w.fire("connect", { name: "rk-sidepanel", sender: { id: "test", url: "https://example.test" },
