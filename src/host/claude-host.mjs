@@ -691,7 +691,7 @@ function browserRequest(op, args, session) {
     const timer = setTimeout(() => {
       if (browserPending.has(bid)) {
         browserPending.delete(bid);
-        resolve({ ok: false, error: "extension did not respond (is the Lizard side panel open?)" });
+        resolve({ ok: false, error: "Lizard Studio did not answer the browser request. Retry; if it still fails, reopen Lizard Studio in a Chrome tab or side panel." });
       }
     }, 30000);
     browserPending.set(bid, { resolve, timer });

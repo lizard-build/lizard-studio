@@ -5,6 +5,7 @@ globalThis.createStudioBrowser = function ({ post = () => {}, windowId = null } 
   const CDP_VERSION = "1.3";
   const CDP_IDLE_MS = 3 * 60 * 1000;
   const BROWSER_STEP_MS = 5000;
+  const CDP_SETUP_MS = 10000;
   const PAGE_HELPER_MS = 2500;
   const cdpSessions = new Map(); // tabId -> { console, network, netMap, refs, waiters, idleTimer }
   const cdpAttaching = new Map(); // tabId -> shared setup promise
@@ -100,7 +101,10 @@ globalThis.createStudioBrowser = function ({ post = () => {}, windowId = null } 
         reject(error);
       };
       const timer = setTimeout(() => {
-        const error = new Error(step + " on tab " + tabId + " timed out after " + timeoutMs + " ms. The page may still be loading or unresponsive. Retry a read without switching tabs. Check the page before repeating an action; it may have already run.");
+        const recovery = step === "Page.enable"
+          ? "Chrome did not answer the debugger setup command. Retry this read on the same tab; browser_dom can also read the page without this debugger setup."
+          : "The page may still be loading or unresponsive. Retry a read without switching tabs. Check the page before repeating an action; it may have already run.";
+        const error = new Error(step + " on tab " + tabId + " timed out after " + timeoutMs + " ms. " + recovery);
         error.code = "BROWSER_STEP_TIMEOUT";
         interrupt(error);
       }, timeoutMs);
@@ -127,7 +131,7 @@ globalThis.createStudioBrowser = function ({ post = () => {}, windowId = null } 
   function dbgSend(tabId, method, params) {
     const session = cdpSessions.get(tabId);
     return browserStep(tabId, method, (done) => chrome.debugger.sendCommand({ tabId }, method, params || {}, done),
-      BROWSER_STEP_MS, undefined, method === "Page.handleJavaScriptDialog").catch((error) => {
+      method === "Page.enable" ? CDP_SETUP_MS : BROWSER_STEP_MS, undefined, method === "Page.handleJavaScriptDialog").catch((error) => {
       if (error.code === "BROWSER_STEP_TIMEOUT" && !session?.dialog && cdpSessions.get(tabId) === session) detachCdp(tabId);
       throw error;
     });

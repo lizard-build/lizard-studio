@@ -81,6 +81,46 @@ test("a silent debugger command returns the failed step and allows another read"
   assert.equal(p.replies[1].ok, true);
 });
 
+test("slow Page.enable setup can finish after the ordinary debugger deadline", async () => {
+  const p = panel();
+  let enable;
+  const send = p.chrome.debugger.sendCommand;
+  p.chrome.debugger.sendCommand = (target, method, args, cb) => {
+    if (method === "Page.enable") enable = cb;
+    else send(target, method, args, cb);
+  };
+  const reading = p.call("snapshot", { tabId: 11 });
+  await p.flush();
+  await p.expire(5000);
+  assert.equal(p.replies.length, 0);
+  assert.equal(p.detachments.length, 0);
+  enable({});
+  await reading;
+  assert.equal(p.replies[0].ok, true);
+});
+
+test("silent Page.enable reports its own deadline and the next read can reconnect", async () => {
+  const p = panel();
+  const send = p.chrome.debugger.sendCommand;
+  p.chrome.debugger.sendCommand = (target, method, args, cb) => {
+    if (method !== "Page.enable") send(target, method, args, cb);
+  };
+  const reading = p.call("snapshot", { tabId: 11 });
+  await p.flush();
+  await p.expire(10000);
+  await reading;
+  assert.equal(p.replies[0].ok, false);
+  assert.match(p.replies[0].error, /Page.enable.*10000 ms/);
+  assert.match(p.replies[0].error, /browser_dom/);
+  assert.equal(p.detachments.length, 1);
+  await p.call("dom", { tabId: 11 });
+  assert.equal(p.replies[1].ok, true);
+  assert.equal(p.replies[1].data.content, "Page content");
+  p.chrome.debugger.sendCommand = send;
+  await p.call("snapshot", { tabId: 11 });
+  assert.equal(p.replies[2].ok, true);
+});
+
 test("concurrent first reads wait for the same debugger setup", async () => {
   const p = panel();
   let enable;

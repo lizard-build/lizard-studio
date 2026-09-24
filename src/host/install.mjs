@@ -267,7 +267,7 @@ function install() {
   console.log(`  ext ids : ${EXT_IDS.join(", ")}`);
   console.log(`  runtime : ${RUNTIME_DIR}  (log: ${join(RUNTIME_DIR, "host.log")})`);
   console.log();
-  console.log("Reload the extension and open the side panel.");
+  console.log("Reload the extension and open Lizard Studio in a Chrome tab or side panel.");
 }
 
 // ---- entry ------------------------------------------------------------------
