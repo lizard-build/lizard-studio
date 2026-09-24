@@ -155,12 +155,12 @@
         try { store.rkChatV2 = JSON.parse(decodeURIComponent(seed)); } catch (_) {}
       }
       const onboardingScenario = new URLSearchParams(location.search).get("onboarding");
-      if (!seed && ["saved", "draft", "with-folder"].includes(onboardingScenario)) {
+      if (!seed && onboardingScenario) {
         store.rkChatV2 = {
           activeId: "onboarding-chat", lastHarness: "claude",
           tabs: [{
             id: "onboarding-chat", title: "Setup test", harness: "claude",
-            cwd: "/test/project",
+            cwd: ["saved", "draft", "with-folder", "transient", "session-lost"].includes(onboardingScenario) ? "/test/project" : null,
             sessionId: onboardingScenario === "saved" ? "saved-session" : null,
             draft: onboardingScenario === "draft" ? "Keep this draft" : "",
           }],
@@ -206,7 +206,7 @@
             document.body.appendChild(s);
           });
         }
-        window.RKChat.mount(document.getElementById("bed"));
+        await new Promise((resolve) => window.RKChat.mount(document.getElementById("bed"), resolve));
         window.RKChat.activate && window.RKChat.activate();
         window.__test.mounted = true;
         if (new URLSearchParams(location.search).has("onboarding")) {

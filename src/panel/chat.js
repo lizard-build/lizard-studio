@@ -491,6 +491,9 @@
   let connected = false;
   let hostReady = false;
   let reconnectTimer = null;
+  let onboardingReconnectTimer = null;
+  let agentCheckTimer = null;
+  let hadReadyHost = false;
   let lastTransportError = null;
   let mounted = false;
   let home = null;
@@ -5631,7 +5634,7 @@
     try {
       port = chrome.runtime.connect({ name: "studio-session" });
     } catch (err) {
-      showOnboarding();
+      showOnboardingIfDisconnected();
       scheduleReconnect();
       return;
     }
@@ -5653,6 +5656,9 @@
       connected = false;
       reportChatActivity();
       hostReady = false;
+      clearTimeout(agentCheckTimer);
+      agentCheckTimer = null;
+      if (hadReadyHost) hideOnboarding();
       for (const h of HARNESSES) {
         harnessReady[h.id] = false;
         harnessChecked[h.id] = false;
@@ -5663,26 +5669,25 @@
         c.backgroundReplayRequested = false;
         c.backgroundWaiting = false;
         failAsyncQuestionSends(c);
-        c.started = false;
         if (c.historyRequest) historyFailed(c, c.historyRequest);
-        if (c.turnRunning) {
-          systemNote(c, "Host disconnected mid-turn.", "warn");
-          endTurn(c, null);
-        }
-        // Any bash-mode command in flight can't report its exit now — finalize
-        // its card so it doesn't spin forever.
-        for (const execId of [...c.bashRuns.keys()]) finishBashRun(c, execId, null, null, "Host disconnected — command stopped.");
       }
       if (expectHostRestart) {
         expectHostRestart = false;
       } else {
-        // Don't surface Chrome's raw "Specified native messaging host not found"
-        // — that's the expected not-yet-installed state, not an error. Keep the
-        // neutral "Waiting for the helper…" status instead.
-        showOnboarding();
+        // A worker restart can close the panel port while the detached host
+        // keeps the turn running. Keep the chat on screen until reconnect has
+        // had time to restore it; a missing host still gets the setup screen.
+        showOnboardingIfDisconnected();
       }
       scheduleReconnect();
     });
+  }
+  function showOnboardingIfDisconnected() {
+    if (onboardingReconnectTimer) return;
+    onboardingReconnectTimer = setTimeout(() => {
+      onboardingReconnectTimer = null;
+      if (!hostReady) showOnboarding();
+    }, hadReadyHost ? 8000 : 3000);
   }
   function scheduleReconnect() {
     clearTimeout(reconnectTimer);
@@ -5868,6 +5873,19 @@
       return;
     }
     if (msg.type === "backgroundRestoreEnd") {
+      const restoredIds = new Set(backgroundRestoreStates.map((state) => state.id));
+      for (const chat of chats.values()) {
+        if (restoredIds.has(chat.id) || !chat.started) continue;
+        // A completed snapshot with no session is proof that the old host
+        // cannot finish this turn. A bare port disconnect was not.
+        chat.started = false;
+        if (chat.turnRunning) {
+          systemNote(chat, "Host disconnected mid-turn.", "warn");
+          endTurn(chat, null);
+        }
+        for (const execId of [...chat.bashRuns.keys()])
+          finishBashRun(chat, execId, null, null, "Host disconnected — command stopped.");
+      }
       backgroundRestoring = false;
       for (const state of backgroundRestoreStates) {
         const chat = chats.get(state.id);
@@ -5896,6 +5914,9 @@
     switch (msg.type) {
       case "ready":
         hostReady = (msg.version || 0) >= EXPECTED_HOST_VERSION;
+        clearTimeout(onboardingReconnectTimer);
+        onboardingReconnectTimer = null;
+        if (hostReady) hadReadyHost = true;
         harnessReady.claude = msg.ok === true;
         harnessChecked.claude = true;
         // The chip is drawn before any host has spoken, so it starts out
@@ -10460,9 +10481,21 @@
     if (!hostReady) return;
     const available = HARNESSES.find((h) => harnessReady[h.id]);
     if (!available) {
-      showOnboarding(HARNESSES.every((h) => harnessChecked[h.id]) ? "agent" : "checking");
+      if (HARNESSES.every((h) => harnessChecked[h.id])) {
+        clearTimeout(agentCheckTimer);
+        agentCheckTimer = null;
+        showOnboarding("agent");
+      } else if (!agentCheckTimer) {
+        agentCheckTimer = setTimeout(() => {
+          agentCheckTimer = null;
+          if (hostReady && !HARNESSES.some((h) => harnessReady[h.id])
+              && !HARNESSES.every((h) => harnessChecked[h.id])) showOnboarding("checking");
+        }, 3000);
+      }
       return;
     }
+    clearTimeout(agentCheckTimer);
+    agentCheckTimer = null;
     setObNode(els.obNodeClaude, els.obDotClaude, "done");
     setObNode(els.obNodeLink, els.obDotLink, "done");
     if (els.obLine2) els.obLine2.classList.add("done");
