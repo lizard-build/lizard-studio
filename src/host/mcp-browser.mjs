@@ -18,7 +18,7 @@ import { basename } from "node:path";
 const PORT = parseInt(process.env.RK_BRIDGE_PORT || "0", 10);
 const TOKEN = process.env.RK_BRIDGE_TOKEN || "";
 const SESSION = process.env.RK_BRIDGE_SESSION || "default";
-const RECONNECT_HELP = "Retry the tool. If it still fails, reopen Lizard Studio in a Chrome tab or side panel.";
+const RECONNECT_HELP = "Check browser access with a read before retrying an action; it may have completed. If access still fails, report this error and continue work that does not need browser access. This error does not establish that the side panel is closed or that reopening it will help.";
 
 // Exit when the parent claude process goes away (its death ends our stdin).
 // Without this the open TCP socket to the host keeps the event loop alive and

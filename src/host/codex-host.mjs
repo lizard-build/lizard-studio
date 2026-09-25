@@ -221,7 +221,7 @@ function browserRequest(op, args, session) {
     const timer = setTimeout(() => {
       if (!browserPending.has(bid)) return;
       browserPending.delete(bid);
-      resolve({ ok: false, error: "Lizard Studio did not answer the browser request. Retry; if it still fails, reopen Lizard Studio in a Chrome tab or side panel." });
+      resolve({ ok: false, error: "Lizard Studio did not answer the browser request. Check browser access with a read before retrying an action; it may have completed. If access still fails, report this error and continue work that does not need browser access. This timeout does not establish that the side panel is closed or that reopening it will help." });
     }, 30000);
     timer.unref?.();
     browserPending.set(bid, { resolve, timer });
@@ -1606,6 +1606,7 @@ async function startSession(msg) {
 // working path, and nothing in the Codex work reaches in there. When the
 // browser tools change, both copies change.
 const BROWSER_HINT =
+  "Browser tool timeouts do not prove that the side panel is closed. Ask the user to open or reopen Lizard Studio, open its side panel, or restart the extension only when a tool error or documentation gives a specific reason that this step is needed; a generic timeout is not enough. Do not repeat the request after the user confirms they have done it. After a timeout, check the page with a read before retrying an action, since the action may have completed. If access still fails, report the exact error and continue work that does not need browser access. " +
   "You have a set of browser_* tools (MCP server `browser`) that inspect AND control the user's Chrome tabs in real time — not just the active one. " +
   "Tabs: browser_tabs lists every open tab (tabId, windowId, title, url, active); almost every other browser_* tool accepts an optional tabId to target any tab in the background without switching to it. " +
   "Tab pinning: the FIRST browser_* call in a task that omits tabId resolves to the active tab and PINS this conversation to it — every later call that also omits tabId reuses that same pinned tab, even if the user switches which tab is active in the meantime. " +

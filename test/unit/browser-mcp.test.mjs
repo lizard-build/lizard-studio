@@ -55,12 +55,19 @@ test("MCP relays an explicit dialog answer and preserves recovery errors", async
   assert.match(r.output.at(-1).result.content[0].text, /dialog-2.*beforeunload.*browser_handle_dialog/);
 });
 
-test("a lost browser connection offers the tab as well as the side panel", async () => {
+for (const failure of ["disconnect", "timeout"]) test(`a browser ${failure} calls for a read without asking to reopen the panel`, async () => {
   const r = await relay(); r.respond(() => null);
-  const pending = r.api.handle({ id: 7, method: "tools/call", params: { name: "browser_tabs", arguments: {} } });
-  await flush(); r.sock.emit("close"); await pending;
+  const pending = r.api.handle({ id: 7, method: "tools/call", params: { name: "browser_click", arguments: { selector: "#save" } } });
+  await flush();
+  if (failure === "disconnect") r.sock.emit("close");
+  else [...r.timers].find(t => t.ms === 30000).fn();
+  await pending;
   const error = r.output.at(-1).result.content[0].text;
-  assert.match(error, /Chrome tab or side panel/);
+  assert.match(error, failure === "disconnect" ? /lost its browser connection/ : /connection timed out/);
+  assert.match(error, /Check browser access with a read before retrying an action/);
+  assert.match(error, /continue work that does not need browser access/);
+  assert.doesNotMatch(error, /reopen Lizard Studio|open (?:the |its )?side panel|restart the extension/i);
+  assert.deepEqual(r.requests.map(m => m.op), ["click"]);
   assert.equal(r.output.at(-1).result.isError, true);
 });
 
