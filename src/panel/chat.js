@@ -629,7 +629,7 @@
         if (Array.isArray(p.usageLabels) && p.usageLabels.length) usageLabels = p.usageLabels;
         if (Array.isArray(p.tabs) && p.tabs.length) {
           for (const t of p.tabs) {
-            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt, draft: t.draft, contexts: t.contexts, attachments: t.attachments, bashMode: t.bashMode, bookmarkColor: t.bookmarkColor, titleEdited: t.titleEdited });
+            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt, draft: t.draft, contexts: t.contexts, attachments: t.attachments, bashMode: t.bashMode, bookmarkColor: t.bookmarkColor, titleEdited: t.titleEdited, closedQuestionIds: t.closedQuestionIds });
             chat.queue = Array.isArray(t.queue) ? t.queue : [];
             chats.set(chat.id, chat);
     let lastScrollTop = 0;
@@ -662,7 +662,7 @@
     if (owner && els.input) owner.draft = els.input.value;
     const tabs = order.map((id) => {
       const c = chats.get(id);
-      return { queue: (c.queue || []).map(({ text, contexts, attachments, silent, steerFailed, backgroundId }) => ({ text, contexts, attachments, silent, steerFailed, backgroundId })), id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: resumableSessionId(c), bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, contexts: c.contexts, attachments: c.attachments, bashMode: c.bashMode, bookmarkColor: c.bookmarkColor, titleEdited: c.titleEdited };
+      return { queue: (c.queue || []).map(({ text, contexts, attachments, silent, steerFailed, backgroundId }) => ({ text, contexts, attachments, silent, steerFailed, backgroundId })), id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: resumableSessionId(c), bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, contexts: c.contexts, attachments: c.attachments, bashMode: c.bashMode, bookmarkColor: c.bookmarkColor, titleEdited: c.titleEdited, closedQuestionIds: c.closedQuestionIds || [] };
     });
     return { tabs, activeId, history, lastCwd, soundOnDone, usageLabels, lastBy, lastHarness,
       lastModel: lastBy.claude.model, lastEffort: lastBy.claude.effort, lastMode: lastBy.claude.mode };
@@ -695,6 +695,13 @@
         }
         for (const key of ["title", "titleEdited", "bookmarkColor", "cwd", "harness", "model", "effort", "mode", "draft", "contexts", "attachments", "bashMode", "lastActivityAt"]) {
           if (saved[key] !== undefined) chat[key] = saved[key];
+        }
+        if (Array.isArray(saved.closedQuestionIds)) {
+          chat.closedQuestionIds = saved.closedQuestionIds;
+          for (const id of chat.closedQuestionIds) {
+            const question = chat.asyncQuestions?.get(id);
+            if (question && !question.readOnly) question.complete("Closed");
+          }
         }
         if (saved.sessionId && !chat.sessionId) { chat.sessionId = saved.sessionId; chat.codexHasSubmittedTurn = true; }
       }
@@ -939,6 +946,7 @@
       id: opts.id || newId(),
       title: opts.title || DEFAULT_TITLE,
       titleEdited: !!opts.titleEdited,
+      closedQuestionIds: Array.isArray(opts.closedQuestionIds) ? opts.closedQuestionIds.slice(-200) : [],
       bookmarkColor: BOOKMARK_COLORS.some((c) => c.id === opts.bookmarkColor) ? opts.bookmarkColor : null,
       cwd: opts.cwd || null,
       harness: opts.harness || lastHarness || DEFAULT_HARNESS,
@@ -2211,6 +2219,9 @@
         return entry.card;
       }
     }
+    // A new task supersedes earlier questions. Explicit answers only close
+    // their own card; older history pages must not close today's questions.
+    if (opts?.real && !opts.questionReplyId && !chat.historyPage) closeAsyncQuestions(chat);
     const row = el("div", "msg msg-user");
     const bubble = buildBubble(text, attachments, opts && opts.contexts);
     row.appendChild(bubble);
@@ -4727,6 +4738,21 @@
     }
   }
 
+  function closeAsyncQuestions(chat, status = "No longer needed") {
+    let changed = false;
+    for (const entry of chat.asyncQuestions?.values() || []) {
+      if (entry.readOnly) continue;
+      rememberClosedQuestion(chat, entry.questionId);
+      entry.complete(status);
+      changed = true;
+    }
+    if (changed) savePrefs();
+  }
+
+  function rememberClosedQuestion(chat, questionId) {
+    chat.closedQuestionIds = [...new Set([...(chat.closedQuestionIds || []), questionId])].slice(-200);
+  }
+
   function showAsyncQuestion(chat, event) {
     const owner = chat.historyOwner || chat;
     if (!owner.asyncQuestions) owner.asyncQuestions = new Map();
@@ -4734,7 +4760,7 @@
     const streamed = owner.streamedText?.get(event.questionId);
     if (streamed?.node) streamed.node.hidden = true;
     showQuestionAsk(owner, {
-      requestId: event.questionId, async: true, readOnly: !!event.readOnly,
+      requestId: event.questionId, async: true, readOnly: !!event.readOnly || !!owner.closedQuestionIds?.includes(event.questionId),
       input: { questions: event.questions },
     }, chat);
     mergeEarlierQuestionAnswers(owner);
@@ -4806,6 +4832,14 @@
     card.appendChild(hint);
     const retry = el("div", "ask-other hidden");
     card.appendChild(retry);
+    const dismissButton = msg.async ? el("button", "ask-dismiss", "Dismiss") : null;
+    if (dismissButton) {
+      dismissButton.type = "button";
+      dismissButton.title = "Close this question without sending an answer";
+      dismissButton.addEventListener("keydown", (e) => { if (e.key !== "Escape") e.stopPropagation(); });
+      dismissButton.addEventListener("click", dismiss);
+      title.appendChild(dismissButton);
+    }
 
     function finish(out) {
       if (msg.async) {
@@ -4824,7 +4858,14 @@
     }
 
     function dismiss() {
-      if (msg.async) { entry.complete("Dismissed"); updateTabDots(); return; }
+      if (entry.sending || entry.readOnly) return;
+      if (msg.async) {
+        rememberClosedQuestion(chat, entry.questionId);
+        entry.complete("Dismissed");
+        savePrefs();
+        if (chat.id === activeId) els.input?.focus();
+        return;
+      }
       finish({ type: "permissionResult", id: chat.id, requestId, behavior: "deny", message: PERM_DENY_MESSAGE, interrupt: true });
     }
 
@@ -5000,6 +5041,7 @@
       hint.textContent = sending ? "Sending answer…" : entry.hintText;
     };
     entry.setError = (message) => {
+      if (entry.readOnly) return;
       entry.setSending(false);
       hint.textContent = message;
       hint.setAttribute("role", "alert");
@@ -5016,6 +5058,7 @@
     entry.complete = (status) => {
       entry.setSending(false);
       entry.readOnly = true;
+      if (dismissButton) dismissButton.hidden = true;
       if (msg.async) titleLabel.textContent = "ChatGPT asked";
       body.textContent = "";
       step.textContent = "";
@@ -5027,6 +5070,8 @@
       }
       hint.textContent = status;
       hint.removeAttribute("role");
+      renderTurnStatus(chat);
+      updateTabDots();
     };
     entry.applyAnswer = (values, text) => {
       Object.assign(answers, values);
@@ -5354,7 +5399,10 @@
     }
     chat.streamBlocks.clear();
     chat.streamMsgId = null;
-    // Any ask still open is moot once the turn is over. Denials are NOT
+    // Synchronous asks expire with the turn. Async questions can still take
+    // answers after a successful turn, but not after a stop or failure.
+    if (!result || result.is_error || result.result === "Stopped.") closeAsyncQuestions(chat, "Closed");
+    // Any synchronous ask still open is moot once the turn is over. Denials are NOT
     // summarized into a banner here — each rejected tool call already carries
     // its own inline error on its card (the synthesized tool_result), which is
     // how Claude Code presents them.
@@ -5960,6 +6008,7 @@
         finishAgentCheck();
         break;
       case "interrupted":
+        if (chat) closeAsyncQuestions(chat, "Closed");
         // Stop hard-kills the process and resumes in a fresh one — end the
         // turn right away instead of waiting on a `result` that isn't coming.
         // The `started` event for the respawned process follows separately.
@@ -6092,6 +6141,7 @@
           for (const c of chats.values()) {
             if (c.harness !== msg.agent) continue;
             failAsyncQuestionSends(c);
+            closeAsyncQuestions(c, "Closed");
             if (c.historyRequest) historyFailed(c, c.historyRequest);
             c.started = false;
             clearPermCards(c);
@@ -6208,6 +6258,7 @@
       case "exit":
         if (chat) {
           failAsyncQuestionSends(chat);
+          closeAsyncQuestions(chat, "Closed");
           chat.started = false;
           clearPermCards(chat);
           liftSuppress(chat); // no respawn coming — don't leave the event gate shut
@@ -6886,6 +6937,7 @@
     chat._bashIdx = 0;
     chat.bashMode = false;
     chat.asyncQuestions?.clear();
+    chat.closedQuestionIds = [];
     chat.asyncAnswerBubbles?.clear();
     chat.queue = []; // stale prompts from the wiped conversation shouldn't replay
     if (chat.id === activeId) {
