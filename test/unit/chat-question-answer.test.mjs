@@ -6,7 +6,7 @@ const source = readFileSync(new URL('../../src/panel/chat.js', import.meta.url),
 const section = (from, to) => source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
 
 function setup() {
-  const requests = [];
+  const requests = [], delivered = [], queued = [], timers = new Set();
   function el(tag, classes = '', text = '') {
     const names = new Set((classes || '').split(' '));
     return { tag, children: [], dataset: {}, parentNode: null, value: '', ownText: String(text),
@@ -26,19 +26,103 @@ function setup() {
     paintPerm() {}, tabDotWaiting: () => false, renderTurnStatus() {}, noteWaitingAsk() {},
     touchChat() {}, updateTabDots() {}, savePrefs() {}, resumeTurnIfIdle() {},
     startChatSession() {}, post: msg => { requests.push(msg); return true; }, newId: () => 'reply-id',
+    setTimeout(fn, ms) { const timer = { fn, ms }; timers.add(timer); return timer; },
+    clearTimeout(timer) { timers.delete(timer); }, failQueuedSteers() {},
+    chats: new Map([[chat.id, chat]]), liveSelection: null, claimSession() {}, autosize() {},
+    deliverPrompt: async (_, text) => delivered.push(text),
+    queuePrompt(_, text) { queued.push(text); scope.els.input.value = ''; },
   };
   vm.createContext(scope);
   vm.runInContext(section('  function userBubble(', '  // Click the message text') +
-    section('  function parseAsyncQuestionAnswer(', '  function removePermCard('), scope);
+    section('  function parseAsyncQuestionAnswer(', '  function removePermCard(') +
+    section('  async function sendPrompt()', '  // Stashes a prompt'), scope);
   const questions = [{ id: '0', question: 'Создать карточки?', options: [{ label: 'Да, по шаблону' }] }];
   function ask(target = chat, id = 'question', qs = questions, readOnly = false) {
     scope.showAsyncQuestion(target, { questionId: id, questions: qs, readOnly });
     return (target.historyOwner || target).asyncQuestions.get(id);
   }
-  return { scope, chat, el, requests, ask };
+  return { scope, chat, el, requests, ask, delivered, queued, timers,
+    compose(text) {
+      scope.activeId = chat.id; chat.cwd = '/project'; scope.els.input = { value: text };
+      return scope.sendPrompt();
+    },
+    timeout() {
+      const timer = [...timers].find(t => t.ms === 30000);
+      assert.ok(timer); timers.delete(timer); timer.fn();
+    },
+  };
 }
 
 const reply = 'Создать карточки?\nДа, по шаблону';
+
+for (const state of ['open', 'sending', 'failed', 'answered']) {
+  test(`a ${state} question cannot intercept a new composer message`, async () => {
+    const p = setup(), entry = p.ask();
+    if (state !== 'open') entry.activate(0);
+    if (state === 'failed') p.scope.failAsyncQuestionSends(p.chat);
+    if (state === 'answered') p.scope.finishAsyncQuestionAnswer(p.chat, { requestId: 'reply-id', ok: true });
+    const requests = p.requests.length;
+    await p.compose('What can we post about Redis?');
+    assert.deepEqual(p.delivered, ['What can we post about Redis?']);
+    assert.equal(p.requests.length, requests);
+    assert.equal(p.scope.els.input.value, '');
+  });
+}
+
+test('a pending question does not prevent offline messages from entering the queue', async () => {
+  const p = setup(); p.ask(); p.scope.connected = false;
+  await p.compose('Save this for when the connection returns');
+  assert.deepEqual(p.queued, ['Save this for when the connection returns']);
+  assert.equal(p.scope.els.input.value, '');
+});
+
+test('a missing answer receipt unlocks the card and a late success still settles it once', () => {
+  const p = setup(), entry = p.ask(); entry.activate(0);
+  p.timeout();
+  assert.equal(entry.sending, false); assert.equal(entry.readOnly, false);
+  assert.match(entry.card.textContent, /Couldn't confirm/);
+  assert.equal(p.requests.length, 1, 'a timeout must not resend an answer');
+  p.scope.finishAsyncQuestionAnswer(p.chat, { requestId: 'reply-id', ok: true, startedTurn: true });
+  p.scope.finishAsyncQuestionAnswer(p.chat, { requestId: 'reply-id', ok: true, startedTurn: true });
+  assert.equal(entry.readOnly, true); assert.equal(p.chat.turnIndexCounter, 1);
+  assert.equal(p.timers.size, 0);
+});
+
+test('an accepted plain-text reply from an older panel cannot leave its card sending', () => {
+  const p = setup(), entry = p.ask();
+  p.scope.sendAsyncQuestionAnswer(p.chat, entry, 'finished?');
+  p.scope.finishAsyncQuestionAnswer(p.chat, { requestId: 'reply-id', ok: true, startedTurn: true });
+  assert.equal(entry.sending, false); assert.equal(entry.readOnly, true);
+  assert.match(entry.card.textContent, /Answer sent in chat/);
+  assert.equal(p.chat.messagesEl.children.length, 2);
+  assert.match(p.chat.messagesEl.children[1].textContent, /finished\?/);
+  assert.equal(p.timers.size, 0);
+});
+
+test('a restored worker that lost the session releases its pending answer', () => {
+  const p = setup(), entry = p.ask(); entry.activate(0);
+  p.chat.turnRunning = true; p.chat.bashRuns = new Map();
+  Object.assign(p.scope, {
+    backgroundRestoreStates: [], backgroundRestoring: true,
+    systemNote() {}, endTurn(chat) { chat.turnRunning = false; },
+    renderTabs() {}, syncComposer() {}, prewarmHarnesses() {}, finishAgentCheck() {},
+  });
+  vm.runInContext('function restoreEnd(msg) {\n' +
+    section('    if (msg.type === "backgroundRestoreEnd")', '    if (msg.type === "turnStarted")') + '\n}', p.scope);
+  p.scope.restoreEnd({ type: 'backgroundRestoreEnd' });
+  assert.equal(p.chat.started, false); assert.equal(p.chat.turnRunning, false);
+  assert.equal(entry.sending, false); assert.equal(entry.sentText, reply);
+  assert.equal(p.timers.size, 0); assert.equal(p.requests.length, 1);
+  assert.match(entry.card.textContent, /Connection lost/);
+});
+
+test('connection loss unlocks a sending card without resending it', () => {
+  const p = setup(), entry = p.ask(); entry.activate(0);
+  p.scope.failAsyncQuestionSends(p.chat);
+  assert.equal(entry.sending, false); assert.equal(p.timers.size, 0);
+  assert.match(entry.card.textContent, /Connection lost/);
+  assert.equal(p.requests.length, 1);
+});
 
 test('an accepted answer stays in its question card without a second user bubble', () => {
   const { scope, chat, requests, ask } = setup();
