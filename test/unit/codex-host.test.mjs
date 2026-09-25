@@ -242,6 +242,66 @@ test("silence and a failed interrupt cannot claim that a running turn stopped", 
   assert.ok(h.messages.some((m) => m.type === "interrupted"));
 });
 
+test("stop releases a missing thread and resumes its saved history without touching other chats", async () => {
+  const h = await host(), s = h.session(), other = h.session("b");
+  s.hasSubmittedTurn = true;
+  s.openTools.add("pending-tool");
+  h.api.handleNotification("turn/started", { threadId: s.threadId, turn: { id: s.turnId } });
+  h.respond(() => { throw new Error("thread not found: thread-a"); });
+  await h.api.interrupt({ id: "a" });
+  assert.equal(s.running, false);
+  assert.equal(s.turnId, null);
+  assert.equal(s.threadId, null);
+  assert.equal(s.resumeId, "thread-a");
+  assert.equal(s.started, false);
+  assert.equal(s.silenceTimer, null);
+  assert.equal(s.openTools.size, 0);
+  assert.equal(h.api.byThread.has("thread-a"), false);
+  assert.equal(other.running, true);
+  assert.equal(h.api.byThread.get("thread-b"), "b");
+  assert.equal(h.messages.some(m => m.id === "b"), false);
+  const result = h.messages.findLast(m => m.data?.type === "result").data;
+  assert.equal(result.is_error, true);
+  assert.equal(result.session_id, "thread-a");
+  assert.match(result.result, /saved history/);
+  assert.ok(h.messages.some(m => m.type === "exit" && m.id === "a" && m.quiet));
+  await h.api.interrupt({ id: "a" });
+  assert.equal(h.requests.filter(r => r.method === "turn/interrupt").length, 1);
+  h.respond(req => req.method === "thread/resume" ? { thread: { id: req.params.threadId } } : {});
+  await h.api.restartSession({ id: "a" });
+  assert.equal(h.requests.find(r => r.method === "thread/resume").params.threadId, "thread-a");
+  assert.equal(h.requests.some(r => r.method === "thread/start"), false);
+  assert.equal(h.api.sessions.get("a").started, true);
+});
+
+test("a missing-thread error for another ID does not clear the running chat", async () => {
+  const h = await host(), s = h.session();
+  h.respond(() => { throw new Error("thread not found: thread-other"); });
+  await h.api.interrupt({ id: "a" });
+  assert.equal(s.running, true);
+  assert.equal(s.threadId, "thread-a");
+  assert.equal(h.messages.some(m => m.type === "exit"), false);
+});
+
+test("repeated stops share one request and late replies cannot end a newer turn", async () => {
+  for (const failure of [false, true]) {
+    const h = await host(), s = h.session();
+    let answer;
+    h.respond(() => new Promise((resolve, reject) => { answer = () => failure ? reject(new Error("thread not found: thread-a")) : resolve({}); }));
+    const pending = h.api.interrupt({ id: "a" });
+    await h.api.interrupt({ id: "a" });
+    assert.equal(h.requests.filter(r => r.method === "turn/interrupt").length, 1);
+    h.api.handleNotification("turn/completed", { threadId: s.threadId, turn: { id: s.turnId, status: "completed" } });
+    h.api.handleNotification("turn/started", { threadId: s.threadId, turn: { id: "next-turn" } });
+    answer();
+    await pending;
+    assert.equal(s.running, true);
+    assert.equal(s.turnId, "next-turn");
+    assert.equal(s.threadId, "thread-a");
+    assert.equal(h.messages.some(m => m.type === "exit" || m.type === "interrupted"), false);
+  }
+});
+
 test("a failed app-server start releases queued prompts", async () => {
   const h = await host();
   h.api.app.ready = false; h.api.app.proc = null;
