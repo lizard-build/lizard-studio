@@ -1777,13 +1777,34 @@ async function interrupt(msg) {
     endTurnWith(s, false, "Stopped.");
     return;
   }
+  const threadId = s.threadId, turnId = s.turnId;
+  if (s.interruptingTurnId === turnId) return;
+  s.interruptingTurnId = turnId;
+  const stillCurrent = () => sessions.get(s.id) === s && s.threadId === threadId && s.turnId === turnId;
   try {
-    await rpc("turn/interrupt", { threadId: s.threadId, turnId: s.turnId }, 15000);
+    await rpc("turn/interrupt", { threadId, turnId }, 15000);
   } catch (err) {
+    if (!stillCurrent()) return;
     log("interrupt failed:", err && err.message);
-    send({ type: "error", id: s.id, message: "Couldn't confirm that ChatGPT stopped. The turn may still be running." });
+    const missing = /^thread not found:\s*(\S+)\s*$/i.exec(err?.message || "");
+    if (missing?.[1] === threadId) {
+      // The server no longer owns this thread. Keep its saved ID for resume,
+      // but do not leave the panel waiting for a turn that cannot send events.
+      s.resumeId = threadId;
+      endTurnWith(s, true, "ChatGPT no longer has this chat loaded. Send a message to resume its saved history.");
+      byThread.delete(threadId);
+      s.threadId = null;
+      s.started = false;
+      s.opening = false;
+      send({ type: "exit", agent: "codex", id: s.id, code: 1, quiet: true });
+      return;
+    }
+    send({ type: "error", id: s.id, message: `Couldn't confirm that ChatGPT stopped. The turn may still be running. ${err?.message || "Unknown error."}` });
     return;
+  } finally {
+    if (s.interruptingTurnId === turnId) s.interruptingTurnId = null;
   }
+  if (!stillCurrent()) return;
   send({ type: "interrupted", id: s.id, respawn: false });
   endTurnWith(s, false, "Stopped.");
 }
