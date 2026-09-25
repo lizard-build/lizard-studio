@@ -2531,6 +2531,18 @@ code.inline.path:focus-visible {
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
+.ask-dismiss {
+  border: 1px solid var(--border-secondary);
+  border-radius: 6px;
+  padding: 3px 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ask-dismiss:hover, .ask-dismiss:focus-visible { color: var(--text-primary); background: var(--bg-primary); }
+.ask-dismiss:disabled { opacity: 0.5; cursor: default; }
 .ask-tag {
   display: inline-block;
   margin-top: 10px;
