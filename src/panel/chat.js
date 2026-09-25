@@ -4750,6 +4750,10 @@
     entry.sentText = text;
     entry.promptRequestId = newId();
     entry.setSending(true);
+    entry.sendTimer = setTimeout(() => {
+      entry.sendTimer = null;
+      if (entry.sending) entry.setError("Couldn't confirm your answer was sent. Check the chat before trying again.");
+    }, 30000);
     if (!post({ type: "prompt", agent: "codex", id: chat.id, text, questionReplyId: entry.questionId, promptRequestId: entry.promptRequestId })) {
       entry.setError("Host disconnected. Your answer was not sent.");
       return false;
@@ -4759,12 +4763,15 @@
 
   function finishAsyncQuestionAnswer(chat, msg) {
     const entry = [...(chat.asyncQuestions?.values() || [])].find((q) => q.promptRequestId === msg.requestId);
-    if (!entry || !entry.sending) return;
+    if (!entry || entry.readOnly) return;
     if (!msg.ok) {
       entry.setError(msg.error || "Couldn't send your answer. Try again.");
       return;
     }
     userBubble(chat, entry.sentText, null, { real: !!msg.startedTurn, questionReplyId: entry.questionId });
+    // Older panels sent plain composer text as a question reply. The user
+    // bubble may not match the card's format, but this receipt still ends it.
+    if (!entry.readOnly) entry.complete("Answer sent in chat");
     chat.codexHasSubmittedTurn = true;
     chat.empty = false;
     touchChat(chat);
@@ -4991,6 +4998,8 @@
     });
 
     entry.setSending = (sending) => {
+      clearTimeout(entry.sendTimer);
+      entry.sendTimer = null;
       entry.sending = sending;
       retry.textContent = "";
       retry.classList.add("hidden");
@@ -5875,7 +5884,9 @@
     if (msg.type === "backgroundRestoreEnd") {
       const restoredIds = new Set(backgroundRestoreStates.map((state) => state.id));
       for (const chat of chats.values()) {
-        if (restoredIds.has(chat.id) || !chat.started) continue;
+        if (restoredIds.has(chat.id)) continue;
+        failAsyncQuestionSends(chat);
+        if (!chat.started) continue;
         // A completed snapshot with no session is proof that the old host
         // cannot finish this turn. A bare port disconnect was not.
         chat.started = false;
@@ -6977,13 +6988,9 @@
       post({ type: "pickFolder", id: chat.id }) || promptForFolder(chat);
       return;
     }
-    // A reply to an async question belongs to the current Codex turn.
-    // Leave attachments and page context in the composer for a normal send.
-    const question = chat.harness === "codex" && !hasContext && !hasAttach && !/^\//.test(text) ? pendingAsyncQuestion(chat) : null;
-    if (question) {
-      if (sendAsyncQuestionAnswer(chat, question, text)) { els.input.value = ""; autosize(); }
-      return;
-    }
+    // Question cards own their replies. A pending card must not intercept a
+    // new message or block the composer while its receipt is missing.
+
     // Freeze the selection at Send, before any await or queue delay.
     if (selectionAtSend) chat.contexts = dedupeContexts([...(chat.contexts || []), selectionAtSend]);
     // A turn is already streaming — queue this one instead of dropping it.
