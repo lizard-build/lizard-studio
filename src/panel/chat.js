@@ -189,24 +189,17 @@
     return CODEX_DEFAULT_MODEL || (CODEX_MODELS[0] && CODEX_MODELS[0].id) || "";
   }
 
-  // Listed least- to most-capable — Haiku is fastest/smallest, then Sonnet,
-  // Opus, and Fable 5 as the top tier (above Opus).
-  //
-  // This is only the offline fallback. The live list comes from models.json in
-  // this repo, fetched at startup (see loadModelCatalog) so a new model reaches
-  // users by editing that file, without an extension release. Keep this array
-  // in step with models.json anyway — it's what a first run with no network
-  // shows, and what every run shows until the fetch lands.
+  // CLI aliases stay current even before the first catalog response.
   const MODELS_FALLBACK = [
-    { id: "claude-haiku-4-5", label: "Haiku 4.5" },
-    { id: "claude-sonnet-5", label: "Sonnet 5" },
-    { id: "claude-opus-4-8", label: "Opus 4.8" },
-    { id: "claude-opus-5", label: "Opus 5" },
-    { id: "claude-fable-5", label: "Fable 5" },
+    { id: "default", label: "Default" },
+    { id: "opus", label: "Opus" },
+    { id: "sonnet", label: "Sonnet" },
+    { id: "haiku", label: "Haiku" },
   ];
   let MODELS = MODELS_FALLBACK.slice();
-  const DEFAULT_MODEL_FALLBACK = "claude-opus-5";
+  const DEFAULT_MODEL_FALLBACK = "default";
   let DEFAULT_MODEL = DEFAULT_MODEL_FALLBACK;
+  const claudeCatalog = { at: 0, fetching: false, error: "", timer: null };
 
   // Model ids we used to write into prefs. The CLI still accepts them, so a
   // stale one keeps working — but it matches no row, so the picker would show
@@ -299,8 +292,8 @@
   // toolbar's context meter. These mirror what Claude Code's own `/context`
   // meter shows as the max (window minus the reserve it keeps for the reply +
   // system overhead), so the panel's ring reads 1:1 with the terminal. Like
-  // MODELS above, this is the offline fallback — models.json carries the live
-  // numbers. Unknown models fall back to 200k, which is also where the CLI
+  // MODELS above, this is the offline fallback — the CLI supplies live
+  // model ids. Unknown models fall back to 200k, which is also where the CLI
   // lands for a model missing from its own table.
   const CONTEXT_LIMITS_FALLBACK = {
     "claude-opus-4-8": 1000000,
@@ -325,17 +318,10 @@
     return CONTEXT_LIMITS[chat.model] || DEFAULT_CONTEXT_LIMIT;
   }
 
-  // ---- model catalog (remote) ------------------------------------------------
-  // The picker's contents live in models.json in this repo rather than in this
-  // file, so a new model ships by committing that JSON — no extension release,
-  // no store review. Startup reads the last good copy from chrome.storage
-  // (instant, works offline), then refetches in the background and repaints if
-  // anything moved. A malformed or unreachable manifest changes nothing: the
-  // fallbacks above stay in place.
-  const MODEL_CATALOG_URL =
-    "https://raw.githubusercontent.com/lizard-build/lizard-studio/main/models.json";
-  const MODEL_CATALOG_KEY = "rkModelCatalog";
-  const MODEL_CATALOG_TIMEOUT_MS = 6000;
+  // ---- Claude Code model catalog --------------------------------------------
+  // Keep the last CLI response for offline startup. Older repository catalogs
+  // use a different key and cannot replace the installed CLI's model list.
+  const MODEL_CATALOG_KEY = "rkClaudeModelCatalog";
 
   // Accepts a parsed manifest, returns the normalized catalog or null if it
   // doesn't hold up. Rows need a non-empty id and label; a bad contextLimit
@@ -349,9 +335,10 @@
       const id = m.id.trim();
       const label = m.label.trim();
       if (!id || !label || limits[id] !== undefined) continue;
-      models.push({ id, label });
+      const resolvedModel = typeof m.resolvedModel === "string" ? m.resolvedModel : "";
+      models.push({ id, label, resolvedModel, description: typeof m.description === "string" ? m.description : "" });
       if (Number.isFinite(m.contextLimit) && m.contextLimit > 0) limits[id] = m.contextLimit;
-      else limits[id] = null;
+      else limits[id] = CONTEXT_LIMITS_FALLBACK[canonicalModel(resolvedModel)] || null;
     }
     if (!models.length) return null;
     for (const id of Object.keys(limits)) if (limits[id] === null) delete limits[id];
@@ -371,7 +358,7 @@
   // it; only the picker's contents and the ring's denominator change.
   function applyCatalog(cat) {
     MODELS = cat.models;
-    CONTEXT_LIMITS = cat.limits;
+    CONTEXT_LIMITS = { ...CONTEXT_LIMITS_FALLBACK, ...cat.limits };
     DEFAULT_MODEL = cat.defaultModel;
     DEFAULT_CONTEXT_LIMIT = cat.defaultContextLimit;
     if (!mounted) return;
@@ -380,9 +367,6 @@
     if (els.modelMenu && !els.modelMenu.classList.contains("hidden")) renderModelMenu();
   }
 
-  // Cached copy first so the picker is right on the very first paint, then a
-  // network refresh. `done` fires once the cache has been consulted — the
-  // refresh keeps running after it and repaints on its own.
   function loadModelCatalog(done) {
     let finished = false;
     const finish = () => {
@@ -393,44 +377,27 @@
     try {
       chrome.storage.local.get([MODEL_CATALOG_KEY], (r) => {
         const cached = normalizeCatalog(r && r[MODEL_CATALOG_KEY]);
-        if (cached) applyCatalog(cached);
+        // A host response may arrive before this storage callback.
+        if (cached && !claudeCatalog.at) applyCatalog(cached);
         finish();
-        refreshModelCatalog();
       });
     } catch (_) {
       finish();
-      refreshModelCatalog();
     }
   }
 
-  function refreshModelCatalog() {
-    let ctl = null;
-    let timer = null;
-    try {
-      ctl = new AbortController();
-      timer = setTimeout(() => ctl.abort(), MODEL_CATALOG_TIMEOUT_MS);
-    } catch (_) {}
-    // cache: "no-store" so a stale CDN copy in the HTTP cache can't outlive an
-    // edit — raw.githubusercontent already fronts the file with its own ~5min
-    // edge cache, and stacking a second layer on top would double the lag.
-    fetch(MODEL_CATALOG_URL, { cache: "no-store", signal: ctl ? ctl.signal : undefined })
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error("HTTP " + res.status))))
-      .then((raw) => {
-        const cat = normalizeCatalog(raw);
-        if (!cat) throw new Error("malformed catalog");
-        applyCatalog(cat);
-        try {
-          chrome.storage.local.set({ [MODEL_CATALOG_KEY]: raw });
-        } catch (_) {}
-      })
-      .catch(() => {
-        // Offline, rate-limited, or a bad edit landed in main — keep whatever
-        // is already in place (cache or built-in fallback) and try again next
-        // time the panel starts.
-      })
-      .finally(() => {
-        if (timer) clearTimeout(timer);
-      });
+  function receiveClaudeModels(msg) {
+    clearTimeout(claudeCatalog.timer);
+    const cat = msg.type === "models" ? normalizeCatalog(msg) : null;
+    Object.assign(claudeCatalog, { fetching: false, timer: null, error: "" });
+    if (cat) {
+      claudeCatalog.at = Date.now();
+      applyCatalog(cat);
+      try { chrome.storage.local.set({ [MODEL_CATALOG_KEY]: msg }); } catch (_) {}
+    } else {
+      claudeCatalog.error = msg.error || "Couldn’t refresh Claude Code models. Try again.";
+      if (els.modelMenu && menuIsOpen(els.modelMenu)) renderModelMenu();
+    }
   }
 
   // Account-wide plan usage (5-hour + weekly windows), shared across every tab
@@ -479,7 +446,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 35;
+  const EXPECTED_HOST_VERSION = 36;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -5968,6 +5935,7 @@
           }, HOST_UPDATE_GRACE_MS);
           break;
         }
+        if (harnessReady.claude) refreshClaudeModels();
         finishAgentCheck();
         break;
       case "interrupted":
@@ -6115,8 +6083,9 @@
           finishAgentCheck();
         }
         break;
-      // Codex publishes its own model list; this is where the picker learns it.
+      // Each CLI publishes its own model list.
       case "models":
+        if (msg.agent === "claude") { receiveClaudeModels(msg); break; }
         if (msg.agent === "codex" && Array.isArray(msg.models)) {
           clearTimeout(codexCatalog.timer);
           Object.assign(codexCatalog, { at: Date.now(), fetching: false, error: "", timer: null });
@@ -6142,6 +6111,7 @@
         }
         break;
       case "modelsError":
+        if (msg.agent === "claude") { receiveClaudeModels(msg); break; }
         if (msg.agent === "codex") {
           clearTimeout(codexCatalog.timer);
           Object.assign(codexCatalog, { fetching: false, error: msg.error || "Couldn’t refresh models. Try again.", timer: null });
@@ -7794,14 +7764,15 @@
     const focusedId = document.activeElement?.dataset?.modelId;
     const focusRefresh = document.activeElement?.classList.contains("model-refresh");
     menu.innerHTML = "";
-    menu.classList.toggle("model-menu-catalog", agent === "codex");
+    const catalog = agent === "codex" ? codexCatalog : claudeCatalog;
+    menu.classList.toggle("model-menu-catalog", true);
     const header = el("div", "model-head", title);
     menu.appendChild(header);
-    if (agent === "codex") {
-      const refresh = el("button", "model-refresh", codexCatalog.fetching ? "Refreshing…" : "Refresh");
+    {
+      const refresh = el("button", "model-refresh", catalog.fetching ? "Refreshing…" : "Refresh");
       refresh.type = "button";
-      refresh.disabled = codexCatalog.fetching;
-      refresh.addEventListener("click", () => refreshCodexModels());
+      refresh.disabled = catalog.fetching;
+      refresh.addEventListener("click", () => agent === "codex" ? refreshCodexModels() : refreshClaudeModels());
       header.appendChild(refresh);
     }
     const list = el("div", "model-list");
@@ -7838,8 +7809,8 @@
         list.appendChild(row);
       }
     }
-    if (agent === "codex" && codexCatalog.error) {
-      const error = el("div", "model-catalog-error", codexCatalog.error);
+    if (catalog.error) {
+      const error = el("div", "model-catalog-error", catalog.error);
       error.setAttribute("role", "status");
       menu.appendChild(error);
     }
@@ -7851,19 +7822,25 @@
     }
   }
 
-  function refreshCodexModels() {
-    if (codexCatalog.fetching) return;
-    codexCatalog.fetching = true;
-    codexCatalog.error = "";
-    codexCatalog.timer = setTimeout(() => {
-      codexCatalog.fetching = false;
-      codexCatalog.timer = null;
-      codexCatalog.error = "Refresh timed out. Update the local helper and try again.";
+  function refreshCodexModels() { refreshAgentModels("codex"); }
+  function refreshClaudeModels() { refreshAgentModels("claude"); }
+  function refreshAgentModels(agent) {
+    const catalog = agent === "codex" ? codexCatalog : claudeCatalog;
+    if (catalog.fetching) return;
+    catalog.fetching = true;
+    catalog.error = "";
+    catalog.timer = setTimeout(() => {
+      catalog.fetching = false;
+      catalog.timer = null;
+      catalog.error = "Refresh timed out. Update the local helper and try again.";
       if (menuIsOpen(els.modelMenu)) renderModelMenu();
     }, 45000);
-    if (!post({ type: "refreshModels", agent: "codex" })) {
-      clearTimeout(codexCatalog.timer);
-      Object.assign(codexCatalog, { fetching: false, timer: null, error: "Connect to ChatGPT to refresh models." });
+    const chat = chats.get(activeId);
+    const cwd = agent === "claude" && chat?.harness === "claude" ? chat.cwd : undefined;
+    if (!post({ type: "refreshModels", agent, ...(cwd ? { cwd } : {}) })) {
+      clearTimeout(catalog.timer);
+      Object.assign(catalog, { fetching: false, timer: null,
+        error: agent === "codex" ? "Connect to ChatGPT to refresh models." : "Connect to Claude Code to refresh models." });
     }
     if (menuIsOpen(els.modelMenu)) renderModelMenu();
   }
@@ -7872,6 +7849,7 @@
     if (menuIsOpen(els.modelMenu)) return hideModelMenu();
     const chat = chats.get(activeId);
     if (chat?.harness === "codex" && Date.now() - codexCatalog.at > 300000) refreshCodexModels();
+    if (chat?.harness === "claude") refreshClaudeModels();
     renderModelMenu();
     openMenu(els.modelMenu);
   }
@@ -9301,7 +9279,7 @@
     els.folder.classList.toggle("needs-folder", !chat.cwd);
     syncHarness(chat);
     const modelList = modelsFor(chat.harness);
-    const model = modelList.find((m) => m.id === chat.model) || modelList[0];
+    const model = modelList.find((m) => m.id === chat.model) || { label: chat.model || "Default" };
     els.modelBtn.querySelector(".model-label").textContent = model.label;
     const efforts = effortsFor(chat);
     const effort = efforts.find((e) => e.id === chat.effort) || efforts.find((e) => e.id === defaultEffortFor(chat)) || efforts[0];
@@ -11245,7 +11223,7 @@
           <span class="composer-spacer"></span>
           <div class="model-picker">
             <button id="model-btn" class="model-btn" title="Model">
-              <span class="model-label">Opus 4.8</span>
+              <span class="model-label">Default</span>
             </button>
             <div id="model-menu" class="model-menu pop hidden"></div>
           </div>

@@ -28,6 +28,7 @@ function setup() {
   const menu = el('div'), chat = { model: 'gpt-5.5', harness: 'codex' };
   const scope = { document, el, Date, CODEX_DEFAULT_MODEL: 'gpt-6-astra', DEFAULT_HARNESS: 'codex',
     codexCatalog: { at: 0, fetching: false, error: '', timer: null },
+    claudeCatalog: { at: 0, fetching: false, error: '', timer: null },
     ICON: name => name, HARNESS_ICON: name => name, window: { RKClaudeHTML: () => 'claude' },
     chats: new Map([['chat', chat]]), activeId: 'chat', els: { modelMenu: menu },
     closeMenu: () => {}, menuIsOpen: () => true, openMenu: () => {}, anchorPopover: () => {},
@@ -117,4 +118,94 @@ test('receiving a refreshed catalog retains a chat selection and all live metada
   assert.equal(scope.CODEX_MODELS, catalog);
   assert.equal(chat.model, 'gpt-5.5');
   assert.equal(scope.codexCatalog.error, 'offline');
+});
+
+
+test('Claude picker refreshes on open, keeps selection and sends the project folder', () => {
+  const { scope, menu, chat, requests } = setup();
+  Object.assign(chat, { harness: 'claude', model: 'claude-opus-5', cwd: '/project' });
+  scope.menuIsOpen = () => false;
+  scope.toggleModelMenu();
+  scope.refreshClaudeModels();
+  assert.equal(requests.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(requests[0])), { type: 'refreshModels', agent: 'claude', cwd: '/project' });
+  assert.equal(chat.model, 'claude-opus-5');
+  assert.equal(menu.querySelectorAll('button').find(n => n.classList.contains('model-refresh')).disabled, true);
+  scope.claudeCatalog.fetching = false;
+  scope.toggleModelMenu();
+  assert.equal(requests.length, 2);
+});
+
+test('Claude refresh shows connection and timeout errors and allows retry', () => {
+  const { scope, timers, chat } = setup();
+  chat.harness = 'claude';
+  scope.post = () => false;
+  scope.refreshClaudeModels();
+  assert.match(scope.claudeCatalog.error, /Connect to Claude Code/);
+  assert.equal(scope.claudeCatalog.fetching, false);
+  assert.equal(timers.size, 0);
+  scope.post = () => true;
+  scope.refreshClaudeModels();
+  [...timers][0]();
+  assert.match(scope.claudeCatalog.error, /timed out/);
+  scope.refreshClaudeModels();
+  assert.equal(scope.claudeCatalog.fetching, true);
+});
+
+function claudeCatalogSetup() {
+  const result = setup(), { scope } = result;
+  const storage = {}, callbacks = [];
+  Object.assign(scope, {
+    DEFAULT_MODEL_FALLBACK: 'default', DEFAULT_CONTEXT_LIMIT_FALLBACK: 200000,
+    CONTEXT_LIMITS_FALLBACK: { 'claude-sonnet-5': 1000000 }, canonicalModel: id => id,
+    MODELS: [{ id: 'default', label: 'Default' }], CONTEXT_LIMITS: {}, DEFAULT_MODEL: 'default',
+    mounted: false, chrome: { storage: { local: {
+      get(keys, cb) { callbacks.push(cb); }, set(values) { Object.assign(storage, values); },
+    } } },
+  });
+  const catalogCode = source.slice(source.indexOf('  // ---- Claude Code model catalog'), source.indexOf('  // Account-wide plan usage'));
+  vm.runInContext(catalogCode, scope);
+  const receive = source.slice(source.indexOf('      case "models":'), source.indexOf('      // Codex\'s plan limits'));
+  vm.runInContext('function receive(msg) { switch (msg.type) { ' + receive + ' } }', scope);
+  return { ...result, storage, callbacks };
+}
+const claudeRows = [
+  { id: 'default', label: 'Default (recommended)', resolvedModel: 'claude-opus-new[1m]', contextLimit: 1000000 },
+  { id: 'sonnet', label: 'Sonnet', resolvedModel: 'claude-sonnet-5', description: 'From the CLI' },
+  { id: 'future[1m]', label: 'Future model', contextLimit: 1000000 },
+];
+
+test('CLI catalog replaces fallback, persists new models and leaves saved chat models unchanged', () => {
+  const { scope, storage, chat } = claudeCatalogSetup();
+  Object.assign(chat, { harness: 'claude', model: 'claude-retired-model' });
+  scope.refreshClaudeModels();
+  scope.receive({ type: 'models', agent: 'claude', models: claudeRows, defaultModel: 'default' });
+  assert.deepEqual(Array.from(scope.MODELS, m => m.id), ['default', 'sonnet', 'future[1m]']);
+  assert.equal(scope.MODELS[1].description, 'From the CLI');
+  assert.equal(scope.CONTEXT_LIMITS.sonnet, 1000000);
+  assert.equal(scope.CONTEXT_LIMITS.default, 1000000);
+  assert.equal(scope.DEFAULT_MODEL, 'default');
+  assert.equal(chat.model, 'claude-retired-model');
+  assert.equal(scope.claudeCatalog.fetching, false);
+  assert.ok(storage.rkClaudeModelCatalog);
+  const catalog = scope.MODELS;
+  scope.receive({ type: 'modelsError', agent: 'claude', error: 'offline' });
+  assert.equal(scope.MODELS, catalog);
+  assert.equal(scope.claudeCatalog.error, 'offline');
+  scope.receive({ type: 'models', agent: 'claude', models: [{ id: '', label: 'invalid' }] });
+  assert.equal(scope.MODELS, catalog);
+});
+
+test('late storage reads cannot overwrite live CLI models, while offline cache still works', () => {
+  const { scope, callbacks } = claudeCatalogSetup();
+  let done = 0;
+  scope.loadModelCatalog(() => done++);
+  const cache = { rkClaudeModelCatalog: { models: [{ id: 'cached', label: 'Cached' }] } };
+  callbacks.shift()(cache);
+  assert.equal(scope.MODELS[0].id, 'cached');
+  scope.loadModelCatalog(() => done++);
+  scope.receiveClaudeModels({ type: 'models', agent: 'claude', models: claudeRows });
+  callbacks.shift()(cache);
+  assert.equal(scope.MODELS[0].id, 'default');
+  assert.equal(done, 2);
 });
