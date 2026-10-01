@@ -233,7 +233,8 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v27: the OpenAI host sends only supported model effort levels.
 // v28: paged ChatGPT history and lossless history message chunks.
 // v34: Codex turn ids let the worker restore a running panel without duplicate history.
-const HOST_VERSION = 35;
+// v36: live Claude Code model catalog via the initialize control request.
+const HOST_VERSION = 36;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -1174,6 +1175,72 @@ function spawnClaude(args, opts) {
     return new DetachedClaude(CLAUDE_SPEC.cmd, argv, opts);
   }
   return spawn(CLAUDE_SPEC.cmd, argv, { cwd: opts.cwd, env: opts.env, stdio: ["pipe", "pipe", "pipe"] });
+}
+
+// ---- model discovery --------------------------------------------------------
+// initialize returns the CLI's model picker without a user turn or API call.
+let modelProbe = null;
+function normalizeClaudeModels(payload) {
+  const models = [];
+  const seen = new Set();
+  for (const row of Array.isArray(payload?.models) ? payload.models : []) {
+    if (typeof row?.value !== "string" || typeof row.displayName !== "string") continue;
+    const id = row.value.trim(), label = row.displayName.trim();
+    if (!id || !label || seen.has(id)) continue;
+    seen.add(id);
+    const resolvedModel = typeof row.resolvedModel === "string" ? row.resolvedModel : "";
+    const contextLimit = /\[1m\]$/i.test(id) || /\[1m\]$/i.test(resolvedModel) ? 1000000 : undefined;
+    models.push({ id, label, resolvedModel,
+      description: typeof row.description === "string" ? row.description : "",
+      ...(contextLimit ? { contextLimit } : {}) });
+  }
+  if (!models.length) return null;
+  return { type: "models", agent: "claude", models,
+    defaultModel: models.some((m) => m.id === "default") ? "default" : models[0].id };
+}
+
+function refreshModels(cwd) {
+  if (modelProbe) return;
+  let proc;
+  try {
+    proc = spawnClaude([
+      "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+      "--no-session-persistence", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+      "--settings", '{"disableAllHooks":true}',
+    ], { cwd: cwd || homedir(), env: CHILD_ENV });
+  } catch (_) {
+    send({ type: "modelsError", agent: "claude", error: "Couldn’t start Claude Code to load models." });
+    return;
+  }
+  let done = false;
+  const finish = (message) => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    modelProbe = null;
+    try { proc.kill("SIGKILL"); } catch (_) {}
+    if (message) send(message);
+  };
+  const fail = (error) => finish({ type: "modelsError", agent: "claude", error });
+  const timer = setTimeout(() => fail("Claude Code model refresh timed out. Try again."), 35000);
+  modelProbe = { cancel: () => finish() };
+  proc.stderr.resume();
+  const feed = lineJsonReader((obj) => {
+    if (done || obj.type !== "control_response" || obj.response?.request_id !== "model-catalog") return;
+    const catalog = obj.response.subtype === "success" && normalizeClaudeModels(obj.response.response);
+    if (catalog) finish(catalog);
+    else fail("Claude Code did not return a model list. Update Claude Code and try again.");
+  });
+  proc.stdout.on("data", (chunk) => feed(chunk.toString("utf8")));
+  proc.on("error", () => fail("Couldn’t start Claude Code to load models."));
+  proc.on("exit", () => fail("Claude Code stopped before returning its model list. Try again."));
+  proc.stdin.on("error", () => fail("Couldn’t request the Claude Code model list. Try again."));
+  try {
+    proc.stdin.write(JSON.stringify({ type: "control_request", request_id: "model-catalog",
+      request: { subtype: "initialize" } }) + "\n");
+  } catch (_) {
+    fail("Couldn’t request the Claude Code model list. Try again.");
+  }
 }
 
 // ---- claude process management (multi-session) ------------------------------
@@ -2727,11 +2794,14 @@ function handle(msg) {
   const id = msg.id || "default";
   // Shared folder/file/shell operations still belong here for either agent.
   // Agent operations must never fall through to Claude on a legacy install.
-  if (msg.agent && msg.agent !== "claude" && ["start", "restartSession", "prompt", "prewarm", "loadTranscript", "rewind", "interrupt", "permissionResult"].includes(msg.type)) {
+  if (msg.agent && msg.agent !== "claude" && ["start", "restartSession", "prompt", "prewarm", "loadTranscript", "rewind", "interrupt", "permissionResult", "refreshModels"].includes(msg.type)) {
     send({ type: "error", id, code: "AGENT_ROUTING_REQUIRED", message: "Update the local helper to connect ChatGPT to the right agent." });
     return;
   }
   switch (msg.type) {
+    case "refreshModels":
+      refreshModels(msg.cwd);
+      break;
     case "listSkills":
       ensureCommands(id, msg.cwd);
       break;
@@ -2866,6 +2936,7 @@ function handle(msg) {
 }
 
 function shutdown(code) {
+  modelProbe?.cancel();
   killAll();
   process.exit(code);
 }
