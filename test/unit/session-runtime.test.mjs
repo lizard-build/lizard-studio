@@ -468,3 +468,49 @@ test("a hidden deferred chat completes and drains its queue without rendering it
   assert.equal(snapshot.running, true);
   assert.equal(snapshot.queue.length, 0);
 });
+
+test("Claude history goes only to the view that asked, never into the live view", () => {
+  // A side panel and a Studio tab in one window share a worker runtime.
+  const r = runtime(), live = r.panel(1), opened = r.panel(1);
+  live.emit({ type: "start", id: "a", agent: "claude", cwd: "/project" });
+  live.emit({ type: "prompt", id: "a", agent: "claude", text: "Hello" });
+  opened.emit({ type: "loadTranscript", id: "a", sessionId: "s", cwd: "/project" });
+  const read = r.native[0].sent.find((m) => m.type === "loadTranscript");
+  assert.ok(read.requestId, "the read is tagged so its reply can be routed");
+  const before = live.sent.length;
+  r.native[0].emit({ type: "transcript", id: "a", requestId: read.requestId, events: [{ type: "user", message: { content: "Hello" } }], done: false });
+  r.native[0].emit({ type: "transcript", id: "a", requestId: read.requestId, events: [], done: true });
+  assert.equal(live.sent.length, before, "the live view must not paint the history a second time");
+  assert.equal(opened.sent.filter((m) => m.type === "sharedEvent" && m.message.type === "transcript").length, 2);
+});
+
+test("an idle Claude chat open in two views loads its history only where it was asked", () => {
+  const r = runtime(), first = r.panel(1), second = r.panel(1);
+  first.emit({ type: "loadTranscript", id: "idle", sessionId: "s", cwd: "/project" });
+  second.emit({ type: "loadTranscript", id: "idle", sessionId: "s", cwd: "/project" });
+  const [a, b] = r.native[0].sent.filter((m) => m.type === "loadTranscript");
+  assert.notEqual(a.requestId, b.requestId);
+  r.native[0].emit({ type: "transcript", id: "idle", requestId: b.requestId, events: [], done: true });
+  r.native[0].emit({ type: "transcript", id: "idle", requestId: a.requestId, events: [], done: true });
+  assert.deepEqual(first.sent.filter((m) => m.type === "transcript").map((m) => m.requestId), [a.requestId]);
+  assert.deepEqual(second.sent.filter((m) => m.type === "transcript").map((m) => m.requestId), [b.requestId]);
+});
+
+test("a Claude queue reaches every view but only a view sends it", async () => {
+  const r = runtime(), live = r.panel(1), mirror = r.panel(2);
+  live.emit({ type: "start", id: "a", agent: "claude", cwd: "/project" });
+  live.emit({ type: "prompt", id: "a", agent: "claude", text: "Hello" });
+  r.native[0].emit({ type: "event", id: "a", data: { type: "system", subtype: "init", session_id: "claude-a" } });
+  live.emit({ type: "backgroundQueue", id: "a", agent: "claude", entries: [{ ui: { text: "Next" },
+    message: { type: "prompt", agent: "claude", id: "a", text: "Next" } }] });
+  assert.equal(mirror.sent.at(-1).type, "sharedQueue");
+  assert.equal(mirror.sent.at(-1).entries[0].text, "Next");
+  const opened = r.panel(3);
+  assert.equal(opened.sent[0].sessions[0].queue[0].text, "Next");
+  live.disconnect(); mirror.disconnect(); opened.disconnect();
+  r.native[0].emit(result("a")); await r.settle();
+  assert.equal(r.native[0].sent.filter((m) => m.text === "Next").length, 0, "the worker never sends a Claude prompt itself");
+  assert.equal(r.counts.at(-1), 0, "a waiting Claude queue is not shown as running work");
+  assert.equal(r.native[0].closed, true, "a waiting Claude queue does not hold the host open");
+  assert.equal(r.storage.rkChatV2.tabs.find((t) => t.id === "a").queue[0].text, "Next", "the queue is saved for the next view");
+});

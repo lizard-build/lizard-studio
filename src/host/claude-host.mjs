@@ -35,7 +35,7 @@
 //                                                                 the panel defers sending this until any
 //                                                                 in-flight turn finishes, so it never
 //                                                                 hard-kills a reply that's still streaming)
-//   { type:"loadTranscript", id, sessionId, cwd }                  replay a past session's messages
+//   { type:"loadTranscript", id, sessionId, cwd, requestId }       replay a past session's messages
 //   { type:"rewind", id, turnIndex }                                truncate the transcript back to
 //                                                                 just before the turnIndex-th human
 //                                                                 turn, then kill + resume the session
@@ -86,7 +86,7 @@
 //     files: [{ path, status: "added"|"modified"|"deleted", binary, insertions, deletions, diff }]
 //     `diff` is the unified-diff body (from the first `@@` hunk marker on) with
 //     effectively unlimited context, so the panel can unfold it client-side.
-//   { type:"transcript", id, events, done }                    a chunk of replayed past messages
+//   { type:"transcript", id, requestId, events, done }         a chunk of replayed past messages
 //   { type:"browser", bid, op, args }                          ask the panel to inspect the live tab
 //   { type:"permission", id, requestId, toolName, input,       claude wants to use a tool — ask the user
 //     suggestions }                                            (answered with `permissionResult`)
@@ -234,7 +234,8 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v28: paged ChatGPT history and lossless history message chunks.
 // v34: Codex turn ids let the worker restore a running panel without duplicate history.
 // v36: live Claude Code model catalog via the initialize control request.
-const HOST_VERSION = 36;
+// v37: Claude history chunks echo the request id, so only the asking view renders them.
+const HOST_VERSION = 37;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -2495,10 +2496,10 @@ function hasMessages(lines) {
   return false;
 }
 
-function loadTranscript(id, sessionId, cwd) {
+function loadTranscript(id, sessionId, cwd, requestId) {
   const file = findTranscript(sessionId, cwd);
   if (!file) {
-    send({ type: "transcript", id, events: [], done: true, missing: true });
+    send({ type: "transcript", id, requestId, events: [], done: true, missing: true });
     return;
   }
   // Streamed line-by-line — transcripts can reach tens of MB, and a
@@ -2509,7 +2510,7 @@ function loadTranscript(id, sessionId, cwd) {
   let failed = false;
   const flush = (done) => {
     if (!batch.length && !done) return;
-    send({ type: "transcript", id, events: batch, done });
+    send({ type: "transcript", id, requestId, events: batch, done });
     batch = [];
     size = 0;
   };
@@ -2518,7 +2519,7 @@ function loadTranscript(id, sessionId, cwd) {
   stream.on("error", (err) => {
     log("transcript read failed", err.message);
     failed = true;
-    send({ type: "transcript", id, events: [], done: true });
+    send({ type: "transcript", id, requestId, events: [], done: true });
     rl.close();
   });
   rl.on("line", (line) => {
@@ -2850,7 +2851,7 @@ function handle(msg) {
       break;
     }
     case "loadTranscript":
-      loadTranscript(id, msg.sessionId, msg.cwd);
+      loadTranscript(id, msg.sessionId, msg.cwd, msg.requestId);
       break;
     case "rewind":
       rewindSession(id, msg.turnIndex, msg.text, msg.images);

@@ -440,7 +440,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 36;
+  const EXPECTED_HOST_VERSION = 37;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -1396,20 +1396,20 @@
     if (!connected || backgroundRestoring || sharedRendering || applyingSharedPrefs) return;
     for (const chat of chats.values()) {
       if (chat.sessionObserver) continue;
-      if (chat.harness !== "codex") continue;
+      const agent = chat.harness || DEFAULT_HARNESS;
       const entries = (chat.queue || []).map((entry) => {
         entry.backgroundId ||= newId();
         const { text, contexts, attachments, silent, steerFailed, backgroundId } = entry;
         const extra = formatContexts({ contexts: contexts || [] });
         return { ui: { text, contexts, attachments, silent, steerFailed, backgroundId },
           held: !!(entry.editing || entry.steering || entry.steerFailed || chat.sessionFailure),
-          message: { type: "prompt", agent: "codex", id: chat.id,
+          message: { type: "prompt", agent, id: chat.id,
             text: (extra ? CTX_MARK_START + extra + CTX_MARK_END : "") + (text || ""),
             images: (attachments || []).map((a) => ({ mediaType: a.mediaType, data: a.dataUrl.split(",")[1] || "" })) } };
       });
       const key = JSON.stringify(entries);
       if (chat.backgroundQueueKey === key) continue;
-      if (post({ type: "backgroundQueue", id: chat.id, agent: "codex", entries })) chat.backgroundQueueKey = key;
+      if (post({ type: "backgroundQueue", id: chat.id, agent, entries })) chat.backgroundQueueKey = key;
     }
   }
   // Retargets the dot classes on the existing tab nodes. Deliberately NOT a
@@ -2901,16 +2901,20 @@
     if (chat.id === activeId) { updateSetup(); syncBashMode(chat); setRunningUI(chat.turnRunning); }
   }
 
-  // True when `row` is still the last *content* in the transcript. Transient UI
-  // riding at the bottom — the running-status pill and pending permission asks —
-  // doesn't count: both are removed (or re-anchored below new content) as the
-  // stream grows, so they mustn't break assistant-message merging.
-  function isTranscriptTail(chat, row) {
+  // The last *content* in the transcript. UI riding at the bottom — the
+  // running-status pill, pending permission asks and queued messages — doesn't
+  // count: new content ends up above it as the stream grows (see append), so
+  // it mustn't break assistant-message merging.
+  function transcriptTail(chat) {
     let n = chat.messagesEl.lastElementChild;
-    while (n && (n === chat.statusEl || (n.classList && n.classList.contains("perm-card")))) {
+    while (n && (n === chat.statusEl || (n.classList && (n.classList.contains("perm-card") || n.classList.contains("queued"))))) {
       n = n.previousElementSibling;
     }
-    return n === row;
+    return n;
+  }
+
+  function isTranscriptTail(chat, row) {
+    return transcriptTail(chat) === row;
   }
 
   // A background bash/subagent finishing can silently resume the model with
@@ -2919,10 +2923,7 @@
   // fallback the resumed reply would always open a fresh row even though its
   // footered predecessor is still sitting at the transcript tail untouched.
   function lastTailAssistantBody(chat) {
-    let n = chat.messagesEl.lastElementChild;
-    while (n && (n === chat.statusEl || (n.classList && n.classList.contains("perm-card")))) {
-      n = n.previousElementSibling;
-    }
+    const n = transcriptTail(chat);
     return n && n.classList && n.classList.contains("msg-assistant") ? n.querySelector(":scope > .assistant-body") : null;
   }
 
@@ -6480,6 +6481,16 @@
     window.dispatchEvent(new Event("rk-chat-view"));
   }
 
+  // An image the user sent, back as a bubble thumbnail. The host cuts long
+  // strings in a message over Chrome's size cap; a cut image would only show
+  // a broken icon, so it is left out.
+  function replayImage(source) {
+    if (!source || source.type !== "base64" || typeof source.data !== "string" || !source.data) return null;
+    if (/\[truncated \d+ chars\]$/.test(source.data)) return null;
+    const mediaType = /^image\/[\w.+-]+$/.test(source.media_type || "") ? source.media_type : "image/png";
+    return { mediaType, dataUrl: `data:${mediaType};base64,${source.data}` };
+  }
+
   // Render a chunk of past messages (the host streams them in order across one or
   // more `transcript` events). Reuses the live renderers so history looks
   // identical to a fresh turn — user bubbles, assistant text/thinking, tool cards
@@ -6531,6 +6542,7 @@
           if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts, replayQuestionReply: true });
         } else if (Array.isArray(content)) {
           const texts = [];
+          const images = [];
           for (const b of content) {
             if (!b) continue;
             if (b.type === "tool_result") fillToolResult(chat, b.tool_use_id, b.content, b.is_error);
@@ -6540,12 +6552,19 @@
               scanBgNotice(chat, b.text);
               scanAgentNotice(chat, b.text);
               texts.push(b.text);
+            } else if (b.type === "image") {
+              const image = replayImage(b.source);
+              if (image) images.push(image);
             }
           }
           const joined = texts.join("\n\n");
           const stripped =
             commandBubbleText(joined) || joined.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
-          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts, replayQuestionReply: true });
+          // The host counts a turn for rewind only when it has a text block, so
+          // an image sent with no text gets a bubble but no turn index.
+          if (stripped ? !USAGE_CMD_RE.test(stripped) : images.length) {
+            userBubble(chat, stripped, images, texts.length ? { real: true, ts, replayQuestionReply: true } : null);
+          }
         }
       } else if (ev.type === "assistant") {
         // Each replayed assistant message refreshes the context reading; the
