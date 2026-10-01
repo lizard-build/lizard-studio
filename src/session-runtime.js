@@ -6,6 +6,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
   const runtimes = new Map();
   const deferredReplays = new WeakMap();
   const workerId = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+  let historyReadCount = 0;
   let diagnosticWrites = Promise.resolve();
   let keepAliveTimer = null;
   const KEEP_ALIVE_MS = 20000;
@@ -43,10 +44,14 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
   }
 
   const send = (port, message) => { try { port.postMessage(message); } catch (_) {} };
-  const busy = (s) => s.running || s.permissions.size > 0 || s.queue.length > 0 || s.pendingPrompts.size > 0;
-  const count = (r) => [...r.sessions.values()].filter((s) => (s.running || s.pendingPrompts.size > 0 || s.queue.length > 0 && !s.queue[0]?.held) && !s.permissions.size && !s.failed).length;
+  // The worker sends queued prompts only for Codex. A Claude queue is kept here
+  // so every view shows it, but the view that controls the chat sends it.
+  const drains = (s) => s.agent === "codex";
+  const waiting = (s) => drains(s) && s.queue.length > 0 && !s.queue[0]?.held;
+  const busy = (s) => s.running || s.permissions.size > 0 || drains(s) && s.queue.length > 0 || s.pendingPrompts.size > 0;
+  const count = (r) => [...r.sessions.values()].filter((s) => (s.running || s.pendingPrompts.size > 0 || waiting(s)) && !s.permissions.size && !s.failed).length;
   const activeWork = () => [...runtimes.values()].some(r => r.browserCalls || [...r.sessions.values()].some(
-    s => s.running || s.permissions.size || s.pendingPrompts.size || s.queue.length && !s.queue[0]?.held));
+    s => s.running || s.permissions.size || s.pendingPrompts.size || waiting(s)));
   const hasWork = () => [...runtimes.values()].some(r => r.pendingSelfUpdate || r.browserCalls || [...r.sessions.values()].some(busy));
   function flushSelfUpdates() {
     if (activeWork()) return;
@@ -138,7 +143,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     return s;
   }
   function drain(r, s) {
-    if (s.controller || s.running || s.pendingPrompts.size || s.permissions.size || s.failed || !s.queue.length || s.queue[0].held) return;
+    if (s.controller || s.running || s.pendingPrompts.size || s.permissions.size || s.failed || !waiting(s)) return;
     const entry = s.queue.shift();
     forward(r, entry.message);
   }
@@ -191,6 +196,13 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
       r.browser.handleBrowserOp(msg, (reply) => send(r.native, reply)).finally(() => {
         --r.browserCalls; update(); releaseIfIdle(r);
       });
+      return;
+    }
+    if (msg.type === "transcript" && r.historyReads.has(msg.requestId)) {
+      const origin = r.historyReads.get(msg.requestId);
+      if (msg.done) r.historyReads.delete(msg.requestId);
+      const s = r.sessions.get(msg.id);
+      send(origin, s && origin !== s.controller ? { type: "sharedEvent", message: msg } : msg);
       return;
     }
     if (["ready", "agentReady", "models", "planUsage"].includes(msg.type)) r.ready.set(msg.type + (msg.agent || ""), msg);
@@ -261,7 +273,7 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
   function create(windowId) {
     const r = { windowId, panels: new Set(), sessions: new Map(), ready: new Map(), pendingSelfUpdate: null,
       restored: false, fromDaemon: false, waitingPanels: new Map(), pendingMessages: [], restoreTimer: null,
-      saving: Promise.resolve(), idleTimer: null, browserCalls: 0 };
+      saving: Promise.resolve(), idleTimer: null, browserCalls: 0, historyReads: new Map() };
     r.browser = createBrowser({ windowId });
     r.native = chrome.runtime.connectNative("com.lizard.code");
     runtimes.set(windowId, r);
@@ -388,6 +400,13 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
         msg = { ...msg, excludeTurnIds: msg.excludeTurnIds || [] };
       }
       if (msg.type === "close" || msg.type === "stop") r.sessions.delete(msg.id);
+    }
+    if (msg.type === "loadTranscript" && !msg.paged) {
+      // Claude sends a chat's whole history back. Any other view of that chat
+      // already shows it and would paint it a second time under the live
+      // turn, so tag the read and answer only the view that asked.
+      msg = { ...msg, requestId: "history-" + workerId + "-" + ++historyReadCount };
+      r.historyReads.set(msg.requestId, origin);
     }
     send(r.native, msg);
     if (s) for (const panel of panels()) if (deferredReplays.get(panel)?.has(s.id)) sendDeferredState(panel, s);
