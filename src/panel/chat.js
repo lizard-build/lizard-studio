@@ -400,14 +400,8 @@
     }
   }
 
-  // Account-wide plan usage (5-hour + weekly windows), shared across every tab
-  // since it tracks the account, not the conversation. Filled by a silent
-  // `/usage` probe (see refreshUsage) and read by the toolbar usage popover.
-  // `at` is when it was last refreshed; `fetching` guards against overlapping
-  // probes. A probe reuses a live, idle session — its events are swallowed by
-  // the chat.usageProbe gate in onClaudeEvent so nothing renders into the chat,
-  // with a content-matched backstop (usageEchoText) for a reply that arrives
-  // after the gate is released.
+  // Claude plan rows come only from commands the user sends. Never inject a
+  // usage prompt into a conversation to refresh the toolbar.
   const usageState = { rows: [], at: 0, fetching: false };
   // Codex hands its limits over the protocol rather than through a command, so
   // there is nothing to probe and nothing to parse — the host just tells us.
@@ -3029,9 +3023,14 @@
   // merely quotes one can't be mistaken for the report.
   const USAGE_PROSE_RE =
     /^(?:You are currently using |What.s contributing to your limits usage\?|Last \d+\s*[hd]\s*·\s*[\d,]+\s*requests\b)/i;
+  // Current CLI builds can return the /cost report for /usage in print mode.
+  // Require its heading and duration fields so ordinary cost prose stays visible.
+  function isUsageCostText(text) {
+    return /^Total cost:\s*\$[\d,.]+[^\n]*\nTotal duration \(API\):[^\n]*\nTotal duration \(wall\):/i.test(String(text || "").trim());
+  }
   function isUsageText(text) {
     const t = String(text || "").trim();
-    return !!t && (USAGE_PROSE_RE.test(t) || !!parseUsageText(t));
+    return !!t && (USAGE_PROSE_RE.test(t) || isUsageCostText(t) || !!parseUsageText(t));
   }
 
   // True when a persisted transcript chunk is nothing but a `/usage` reply —
@@ -3057,10 +3056,10 @@
     const parsed = parseUsageText(text);
     if (parsed) absorbUsageDump(text);
     if (!asked) return true;
-    if (parsed && body) {
+    if (body && (parsed || isUsageCostText(text))) {
       attachAssistantRow(chat, body);
       closeToolGroup(chat);
-      body.appendChild(buildUsageCard(parsed));
+      body.appendChild(parsed ? buildUsageCard(parsed) : R.markdown(text));
       if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
     } else if (chat.id === activeId) {
       showUsageMenu();
@@ -3100,56 +3099,17 @@
     return when.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric" });
   }
 
-  // ---- silent /usage probe --------------------------------------------------
-  // Runs a bare `/usage` in a live, idle session purely to refresh usageState.
-  // The session's events for it are intercepted by handleUsageProbe (via the
-  // chat.usageProbe gate) so nothing lands in the transcript and the turn UI
-  // never flips. `force` bypasses the throttle (used when the popover opens).
+  // Refresh through a separate protocol request only. Claude's /usage is a
+  // chat prompt: it persists in history and can return costs without limits.
   function refreshUsage(force) {
     const active = chats.get(activeId);
-    if (active && active.harness === "codex") {
-      if (!connected || codexUsage.fetching || customModel(active.model)) return;
-      if (!force && Date.now() - codexUsage.at < USAGE_THROTTLE_MS) return;
-      codexUsage.fetching = post({ type: "planUsage", agent: "codex", id: active.id });
-      return;
-    }
-    if (usageState.fetching) return;
-    if (!connected || !hostReady) return;
-    if (!force && Date.now() - usageState.at < USAGE_THROTTLE_MS) return;
-    // A session is probe-eligible only when it's live, fully idle — no turn
-    // running, no queued prompts waiting, not already probing — and running an
-    // agent that HAS a `/usage` command.
-    //
-    // This last part matters more than it looks. The probe is a real prompt.
-    // Send it to an agent that doesn't know the command and it doesn't fail
-    // quietly: it answers, in prose, in the user's chat, having spent their
-    // tokens to say it can't help. Codex reports its limits over the protocol
-    // instead (see planUsage), so it must never be picked here.
-    const idle = (c) =>
-      c && c.started && !c.turnRunning && !c.usageProbe && !(c.queue && c.queue.length)
-      && (c.harness || DEFAULT_HARNESS) === "claude";
-    // Prefer the active tab; otherwise any started, idle session will do.
-    let chat = chats.get(activeId);
-    if (!idle(chat)) {
-      chat = null;
-      for (const c of chats.values()) {
-        if (idle(c)) { chat = c; break; }
-      }
-    }
-    if (!chat) return;
-    chat.usageProbe = { buf: "" };
-    usageState.fetching = true;
-    if (!post({ type: "prompt", id: chat.id, text: "/usage" })) {
-      chat.usageProbe = null;
-      usageState.fetching = false;
-      return;
-    }
-    // Safety net: if no `result` comes back (e.g. the session died mid-probe),
-    // parse whatever we captured and release the gate so it can't wedge.
-    clearTimeout(usageProbeTimer);
-    usageProbeTimer = setTimeout(() => finishUsageProbe(chat), 8000);
+    if (!active || active.harness !== "codex") return;
+    if (!connected || codexUsage.fetching || customModel(active.model)) return;
+    if (!force && Date.now() - codexUsage.at < USAGE_THROTTLE_MS) return;
+    codexUsage.fetching = post({ type: "planUsage", agent: "codex", id: active.id });
   }
 
+  // Accept replies still in flight from an older panel.
   function collectUsageText(probe, d) {
     const push = (s) => { if (s) probe.buf += (probe.buf ? "\n" : "") + s; };
     const stdout = (s) => {
@@ -5145,8 +5105,7 @@
           requestBranches(chat);
           requestGitDiff(chat);
           savePrefs();
-          // First live, idle session — seed the plan-usage meter (throttled, so
-          // a burst of tab restarts doesn't fire a probe each).
+          // Refresh only agents that expose plan usage outside the chat.
           setTimeout(() => refreshUsage(), 400);
         } else if (d.subtype === "status" && d.status === "compacting") {
           // /compact runs a real summarization call with no assistant text or
@@ -5841,6 +5800,9 @@
       const chat = chats.get(event?.id);
       if (event?.type === "backgroundPrompt" && chat) {
         const text = String(event.text || "").replace(CTX_MARK_RE, "").trim();
+        // Old worker journals include the panel's automatic /usage prompts.
+        // Match transcript replay, which already hides bare usage commands.
+        if (chat.harness !== "codex" && /^\/(?:usage|usage-credits|extra-usage)\s*$/.test(text)) return;
         const attachments = (event.images || []).map((img) => ({ mediaType: img.mediaType,
           dataUrl: `data:${img.mediaType || "image/png"};base64,${img.data || ""}` }));
         userBubble(chat, text, attachments, { real: true, questionReplyId: event.questionReplyId, replayQuestionReply: true });
@@ -8316,7 +8278,7 @@
   // A ring in the composer toolbar, left of the effort picker, showing the
   // active chat's context fill. Clicking it opens a popover with the full
   // breakdown — context window plus the account's 5-hour / weekly plan windows
-  // (from usageState, kept current by the silent /usage probe).
+  // when the agent reports them.
   const USAGE_RING_R = 7;
   const USAGE_RING_C = 2 * Math.PI * USAGE_RING_R;
   function usageRingSVG(pct) {
@@ -8430,7 +8392,9 @@
       for (const row of planRows) {
         planSec.appendChild(usageMenuRow(onCodex ? row.label : normalizeUsageLabel(row.label), row.pct, row.pct + "%", onCodex ? (row.resetsAt ? describeReset(row.resetsAt) : "") : row.resets, false, true));
       }
-    } else if (onCodex && (codexUsage.at || codexUsage.error)) {
+    } else if (!onCodex) {
+      planSec.appendChild(el("div", "usage-menu-head", "Usage unavailable"));
+    } else if (codexUsage.at || codexUsage.error) {
       planSec.appendChild(el("div", "usage-menu-head", codexUsage.error || "Usage unavailable"));
     } else {
       // No data yet — skeletons that occupy the exact row geometry so nothing
