@@ -163,7 +163,7 @@ function claudeCatalogSetup() {
       get(keys, cb) { callbacks.push(cb); }, set(values) { Object.assign(storage, values); },
     } } },
   });
-  const catalogCode = source.slice(source.indexOf('  // ---- Claude Code model catalog'), source.indexOf('  // Account-wide plan usage'));
+  const catalogCode = source.slice(source.indexOf('  // ---- Claude Code model catalog'), source.indexOf('  const usageState'));
   vm.runInContext(catalogCode, scope);
   const receive = source.slice(source.indexOf('      case "models":'), source.indexOf('      // Codex\'s plan limits'));
   vm.runInContext('function receive(msg) { switch (msg.type) { ' + receive + ' } }', scope);
