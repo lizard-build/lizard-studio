@@ -48,7 +48,7 @@ const codexSpawner = createCodexSpawner({ hostDir: HOST_DIR, nodePath: process.e
 
 // Bumped on every change the panel needs to know about. Reported in
 // `agentReady`. Claude's own HOST_VERSION is separate and untouched.
-const CODEX_HOST_VERSION = 11;
+const CODEX_HOST_VERSION = 12;
 
 // The browser bridge numbers its requests from here so the router can tell our
 // `browserResult` replies from claude's by value alone, and never has to parse
@@ -686,6 +686,9 @@ function makeSession(id, cwd) {
     // is up, rather than being answered with "this session isn't running".
     opening: true,
     pending: [],
+    rewinding: false,
+    rewindStop: null,
+    discardedTurns: new Set(),
   };
 }
 
@@ -900,6 +903,15 @@ function sessionFor(params) {
 
 function handleNotification(method, params) {
   const s = sessionFor(params);
+  const eventTurnId = params?.turnId || params?.turn?.id;
+  if (s?.discardedTurns.has(eventTurnId)) return;
+  if (s?.rewinding) {
+    if (method === "turn/completed" && params.turn?.id === s.turnId) {
+      s.running = false;
+      s.rewindStop?.resolve();
+    }
+    return;
+  }
   if (s && s.running) touchTurn(s);
   if (TRACE && method !== "item/agentMessage/delta" && !method.startsWith("mcpServer/")) {
     const it = params && params.item;
@@ -1263,6 +1275,7 @@ function endTurnWith(s, isError, message) {
 
 function handleServerRequest(reqId, method, params) {
   const s = sessionFor(params);
+  if (s?.rewinding || s?.discardedTurns.has(params?.turnId)) { rpcReplyError(reqId, "turn is being edited"); return; }
   if (s) touchTurn(s);
   if (!s) {
     // No chat owns this thread — refuse rather than leave Codex waiting.
@@ -1715,7 +1728,8 @@ async function sendPrompt(msg) {
     return;
   }
 
-  const input = [];
+  if (s.rewinding) return;
+  const input = msg.rewindInput ? [...msg.rewindInput] : [];
   const text = String(msg.text || "");
   if (text) input.push({ type: "text", text });
   for (const img of msg.images || []) {
@@ -1755,6 +1769,7 @@ async function sendPrompt(msg) {
       ...turnProfile(s.mode),
     });
     s.turnId = (res && res.turn && res.turn.id) || null;
+    if (msg.messageId && s.turnId) send({ type: "promptAccepted", id: s.id, messageId: msg.messageId, turnId: s.turnId });
     s.running = true;
     touchTurn(s);
     acknowledge(true, undefined, true);
@@ -1813,6 +1828,7 @@ function closeSession(id, opts) {
   const s = sessions.get(id);
   if (!s) return;
   rejectPendingPrompts(s, "This session was closed before your message was sent.");
+  s.rewindStop?.reject(new Error("The chat was closed."));
   cancelBrowserWorkflows(s.browserSession);
   if (s.silenceTimer) clearTimeout(s.silenceTimer);
   for (const reqId of s.asks.keys()) {
@@ -1828,6 +1844,108 @@ function closeSession(id, opts) {
   }
   sessions.delete(id);
   if (!opts || !opts.quiet) send({ type: "exit", id, code: 0 });
+}
+
+// Stop before changing stored history. An interrupt reply alone does not mean
+// the turn has finished writing its last items.
+async function stopForRewind(s) {
+  if (!s.running) return;
+  if (!s.turnId) throw new Error("Wait for ChatGPT to start, then try again.");
+  let timer;
+  const stopped = new Promise((resolve, reject) => {
+    s.rewindStop = { resolve, reject };
+    timer = setTimeout(() => reject(new Error("Couldn't confirm that ChatGPT stopped. Try again once it finishes.")), 20000);
+  });
+  try {
+    await Promise.all([rpc("turn/interrupt", { threadId: s.threadId, turnId: s.turnId }, 15000), stopped]);
+  } finally {
+    clearTimeout(timer);
+    s.rewindStop = null;
+  }
+}
+
+async function rewindSession(msg) {
+  const s = sessions.get(msg.id);
+  const reply = (extra) => send({ type: "rewindResult", id: msg.id, requestId: msg.requestId, ...extra });
+  if (!s?.threadId || s.opening || s.rewinding || !msg.turnId || typeof msg.text !== "string") {
+    reply({ ok: false, running: !!s?.running, error: "This chat isn't ready to edit. Wait for it to open, then try again." });
+    return;
+  }
+  s.rewinding = true;
+  if (s.silenceTimer) { clearTimeout(s.silenceTimer); s.silenceTimer = null; }
+  try {
+    cancelBrowserWorkflows(s.browserSession);
+    await stopForRewind(s);
+    if (sessions.get(s.id) !== s) throw new Error("The session changed. Reopen the chat before editing again.");
+    // Count from the end using stable turn IDs, including unloaded history.
+    // A panel's visible message index is not a Codex turn index.
+    let cursor = null, target, removed = [];
+    const cursors = new Set();
+    do {
+      const page = await transcriptPage({ sessionId: s.threadId, cursor });
+      for (const turn of page.turns.slice().reverse()) {
+        removed.push(turn.id);
+        if (turn.id === msg.turnId) { target = turn; break; }
+      }
+      if (target) break;
+      cursor = page.nextCursor;
+      const key = JSON.stringify(cursor);
+      if (cursor && cursors.has(key)) throw new Error("Couldn't read the chat history. Reopen the chat and try again.");
+      cursors.add(key);
+    } while (cursor);
+    if (!target) throw new Error("This message is no longer in the chat. Reopen the chat and try again.");
+    const users = (target.items || []).filter((item) => item.type === "userMessage");
+    const original = users[0];
+    if (!original || (msg.itemId && original.id !== msg.itemId)) {
+      throw new Error("Edit the first message in this turn to restart it.");
+    }
+    // Keep the original page/file context and attachments, also after reload.
+    const originalText = (original.content || []).filter((part) => part.type === "text").map((part) => part.text).join("\n");
+    const context = (originalText.match(/\u200b{3}[\s\S]*?\u200c{3}\n*/g) || []).join("");
+    const input = (original.content || []).filter((part) => part.type !== "text");
+    if (!msg.text.trim() && !input.length) throw new Error("Enter a message before sending.");
+    if (sessions.get(s.id) !== s) throw new Error("The session changed. Reopen the chat before editing again.");
+    const rollback = await rpc("thread/rollback", { threadId: s.threadId, numTurns: removed.length }, 60000);
+    if (sessions.get(s.id) !== s) throw new Error("The session changed. Reopen the chat before editing again.");
+    for (const id of removed) s.discardedTurns.add(id);
+    for (const reqId of s.asks.keys()) {
+      send({ type: "permissionCancel", id: s.id, requestId: reqId });
+      rpcReplyError(reqId, "turn was edited");
+    }
+    s.asks.clear();
+    s.openTools.clear();
+    s.execOut.clear();
+    s.streamMsgId = null;
+    s.streamText = "";
+    s.planToolId = null;
+    s.turnId = null;
+    s.usage = null;
+    s.running = false;
+    // The panel only removes old rows after the server confirms the rollback.
+    reply({ ok: true, previousTurnId: rollback?.thread?.turns?.at(-1)?.id || null });
+    s.rewinding = false;
+    await sendPrompt({ id: s.id, text: context + msg.text, rewindInput: input, messageId: msg.requestId });
+  } catch (err) {
+    reply({ ok: false, running: s.running, error: `Couldn't edit this message: ${err?.message || err}` });
+  } finally {
+    s.rewinding = false;
+    if (s.running) touchTurn(s);
+    else {
+      // A failed rollback can still follow a successful stop. Retire requests
+      // and stream state from that stopped turn before another prompt arrives.
+      for (const reqId of s.asks.keys()) {
+        send({ type: "permissionCancel", id: s.id, requestId: reqId });
+        rpcReplyError(reqId, "turn ended");
+      }
+      s.asks.clear();
+      s.openTools.clear();
+      s.execOut.clear();
+      s.streamMsgId = null;
+      s.streamText = "";
+      s.planToolId = null;
+      s.turnId = null;
+    }
+  }
 }
 
 async function restartSession(msg) {
@@ -1875,8 +1993,9 @@ async function transcriptPage(msg) {
   }
   const res = await rpc("thread/read", { threadId, includeTurns: true }, 60000);
   const turns = res?.thread?.turns || [];
-  const end = msg.cursor?.kind === "legacy" ? turns.findIndex((t) => t.id === msg.cursor.before) : turns.length;
-  if (end < 0) throw new Error("History changed. Reopen the chat to reload it.");
+  const boundary = msg.cursor?.kind === "legacy" ? turns.findIndex((t) => t.id === (msg.cursor.through || msg.cursor.before)) : turns.length;
+  if (boundary < 0) throw new Error("History changed. Reopen the chat to reload it.");
+  const end = msg.cursor?.through ? boundary + 1 : boundary;
   const start = Math.max(0, end - 5);
   return { turns: turns.slice(start, end), nextCursor: start > 0 ? { kind: "legacy", before: turns[start].id } : null };
 }
@@ -1913,7 +2032,7 @@ async function loadTranscript(msg) {
       if (Array.isArray(msg.excludeTurnIds) && msg.excludeTurnIds.includes(turn.id)) continue;
       for (const item of turn.items || []) {
         const replay = replayItem(s, item);
-        if (replay) events.push(...replay.map((event) => ({ ...event, historyItemId: item.id,
+        if (replay) events.push(...replay.map((event) => ({ ...event, historyItemId: item.id, historyTurnId: turn.id,
           timestamp: turn.startedAt ? new Date(turn.startedAt * 1000).toISOString() : undefined })));
       }
     }
@@ -1937,8 +2056,11 @@ function replayItem(s, item) {
   switch (item.type) {
     case "userMessage": {
       const text = (item.content || []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
-      if (!text) return null;
-      return [{ type: "user", message: { role: "user", content: [{ type: "text", text }] } }];
+      const hasAttachments = (item.content || []).some((part) => part.type !== "text");
+      if (!text && !hasAttachments) return null;
+      const attachments = (item.content || []).filter((part) => part.type === "image" && /^data:image\//.test(part.url || ""))
+        .map((part) => ({ dataUrl: part.url, mediaType: part.url.slice(5).split(";")[0] }));
+      return [{ type: "user", hasAttachments, attachments, message: { role: "user", content: [{ type: "text", text }] } }];
     }
     case "agentMessage":
       if (asyncQuestion(item)) return [asyncQuestion(item)];
@@ -1987,7 +2109,7 @@ function handle(msg) {
     case "listSkills":
       startAppServer().then(() => loadSkills({ id: msg.id, cwd: msg.cwd || homedir() })).catch((err) => send({ type: "commands", id: msg.id, agent: "codex", cwd: msg.cwd, list: [], skills: [], error: err.message }));
       break;
-    case "rewind": send({ type: "error", id: msg.id, message: "Editing past messages is not supported in ChatGPT chats." }); break;
+    case "rewind": rewindSession(msg); break;
     case "remoteControl": send({ type: "remoteControl", id: msg.id, ok: false, error: "Remote Control is only available in Claude Code chats." }); break;
     case "authCode": send({ type: "authDone", id: msg.id, ok: false, message: "Complete sign-in on the ChatGPT sign-in page." }); break;
     case "authLogin": startLogin(msg.id); break;

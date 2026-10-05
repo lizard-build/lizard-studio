@@ -85,6 +85,9 @@
   // would leave no way to find out it exists.
   const harnessReady = { claude: false, codex: false };
   const harnessChecked = { claude: false, codex: false };
+  // Installation and a live connection are separate. Keep the last confirmed
+  // installation across reconnects; a fresh panel starts with no assumptions.
+  const agentInstalled = { claude: null, codex: null };
 
   // Codex has three permission profiles where Claude has five modes. These are
   // the ids its host maps, so a remembered mode survives the round trip.
@@ -440,7 +443,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 37;
+  const EXPECTED_HOST_VERSION = 38;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -590,7 +593,7 @@
         if (Array.isArray(p.usageLabels) && p.usageLabels.length) usageLabels = p.usageLabels;
         if (Array.isArray(p.tabs) && p.tabs.length) {
           for (const t of p.tabs) {
-            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt, draft: t.draft, contexts: t.contexts, attachments: t.attachments, bashMode: t.bashMode, bookmarkColor: t.bookmarkColor, titleEdited: t.titleEdited });
+            const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt, draft: t.draft, contexts: t.contexts, attachments: t.attachments, bashMode: t.bashMode, bookmarkColor: t.bookmarkColor, titleEdited: t.titleEdited, closedQuestionIds: t.closedQuestionIds });
             chat.queue = Array.isArray(t.queue) ? t.queue : [];
             chats.set(chat.id, chat);
     let lastScrollTop = 0;
@@ -623,7 +626,7 @@
     if (owner && els.input) owner.draft = els.input.value;
     const tabs = order.map((id) => {
       const c = chats.get(id);
-      return { queue: (c.queue || []).map(({ text, contexts, attachments, silent, steerFailed, backgroundId }) => ({ text, contexts, attachments, silent, steerFailed, backgroundId })), id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: resumableSessionId(c), bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, contexts: c.contexts, attachments: c.attachments, bashMode: c.bashMode, bookmarkColor: c.bookmarkColor, titleEdited: c.titleEdited };
+      return { queue: (c.queue || []).map(({ text, contexts, attachments, silent, steerFailed, backgroundId }) => ({ text, contexts, attachments, silent, steerFailed, backgroundId })), id: c.id, title: c.title, cwd: c.cwd, harness: c.harness, model: c.model, effort: c.effort, mode: c.mode, sessionId: resumableSessionId(c), bashHistory: (c.bashHistory || []).slice(-40), lastActivityAt: c.lastActivityAt, draft: c.draft, contexts: c.contexts, attachments: c.attachments, bashMode: c.bashMode, bookmarkColor: c.bookmarkColor, titleEdited: c.titleEdited, closedQuestionIds: c.closedQuestionIds || [] };
     });
     return { tabs, activeId, history, lastCwd, soundOnDone, usageLabels, lastBy, lastHarness,
       lastModel: lastBy.claude.model, lastEffort: lastBy.claude.effort, lastMode: lastBy.claude.mode };
@@ -656,6 +659,13 @@
         }
         for (const key of ["title", "titleEdited", "bookmarkColor", "cwd", "harness", "model", "effort", "mode", "draft", "contexts", "attachments", "bashMode", "lastActivityAt"]) {
           if (saved[key] !== undefined) chat[key] = saved[key];
+        }
+        if (Array.isArray(saved.closedQuestionIds)) {
+          chat.closedQuestionIds = saved.closedQuestionIds;
+          for (const id of chat.closedQuestionIds) {
+            const question = chat.asyncQuestions?.get(id);
+            if (question && !question.readOnly) question.complete("Closed");
+          }
         }
         if (saved.sessionId && !chat.sessionId) { chat.sessionId = saved.sessionId; chat.codexHasSubmittedTurn = true; }
       }
@@ -900,6 +910,7 @@
       id: opts.id || newId(),
       title: opts.title || DEFAULT_TITLE,
       titleEdited: !!opts.titleEdited,
+      closedQuestionIds: Array.isArray(opts.closedQuestionIds) ? opts.closedQuestionIds.slice(-200) : [],
       bookmarkColor: BOOKMARK_COLORS.some((c) => c.id === opts.bookmarkColor) ? opts.bookmarkColor : null,
       cwd: opts.cwd || null,
       harness: opts.harness || lastHarness || DEFAULT_HARNESS,
@@ -2172,13 +2183,21 @@
         return entry.card;
       }
     }
+    // A new task supersedes earlier questions. Explicit answers only close
+    // their own card; older history pages must not close today's questions.
+    if (opts?.real && !opts.questionReplyId && !chat.historyPage) closeAsyncQuestions(chat);
     const row = el("div", "msg msg-user");
-    const bubble = buildBubble(text, attachments, opts && opts.contexts);
+    const bubble = buildBubble(text || (opts?.hasAttachments && !attachments?.length ? "_(attached file)_" : ""), attachments, opts && opts.contexts);
     row.appendChild(bubble);
     if (opts && opts.real && !chat.historyPage) {
       const turnIndex = ++chat.turnIndexCounter;
       row.dataset.turnIndex = String(turnIndex);
       if (chat.harness !== "codex") wireEditableBubble(chat, bubble, turnIndex, text, attachments);
+    }
+    if (opts?.real && chat.harness === "codex") {
+      row.dataset.messageId = opts.messageId || "";
+      row.codexEdit = { text, attachments, hasAttachments: opts.hasAttachments || !!attachments?.length, contexts: opts.contexts, turnId: opts.turnId, itemId: opts.itemId };
+      if (opts.turnId) wireCodexEdit(chat.historyOwner || chat, row);
     }
     append(chat, row);
     if (questionReply) {
@@ -2188,6 +2207,119 @@
       owner.asyncAnswerBubbles.add({ row, text, questionId: opts.questionReplyId });
     }
     return row;
+  }
+
+  function wireCodexEdit(chat, row) {
+    if (row.codexEditWired || !row.codexEdit?.turnId) return;
+    row.codexEditWired = true;
+    const button = el("button", "sent-edit");
+    button.type = "button";
+    button.title = "Edit message";
+    button.setAttribute("aria-label", "Edit message");
+    button.innerHTML = ICON("edit", 13);
+    button.addEventListener("click", () => beginCodexEdit(chat, row));
+    row.appendChild(button);
+    const bubble = row.querySelector(".bubble");
+    bubble.classList.add("editable");
+    bubble.addEventListener("click", (event) => {
+      if (event.target.closest("a, button, textarea") || String(window.getSelection() || "")) return;
+      beginCodexEdit(chat, row);
+    });
+  }
+
+  function acceptCodexPrompt(chat, msg) {
+    const row = [...chat.messagesEl.children].find((node) => node.dataset.messageId === msg.messageId);
+    if (!row?.codexEdit) return;
+    row.codexEdit.turnId = msg.turnId;
+    wireCodexEdit(chat, row);
+  }
+
+  function beginCodexEdit(chat, row) {
+    const bubble = row.querySelector(".bubble");
+    if (chat.rewindPending || bubble.classList.contains("editing")) return;
+    const edit = row.codexEdit;
+    if (!edit?.turnId) return;
+    const md = bubble.querySelector(".md");
+    const input = el("textarea", "msg-edit");
+    input.setAttribute("aria-label", "Edit message");
+    input.value = edit.text;
+    if (md) md.replaceWith(input); else bubble.appendChild(input);
+    bubble.classList.add("editing");
+    const note = el("div", "msg-edit-note", "Sending restarts the chat from here. Later messages are removed. File changes stay.");
+    const actions = el("div", "msg-edit-actions");
+    const cancel = el("button", "msg-edit-cancel", "Cancel");
+    const save = el("button", "msg-edit-save", "Save & send");
+    cancel.type = save.type = "button";
+    actions.append(cancel, save);
+    bubble.append(note, actions);
+    const resize = () => { input.style.height = "auto"; input.style.height = input.scrollHeight + "px"; };
+    input.addEventListener("input", resize);
+    const setPending = (pending) => {
+      input.disabled = cancel.disabled = save.disabled = pending;
+      save.textContent = pending ? "Restarting…" : "Save & send";
+    };
+    const revert = () => {
+      if (input.disabled) return;
+      input.replaceWith(R.markdown(edit.text));
+      note.remove(); actions.remove(); bubble.classList.remove("editing");
+    };
+    const submit = () => {
+      if (chat.rewindPending || input.disabled) return;
+      if (!input.value.trim() && !edit.hasAttachments) return;
+      const requestId = newId();
+      const pending = { requestId, row, text: input.value, edit, setPending };
+      chat.rewindPending = pending;
+      setPending(true);
+      if (!post({ type: "rewind", id: chat.id, requestId, turnId: edit.turnId, itemId: edit.itemId, text: input.value })) {
+        finishCodexEdit(chat, { requestId, ok: false, running: chat.turnRunning, error: "Host disconnected. Your edit was not sent." });
+      }
+    };
+    cancel.addEventListener("click", revert);
+    save.addEventListener("click", submit);
+    input.addEventListener("keydown", (event) => {
+      if (event.isComposing) return;
+      if (event.key === "Escape") { event.preventDefault(); revert(); }
+      if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); }
+    });
+    resize(); input.focus(); input.setSelectionRange(input.value.length, input.value.length);
+  }
+
+  function finishCodexEdit(chat, msg) {
+    const pending = chat.rewindPending;
+    if (!pending || pending.requestId !== msg.requestId) return;
+    chat.rewindPending = null;
+    if (!msg.ok) {
+      pending.setPending(false);
+      systemNote(chat, msg.error || "Couldn't edit this message. Try again.", "warn");
+      if (!msg.running && chat.turnRunning) {
+        // Keep queued prompts in place while the user corrects or retries an edit.
+        chat.rewindPending = pending;
+        endTurn(chat, null);
+        chat.rewindPending = null;
+      }
+      return;
+    }
+    if (chat.historyRequest) {
+      clearTimeout(chat.historyRequest.timer);
+      chat.historyRequest = null;
+    }
+    chat.historyError = false;
+    if (chat.historyCursor) {
+      // The old cursor may name a removed turn. Anchor it to retained history.
+      const rows = [...chat.messagesEl.children];
+      const earlier = rows.slice(0, rows.indexOf(pending.row)).find((row) => row.codexEdit?.turnId);
+      chat.historyCursor = earlier ? { kind: "legacy", before: earlier.codexEdit.turnId }
+        : msg.previousTurnId ? { kind: "legacy", through: msg.previousTurnId } : null;
+    }
+    historyNav(chat);
+    // Keep queued prompts, but remove their rows while the transcript is cut.
+    for (const entry of chat.queue || []) entry.el?.remove();
+    resendEdited(chat, pending.row.dataset.turnIndex, pending.text, pending.edit.attachments, pending);
+    for (const entry of chat.queue || []) entry.el = renderQueuedBubble(chat, entry);
+    chat.lastSentPrompt = { text: pending.text, attachments: (pending.edit.attachments || []).slice() };
+    chat.codexHasSubmittedTurn = true;
+    chat.ctxBase = 0; chat.ctxTokens = 0;
+    touchChat(chat); savePrefs();
   }
 
   // Click the message text to edit it in place. Committing (Enter) rewinds
@@ -2258,18 +2390,18 @@
   // sent right after would race that gap. So the host does the whole thing —
   // truncate, resume, write the edited prompt to the new process — as one
   // atomic step (see rewindSession in claude-host.mjs).
-  function resendEdited(chat, turnIndex, newText, attachments) {
-    if (chat.harness === "codex") return;
+  function resendEdited(chat, turnIndex, newText, attachments, confirmed) {
+    if (chat.harness === "codex" && !confirmed) return;
     const rows = Array.from(chat.messagesEl.children);
-    const startIdx = rows.findIndex((r) => r.dataset && r.dataset.turnIndex === String(turnIndex));
+    const startIdx = confirmed ? rows.indexOf(confirmed.row) : rows.findIndex((r) => r.dataset && r.dataset.turnIndex === String(turnIndex));
     if (startIdx === -1) return;
     const images = (attachments || []).map((a) => ({ mediaType: a.mediaType, data: (a.dataUrl.split(",")[1] || "") }));
-    if (!post({ type: "rewind", id: chat.id, turnIndex, text: newText, images })) {
+    if (!confirmed && !post({ type: "rewind", id: chat.id, turnIndex, text: newText, images })) {
       systemNote(chat, "Host disconnected — couldn't rewind. Nothing was changed.", "warn");
       return;
     }
     for (let i = rows.length - 1; i >= startIdx; i--) rows[i].remove();
-    chat.turnIndexCounter = turnIndex - 1;
+    if (!confirmed) chat.turnIndexCounter = turnIndex - 1;
     chat.currentAssistantId = null;
     chat.currentAssistantBody = null;
     // Kill any typewriter loops first — a live one would re-append the row
@@ -2292,7 +2424,7 @@
         chat.emittedToolIds.delete(toolUseId);
       }
     }
-    userBubble(chat, newText, attachments, { real: true });
+    userBubble(chat, newText, attachments, { real: true, messageId: confirmed?.requestId, contexts: confirmed?.edit.contexts, hasAttachments: confirmed?.edit.hasAttachments });
     chat.turnRunning = true;
     chat.unseen = false;
     updateTabDots();
@@ -4655,6 +4787,21 @@
     }
   }
 
+  function closeAsyncQuestions(chat, status = "No longer needed") {
+    let changed = false;
+    for (const entry of chat.asyncQuestions?.values() || []) {
+      if (entry.readOnly) continue;
+      rememberClosedQuestion(chat, entry.questionId);
+      entry.complete(status);
+      changed = true;
+    }
+    if (changed) savePrefs();
+  }
+
+  function rememberClosedQuestion(chat, questionId) {
+    chat.closedQuestionIds = [...new Set([...(chat.closedQuestionIds || []), questionId])].slice(-200);
+  }
+
   function showAsyncQuestion(chat, event) {
     const owner = chat.historyOwner || chat;
     if (!owner.asyncQuestions) owner.asyncQuestions = new Map();
@@ -4662,7 +4809,7 @@
     const streamed = owner.streamedText?.get(event.questionId);
     if (streamed?.node) streamed.node.hidden = true;
     showQuestionAsk(owner, {
-      requestId: event.questionId, async: true, readOnly: !!event.readOnly,
+      requestId: event.questionId, async: true, readOnly: !!event.readOnly || !!owner.closedQuestionIds?.includes(event.questionId),
       input: { questions: event.questions },
     }, chat);
     mergeEarlierQuestionAnswers(owner);
@@ -4741,6 +4888,14 @@
     card.appendChild(hint);
     const retry = el("div", "ask-other hidden");
     card.appendChild(retry);
+    const dismissButton = msg.async ? el("button", "ask-dismiss", "Dismiss") : null;
+    if (dismissButton) {
+      dismissButton.type = "button";
+      dismissButton.title = "Close this question without sending an answer";
+      dismissButton.addEventListener("keydown", (e) => { if (e.key !== "Escape") e.stopPropagation(); });
+      dismissButton.addEventListener("click", dismiss);
+      title.appendChild(dismissButton);
+    }
 
     function finish(out) {
       if (msg.async) {
@@ -4759,7 +4914,14 @@
     }
 
     function dismiss() {
-      if (msg.async) { entry.complete("Dismissed"); updateTabDots(); return; }
+      if (entry.sending || entry.readOnly) return;
+      if (msg.async) {
+        rememberClosedQuestion(chat, entry.questionId);
+        entry.complete("Dismissed");
+        savePrefs();
+        if (chat.id === activeId) els.input?.focus();
+        return;
+      }
       finish({ type: "permissionResult", id: chat.id, requestId, behavior: "deny", message: PERM_DENY_MESSAGE, interrupt: true });
     }
 
@@ -4937,6 +5099,7 @@
       hint.textContent = sending ? "Sending answer…" : entry.hintText;
     };
     entry.setError = (message) => {
+      if (entry.readOnly) return;
       entry.setSending(false);
       hint.textContent = message;
       hint.setAttribute("role", "alert");
@@ -4953,6 +5116,7 @@
     entry.complete = (status) => {
       entry.setSending(false);
       entry.readOnly = true;
+      if (dismissButton) dismissButton.hidden = true;
       if (msg.async) titleLabel.textContent = "ChatGPT asked";
       body.textContent = "";
       step.textContent = "";
@@ -4964,6 +5128,8 @@
       }
       hint.textContent = status;
       hint.removeAttribute("role");
+      renderTurnStatus(chat);
+      updateTabDots();
     };
     entry.applyAnswer = (values, text) => {
       Object.assign(answers, values);
@@ -5290,7 +5456,10 @@
     }
     chat.streamBlocks.clear();
     chat.streamMsgId = null;
-    // Any ask still open is moot once the turn is over. Denials are NOT
+    // Synchronous asks expire with the turn. Async questions can still take
+    // answers after a successful turn, but not after a stop or failure.
+    if (!result || result.is_error || result.result === "Stopped.") closeAsyncQuestions(chat, "Closed");
+    // Any synchronous ask still open is moot once the turn is over. Denials are NOT
     // summarized into a banner here — each rejected tool call already carries
     // its own inline error on its card (the synthesized tool_result), which is
     // how Claude Code presents them.
@@ -5320,7 +5489,7 @@
     // A model/mode/effort switch made mid-turn was deferred so it wouldn't
     // hard-kill the reply that was still streaming — apply it now that the
     // turn is actually done, before anything queued goes out under it.
-    if (chat.restartPending) restartSessionNow(chat);
+    if (chat.restartPending && !chat.rewindPending) restartSessionNow(chat);
     // The turn may have edited files — refresh the uncommitted-changes badge.
     // It may also have switched or created a branch, so re-ask for that too:
     // the git bar always names the current branch on its left.
@@ -5605,6 +5774,8 @@
         c.backgroundReplayRequested = false;
         c.backgroundWaiting = false;
         failAsyncQuestionSends(c);
+        if (c.rewindPending) finishCodexEdit(c, { requestId: c.rewindPending.requestId, ok: false, running: c.turnRunning,
+          error: "Host disconnected while editing. Reopen the chat to check its history before trying again." });
         if (c.historyRequest) historyFailed(c, c.historyRequest);
       }
       if (expectHostRestart) {
@@ -5860,6 +6031,8 @@
         if (hostReady) hadReadyHost = true;
         harnessReady.claude = msg.ok === true;
         harnessChecked.claude = true;
+        agentInstalled.claude = msg.ok === true;
+        renderAgentInstallation();
         // The chip is drawn before any host has spoken, so it starts out
         // assuming nothing is installed. This is the moment that stops being
         // true — repaint it, or it sits dimmed for a working agent.
@@ -5891,6 +6064,7 @@
         } else {
           hostUpdatePending = true;
           hostUpdateStarted();
+          showOnboarding();
           post({ type: "selfUpdate" });
           hostUpdateTimer = setTimeout(() => {
             hostUpdatePending = false; // gave up — let the recheck resume
@@ -5902,6 +6076,7 @@
         finishAgentCheck();
         break;
       case "interrupted":
+        if (chat) closeAsyncQuestions(chat, "Closed");
         // Stop hard-kills the process and resumes in a fresh one — end the
         // turn right away instead of waiting on a `result` that isn't coming.
         // The `started` event for the respawned process follows separately.
@@ -5956,6 +6131,12 @@
             if (!chat.turnRunning) dispatchNextQueued(chat);
           }
         }
+        break;
+      case "promptAccepted":
+        if (chat) acceptCodexPrompt(chat, msg);
+        break;
+      case "rewindResult":
+        if (chat) finishCodexEdit(chat, msg);
         break;
       case "event":
         if (chat) onClaudeEvent(chat, msg.data);
@@ -6021,6 +6202,8 @@
         if (msg.agent) {
           harnessReady[msg.agent] = !!msg.ok;
           harnessChecked[msg.agent] = true;
+          if (Object.hasOwn(agentInstalled, msg.agent)) agentInstalled[msg.agent] = msg.ok === true;
+          renderAgentInstallation();
           syncComposer();
           updateSetup();
           refreshSettingsIfOpen();
@@ -6034,8 +6217,11 @@
           for (const c of chats.values()) {
             if (c.harness !== msg.agent) continue;
             failAsyncQuestionSends(c);
+            closeAsyncQuestions(c, "Closed");
             if (c.historyRequest) historyFailed(c, c.historyRequest);
             c.started = false;
+            if (c.rewindPending) finishCodexEdit(c, { requestId: c.rewindPending.requestId, ok: false, running: c.turnRunning,
+              error: "The ChatGPT helper stopped while editing. Reopen the chat to check its history." });
             clearPermCards(c);
             if (c.turnRunning) {
               systemNote(c, `${harnessLabel(msg.agent)} stopped.`, "warn");
@@ -6152,6 +6338,7 @@
       case "exit":
         if (chat) {
           failAsyncQuestionSends(chat);
+          closeAsyncQuestions(chat, "Closed");
           chat.started = false;
           clearPermCards(chat);
           liftSuppress(chat); // no respawn coming — don't leave the event gate shut
@@ -6269,6 +6456,10 @@
         break;
       case "error":
         if (chat) {
+          if (chat.rewindPending) {
+            finishCodexEdit(chat, { requestId: chat.rewindPending.requestId, ok: false, running: chat.turnRunning, error: msg.message });
+            break;
+          }
           liftSuppress(chat); // a respawn error must not leave the event gate shut
           if (isAuthRevokedError(msg.message)) {
             // The exit event right behind this one would otherwise print a
@@ -6521,6 +6712,13 @@
       if (!ev.message) continue;
       if (ev.type === "user") {
         const content = ev.message.content;
+        if (chat.harness === "codex" && ev.historyTurnId && !content?.some?.((part) => part.type === "tool_result")) {
+          const raw = typeof content === "string" ? content : (content || []).filter((part) => part.type === "text").map((part) => part.text).join("\n");
+          const text = raw.replace(CTX_MARK_RE, "").trim();
+          if (text || ev.hasAttachments) userBubble(chat, text, ev.attachments, { real: true,
+            turnId: ev.historyTurnId, itemId: ev.historyItemId, hasAttachments: ev.hasAttachments });
+          continue;
+        }
         const ts = ev.timestamp ? Date.parse(ev.timestamp) || Date.now() : Date.now();
         if (typeof content === "string") {
           // A background task / async subagent completion notice is a synthetic
@@ -6539,7 +6737,7 @@
             commandBubbleText(content) || content.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
           // Don't replay bare `/usage` command bubbles (their output is skipped
           // above, so the lone command echo would dangle).
-          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts, replayQuestionReply: true });
+          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts, replayQuestionReply: true, turnId: ev.historyTurnId, itemId: ev.historyItemId });
         } else if (Array.isArray(content)) {
           const texts = [];
           const images = [];
@@ -6563,7 +6761,7 @@
           // The host counts a turn for rewind only when it has a text block, so
           // an image sent with no text gets a bubble but no turn index.
           if (stripped ? !USAGE_CMD_RE.test(stripped) : images.length) {
-            userBubble(chat, stripped, images, texts.length ? { real: true, ts, replayQuestionReply: true } : null);
+            userBubble(chat, stripped, images, texts.length ? { real: true, ts, replayQuestionReply: true, turnId: ev.historyTurnId, itemId: ev.historyItemId } : null);
           }
         }
       } else if (ev.type === "assistant") {
@@ -6848,6 +7046,7 @@
     chat._bashIdx = 0;
     chat.bashMode = false;
     chat.asyncQuestions?.clear();
+    chat.closedQuestionIds = [];
     chat.asyncAnswerBubbles?.clear();
     chat.queue = []; // stale prompts from the wiped conversation shouldn't replay
     if (chat.id === activeId) {
@@ -7193,7 +7392,7 @@
   function dispatchNextQueued(chat) {
     if (typeof backgroundRestoring !== "undefined" && backgroundRestoring) return;
     if (chat.sessionObserver) return;
-    if (chat.sessionFailure) return;
+    if (chat.sessionFailure || chat.rewindPending) return;
     if (!Array.isArray(chat.queue) || !chat.queue.length) return;
     // Head of the queue is open for editing — hold everything until the user
     // is done with it (or deletes it); both paths call back in here.
@@ -7214,6 +7413,13 @@
     // sessionLooksStale). Respawn it first so it re-reads the current keychain
     // credentials — resume keeps the conversation — and queue the prompt to go
     // out at the fresh process's init instead of dying with a 401.
+    if (chat.rewindPending) {
+      if (!Array.isArray(chat.queue)) chat.queue = [];
+      const entry = { text, contexts: contexts.slice(), attachments: attachments.slice(), silent };
+      chat.queue.push(entry);
+      entry.el = renderQueuedBubble(chat, entry);
+      return;
+    }
     if (sessionLooksStale(chat)) {
       chat.restartFlush = true;
       if (!Array.isArray(chat.queue)) chat.queue = [];
@@ -7286,7 +7492,8 @@
     // reached the host. Requeue the prompt (visible, cancellable) instead of
     // entering a running state whose spinner would never stop — endTurn() or
     // the reconnect's `ready` handler re-delivers it.
-    if (!post({ type: "prompt", id: chat.id, text: sentText, images })) {
+    const messageId = chat.harness === "codex" ? newId() : undefined;
+    if (!post({ type: "prompt", id: chat.id, text: sentText, images, messageId })) {
       const entry = {
         text,
         contexts: contexts.slice(),
@@ -7317,6 +7524,7 @@
     if (silent) chat.turnIndexCounter++;
     else userBubble(chat, text || (hasContext ? bubbleHint : ""), attachments, USAGE_CMD_RE.test(text) ? null : {
       real: true,
+      messageId,
       contexts: !isCommand && hasContext ? contexts.slice() : null, // command turns don't consume chips
     });
     if (!isCommand) {
@@ -10444,6 +10652,13 @@
   }
 
   // ---- onboarding overlay ---------------------------------------------------
+  function renderAgentInstallation() {
+    const installed = HARNESSES.some((h) => agentInstalled[h.id] === true);
+    setObNode(els.obNodeClaude, els.obDotClaude, installed ? "done" : "idle");
+    if (els.obLine2) els.obLine2.classList.toggle("done", installed);
+    return installed;
+  }
+
   function finishAgentCheck() {
     if (backgroundRestoring) return;
     if (!hostReady) return;
@@ -10452,7 +10667,8 @@
       if (HARNESSES.every((h) => harnessChecked[h.id])) {
         clearTimeout(agentCheckTimer);
         agentCheckTimer = null;
-        showOnboarding("agent");
+        showOnboarding(HARNESSES.every((h) => agentInstalled[h.id] === false) ? "agent"
+          : HARNESSES.some((h) => agentInstalled[h.id] === true) ? "reconnecting" : "checking");
       } else if (!agentCheckTimer) {
         agentCheckTimer = setTimeout(() => {
           agentCheckTimer = null;
@@ -10546,29 +10762,34 @@
       if (dot) dot.innerHTML = ""; // current → CSS ::after dot; idle → empty ring
     }
   }
-  // Stages: connect the helper, check the CLIs, or install either missing CLI.
+  // A missing bridge cannot inspect local programs. Offer both installers, but
+  // only a helper's CLI check can complete the installation step.
   function showOnboarding(stage = "link") {
     if (!mounted) return;
     const link = stage !== "agent";
-    const installed = HARNESSES.some((h) => harnessReady[h.id]);
-    // The helper must connect before it can check either CLI. Never mark an
-    // unchecked installation as done just because the extension is present.
+    const installed = renderAgentInstallation();
     setObNode(els.obNodeClaude, els.obDotClaude, installed ? "done" : link ? "idle" : "current");
-    setObNode(els.obNodeLink, els.obDotLink, hostReady ? "done" : "current");
-    if (els.obLine2) els.obLine2.classList.toggle("done", installed);
+    setObNode(els.obNodeLink, els.obDotLink, hostReady && stage !== "reconnecting" ? "done" : "current");
     if (els.obCardLink) els.obCardLink.classList.toggle("hidden", !link);
-    if (els.obCardClaude) els.obCardClaude.classList.toggle("hidden", link);
-    if (els.obWaitLabel)
-      els.obWaitLabel.textContent = link
-        ? stage === "checking" ? "Checking installed agents…" : "Waiting for connection…"
-        : "Waiting for either agent…";
-    if (link) {
-      stopClaudeRecheck();
-      if (stage === "checking") startClaudeRecheck();
-    } else {
-      renderClaudeCmd();
-      startClaudeRecheck();
+    if (els.obInstallOptions) {
+      els.obInstallOptions.classList.toggle("hidden", installed);
+      if (!link) els.obInstallOptions.open = true;
+      els.obInstallSummary.textContent = stage === "agent" ? "Choose an agent to install" : "Need an agent? Install Claude Code or Codex CLI";
     }
+    if (els.obCardClaude) els.obCardClaude.classList.toggle("hidden", installed);
+    if (els.obAgentStatus) {
+      els.obAgentStatus.textContent = installed
+        ? HARNESSES.filter((h) => agentInstalled[h.id] === true).map((h) => h.id === "codex" ? "Codex CLI" : "Claude Code").join(" and ") + " found."
+        : stage === "agent" ? "Neither Claude Code nor Codex CLI was found. Install either one."
+        : hostReady ? "Checking for Claude Code and Codex CLI…"
+        : "Connect the helper to check whether Claude Code or Codex CLI is installed.";
+    }
+    if (els.obWaitLabel) els.obWaitLabel.textContent = stage === "agent" ? "Waiting for either agent…"
+      : stage === "checking" ? "Checking installed agents…"
+      : stage === "reconnecting" ? "Reconnecting to your agent…" : "Waiting for connection…";
+    renderClaudeCmd();
+    stopClaudeRecheck();
+    if (stage === "agent" || stage === "checking" || stage === "reconnecting") startClaudeRecheck();
     els.onboarding.classList.remove("hidden");
   }
   function hideOnboarding() {
@@ -10644,6 +10865,9 @@
     els.obLine2 = root.querySelector("#ob-line-2");
     els.obCardLink = root.querySelector("#ob-card-link");
     els.obCardClaude = root.querySelector("#ob-card-claude");
+    els.obInstallOptions = root.querySelector("#ob-install-options");
+    els.obInstallSummary = root.querySelector("#ob-install-summary");
+    els.obAgentStatus = root.querySelector("#ob-agent-status");
     els.obWaitLabel = root.querySelector("#ob-wait-label");
     els.obOsToggle = root.querySelector("#ob-os-toggle");
     els.obOsSelect = root.querySelector("#ob-os-select");
@@ -11308,6 +11532,9 @@
         </div>
       </div>
 
+      <div class="onboarding-content">
+      <p id="ob-agent-status" class="ob-agent-status" role="status">Connect the helper to check whether Claude Code or Codex CLI is installed.</p>
+
       <!-- Link-up card: host not connected yet. -->
       <div id="ob-card-link" class="onboarding-card">
         <div class="onboarding-logos" aria-hidden="true">
@@ -11325,8 +11552,9 @@
         </div>
       </div>
 
-      <!-- The helper confirmed that neither CLI is installed. -->
-      <div id="ob-card-claude" class="onboarding-card hidden">
+      <details id="ob-install-options" class="ob-install-options">
+      <summary id="ob-install-summary">Need an agent? Install Claude Code or Codex CLI</summary>
+      <div id="ob-card-claude" class="onboarding-card">
         <div class="onboarding-logos" aria-hidden="true">
           <span id="onboarding-logo-claude2" class="onboarding-logo onboarding-agent"></span>
         </div>
@@ -11349,6 +11577,9 @@
           <code id="ob-claude-cmd"></code>
           <button id="chat-copy-claude" class="cmd-copy-btn" title="Copy" aria-label="Copy install command"></button>
         </div>
+      </div>
+
+      </details>
       </div>
 
       <button class="onboarding-wait-btn" disabled aria-live="polite">

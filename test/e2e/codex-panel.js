@@ -8,11 +8,11 @@ window.runCodexPanelTests = async function () {
   const check = (name, condition) => { if (!condition) throw new Error(name); passed.push(name); };
   const emit = (msg) => t.emit(msg);
   const event = (data) => emit({ type: "event", id: "audit-a", data });
-  emit({ type: "ready", ok: true, version: 24, home: "/test", user: "Test" });
+  emit({ type: "ready", ok: true, version: 37, home: "/test", user: "Test" });
   check("an older host enters the update flow", t.posted("selfUpdate").length === 1);
   check("an older host cannot start a chat", t.posted("start").length === 0);
-  emit({ type: "ready", ok: true, version: 35, home: "/test", user: "Test" });
-  emit({ type: "agentReady", agent: "codex", ok: true, version: 6 });
+  emit({ type: "ready", ok: true, version: 38, home: "/test", user: "Test" });
+  emit({ type: "agentReady", agent: "codex", ok: true, version: 12 });
   check("reasoning stays on Default before the catalog arrives", document.querySelector("#effort-btn").disabled && t.text("#effort-btn") === "Default");
   check("starting without metadata sends no guessed effort", t.posted("start").some((m) => m.agent === "codex") && t.posted("start").filter((m) => m.agent === "codex").every((m) => m.effort == null));
   emit({ type: "models", agent: "codex", defaultModel: "test-model", models: [{ id: "test-model", label: "Test model", contextWindow: 258400, efforts: ["high"], defaultEffort: "high" }] });
@@ -102,14 +102,13 @@ window.runCodexPanelTests = async function () {
   check("double clicks cannot post an answer twice", t.posted("prompt").length === before + 1);
   check("a choice is a prompt, not an approval reply", t.posted("prompt").at(-1).text === "Что показывать в Resources?\nТекущее потребление CPU/RAM" && !!t.posted("prompt").at(-1).promptRequestId);
   ack(false, { error: "Try again" });
-  check("rejected answers stay in the picker", card().textContent.includes("Try again") && !card().querySelector("button").disabled);
+  check("rejected answers stay in the picker", card().textContent.includes("Try again") && !card().querySelector("button:not([hidden])").disabled);
   card().querySelector(".ask-opt").click(); ack(true);
-  check("accepted answers leave a question record", card().textContent.includes("Answer sent") && !card().querySelector("button"));
+  check("accepted answers leave a question record", card().textContent.includes("Answer sent") && !card().querySelector("button:not([hidden])"));
 
   ask("async-free", [{ id: "0", question: "Details?", options: [] }]);
   event({ type: "result", subtype: "success", usage: {} });
-  check("an async question survives turn completion", card().textContent.includes("Details?") && !!card().querySelector("button"));
-  card().querySelector(".ask-opt").click();
+  check("an async question survives turn completion", card().textContent.includes("Details?") && !!card().querySelector("button:not([hidden])"));
   const free = card().querySelector("input"); free.value = "Yes, keep both"; keyOn(free, "Enter");
   check("free text preserves punctuation", t.posted("prompt").at(-1).text === "Details?\nYes, keep both");
   ack(true, { startedTurn: true });
@@ -125,13 +124,13 @@ window.runCodexPanelTests = async function () {
   ask("async-composer");
   const composer = document.querySelector("#composer-input");
   composer.value = "текущее"; keyOn(composer, "Enter");
-  check("a composer reply bypasses the queue for a pending question", t.posted("prompt").at(-1).text === "текущее" && !document.querySelector(".msg-user.queued"));
-  ack(true);
+  check("a pending question does not capture a new composer message", document.querySelector(".msg-user.queued")?.textContent.includes("текущее") && !t.posted("prompt").at(-1).text.includes("текущее"));
+  document.querySelector(".msg-user.queued .queued-cancel").click();
 
   emit({ type: "transcript", id: "audit-a", events: [{ type: "async_question", questionId: "old-question", readOnly: true, questions: [{ id: "0", question: "Earlier?", options: [{ label: "A" }] }] }] });
-  check("answered history questions have no active controls", card().textContent.includes("Earlier?") && !card().querySelector("button"));
+  check("answered history questions have no active controls", card().textContent.includes("Earlier?") && !card().querySelector("button:not([hidden])"));
   emit({ type: "transcript", id: "audit-a", events: [{ type: "async_question", questionId: "restored-question", readOnly: false, questions: [{ id: "0", question: "Still open?", options: [{ label: "B" }] }] }] });
-  card().querySelector("button").click();
+  card().querySelector(".ask-opt").click();
   check("restored unanswered questions reply to the real chat", t.posted("prompt").at(-1).id === "audit-a" && t.posted("prompt").at(-1).text === "Still open?\nB");
   ack(true);
 
@@ -161,17 +160,23 @@ window.runCodexPanelTests = async function () {
   ask("async-background");
   const bgBefore = t.posted("prompt").length;
   emit({ type: "promptResult", id: "audit-b", requestId: "wrong", ok: true });
-  check("another chat cannot resolve this question", !!card().querySelector("button") && t.posted("prompt").length === bgBefore);
+  check("another chat cannot resolve this question", !!card().querySelector("button:not([hidden])") && t.posted("prompt").length === bgBefore);
   keyOn(card(), "Escape");
   check("dismissing an async question does not interrupt Codex", card().textContent.includes("Dismissed") && t.posted("interrupt").length === 0);
   ask("async-disconnect");
-  card().querySelector("button").click();
+  card().querySelector(".ask-opt").click();
   t.disconnect();
-  check("lost connections preserve an answer and unlock retry", card().textContent.includes("Check the chat") && card().textContent.includes("Retry answer") && !card().querySelector("button").disabled);
+  check("lost connections preserve an answer and unlock retry", card().textContent.includes("Check the chat") && card().textContent.includes("Retry answer") && !card().querySelector("button:not([hidden])").disabled);
   const offlineCount = t.posted("prompt").length;
-  card().querySelector("button").click();
+  card().querySelector(".ask-other button").click();
   check("offline answers are not reported as sent", t.posted("prompt").length === offlineCount && card().textContent.includes("Host disconnected"));
   check("question interactions report no runtime errors", t.errors.length === 0);
+
+  await new Promise((resolve) => setTimeout(resolve, 1300));
+  emit({ type: "ready", ok: true, version: 38, home: "/test", user: "Test" });
+  emit({ type: "agentReady", agent: "codex", ok: true, version: 12 });
+
+  for (const id of ["audit-a", "audit-b"]) emit({ type: "started", id, cwd: "/test/project", permissionMode: "workspace" });
 
   // Leave the full quota view visible for the screenshot.
   emit({ type: "planUsage", agent: "codex", usedPercent: 42, windowMins: 10080 });
