@@ -10,7 +10,7 @@ const page = (id) => ({ kind: "page", url: `https://example.com/${id}`, text: id
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 function panel({ background = false } = {}) {
-  const sent = [], bubbles = [], waiting = [];
+  const sent = [], bubbles = [], waiting = [], timers = new Set();
   let accepts = true, stale = false, restarts = 0;
   const chat = {
     id: "a", title: "Existing chat", started: true, contexts: [], attachments: [], queue: [],
@@ -22,6 +22,8 @@ function panel({ background = false } = {}) {
     activeId: background ? "other" : "a", els: { input }, chats: new Map([["a", chat]]),
     slash: { open: false }, sendPrompt: () => { normalSends++; },
     connected: true, hostReady: true, newId: () => "steer-" + sent.length,
+    claimSession() {},
+    setTimeout(fn) { timers.add(fn); return fn; }, clearTimeout(fn) { timers.delete(fn); },
     flushQueuedIfIdle: () => {}, resumeTurnIfIdle: () => { chat.turnRunning = true; },
     DEFAULT_TITLE: "New chat", USAGE_CMD_RE: /^\/usage$/, CTX_MARK_START: "<context>", CTX_MARK_END: "</context>",
     sessionLooksStale: () => stale,
@@ -48,6 +50,8 @@ function panel({ background = false } = {}) {
     steer: (entry) => scope.steerQueuedPrompt(chat, entry),
     receipt: (msg) => scope.finishQueuedSteer(chat, msg),
     failSteer: () => scope.failQueuedSteers(chat),
+    restarted: () => scope.resumeClaudeSteer(chat),
+    timeoutSteer() { for (const fn of [...timers]) { timers.delete(fn); fn(); } },
     queue(text, attachments = [], contexts = []) {
       chat.attachments = attachments; chat.contexts = contexts; input.value = text;
       scope.queuePrompt(chat, text);
@@ -175,12 +179,62 @@ test("turn completion cannot drain a steer in flight or retry an uncertain failu
   p.steer(p.chat.queue[0]); assert.equal(p.sent.length, 2);
 });
 
-test("steer leaves Claude queues alone and preserves failed sends", () => {
-  const p = panel(); p.queue("keep me"); p.chat.harness = "claude";
-  p.steer(p.chat.queue[0]); assert.equal(p.sent.length, 0);
+test("steer preserves failed sends", () => {
+  const p = panel(); p.queue("keep me");
   p.chat.harness = "codex"; p.disconnect(); p.steer(p.chat.queue[0]);
   assert.equal(p.chat.queue[0].steering, false); assert.equal(p.chat.queue[0].steerFailed, true);
   assert.equal(p.chat.queue[0].text, "keep me");
+});
+
+test("Claude Steer stops first and sends the selected snapshot before the queue", async () => {
+  const p = panel(); p.chat.harness = "claude"; p.chat.turnRunning = true;
+  p.queue("first"); p.queue("correction", [image("selected")], [page("selected-context")]);
+  const entry = p.chat.queue[1];
+  entry.finishEdit = () => { entry.text = "edited correction"; };
+  p.chat.attachments = [image("draft")]; p.input.value = "draft";
+  p.steer(entry); p.steer(entry);
+  assert.deepEqual(p.sent, [{ type: "interrupt", id: "a" }]);
+  p.chat.turnRunning = false; p.dispatch();
+  assert.equal(p.chat.queue.length, 2);
+  const delivery = p.restarted(); p.restarted();
+  assert.equal(p.chat.turnRunning, true);
+  await p.finish(); await delivery;
+  assert.equal(p.sent.length, 2); assert.equal(p.sent[1].type, "prompt");
+  assert.match(p.sent[1].text, /selected-context/); assert.match(p.sent[1].text, /edited correction$/);
+  assert.deepEqual(p.sent[1].images.map(i => i.data), ["selected"]);
+  assert.deepEqual(p.chat.queue.map(q => q.text), ["first"]);
+  assert.equal(p.input.value, "draft"); assert.equal(p.chat.attachments[0].id, "draft");
+});
+
+test("Claude Steer connection loss keeps the message and ignores a late restart", () => {
+  const p = panel(); p.chat.harness = "claude"; p.chat.turnRunning = true;
+  p.queue("keep me"); p.steer(p.chat.queue[0]); p.failSteer();
+  p.chat.turnRunning = false; p.restarted(); p.dispatch();
+  assert.equal(p.sent.length, 1); assert.equal(p.chat.queue[0].steerFailed, true);
+  assert.equal(p.chat.queue[0].steering, false);
+});
+
+test("Claude Steer sends directly if the reply already ended", async () => {
+  const p = panel(); p.chat.harness = "claude";
+  p.queue("first"); p.queue("send now"); p.steer(p.chat.queue[1]);
+  await p.finish();
+  assert.equal(p.sent.length, 1); assert.equal(p.sent[0].type, "prompt");
+  assert.equal(p.sent[0].text, "send now"); assert.equal(p.chat.queue[0].text, "first");
+});
+
+test("Claude restart timeout keeps the message available and blocks a late send", () => {
+  const p = panel(); p.chat.harness = "claude"; p.chat.turnRunning = true;
+  p.queue("keep me"); p.steer(p.chat.queue[0]); p.timeoutSteer();
+  p.restarted(); p.chat.turnRunning = false; p.dispatch();
+  assert.equal(p.sent.length, 1); assert.equal(p.chat.queue[0].steerFailed, true);
+  assert.equal(p.chat.queue[0].steering, false);
+});
+
+test("Claude failed Stop keeps the message without sending a prompt", () => {
+  const p = panel(); p.chat.harness = "claude"; p.chat.turnRunning = true;
+  p.queue("keep me"); p.disconnect(); p.steer(p.chat.queue[0]);
+  assert.deepEqual(p.sent, [{ type: "interrupt", id: "a" }]);
+  assert.equal(p.chat.queue[0].steerFailed, true); assert.equal(p.chat.queue[0].steering, false);
 });
 
 test("Enter on an empty composer steers queued messages in order without duplicate sends", () => {

@@ -6132,6 +6132,7 @@
           // on the host's spawn ack, NOT on claude's `system init` — the
           // headless CLI only emits init together with its first prompt's
           // reply, so waiting for init would deadlock against this queue.
+          resumeClaudeSteer(chat);
           if (chat.restartFlush) {
             chat.restartFlush = false;
             if (!chat.turnRunning) dispatchNextQueued(chat);
@@ -7203,14 +7204,14 @@
     const bubble = buildBubble(entry.text, entry.attachments, entry.contexts);
     row.appendChild(bubble);
     const tag = el("div", "queued-tag");
-    if (chat.harness === "codex") {
+    if (chat.harness === "codex" || chat.harness === "claude") {
       row.classList.add("has-steer");
       const steer = el("button", "queued-steer");
       steer.innerHTML = ICON("send", 13);
       steer.appendChild(el("span", "queued-steer-label", "Steer"));
       steer.type = "button";
-      steer.title = "Send to the current turn";
-      steer.setAttribute("aria-label", "Steer: send to the current turn");
+      steer.title = chat.harness === "claude" ? "Stop the current reply and send this message" : "Send to the current turn";
+      steer.setAttribute("aria-label", "Steer: " + steer.title);
       steer.addEventListener("mousedown", (e) => e.preventDefault());
       steer.addEventListener("click", () => steerQueuedPrompt(chat, entry));
       tag.appendChild(steer);
@@ -7242,6 +7243,8 @@
   }
 
   function failQueuedSteer(chat, entry, message) {
+    clearTimeout(entry.steerTimer);
+    entry.awaitingClaudeStart = false;
     setQueuedSteering(entry, false);
     // An uncertain send must never be retried by the automatic queue drain.
     entry.steerFailed = true;
@@ -7256,11 +7259,12 @@
   }
 
   function steerQueuedPrompt(chat, entry) {
-    if (chat.harness !== "codex" || !chat.queue?.includes(entry) || chat.queue.some((q) => q.steering)) return;
-    if (!connected || !hostReady || !chat.started || chat.sessionFailure) {
-      systemNote(chat, "Reconnect to ChatGPT before sending this message.", "warn", { dismissible: true });
+    if (!["codex", "claude"].includes(chat.harness) || !chat.queue?.includes(entry) || chat.queue.some((q) => q.steering)) return;
+    if (!connected || !hostReady || !chat.started || chat.sessionFailure || chat.rewindPending) {
+      systemNote(chat, `Reconnect to ${chat.harness === "claude" ? "Claude" : "ChatGPT"} before sending this message.`, "warn", { dismissible: true });
       return;
     }
+    claimSession(chat);
     // Lock before closing the editor: blur or turn completion can drain the queue.
     setQueuedSteering(entry, true);
     entry.finishEdit?.();
@@ -7271,10 +7275,39 @@
       failQueuedSteer(chat, entry, "Enter a message first.");
       return;
     }
+    if (chat.harness === "claude") {
+      entry.awaitingClaudeStart = true;
+      entry.steerTimer = setTimeout(() => {
+        if (entry.awaitingClaudeStart) failQueuedSteer(chat, entry, "Couldn't restart Claude. Try again.");
+      }, 30000);
+      if (!chat.turnRunning) resumeClaudeSteer(chat);
+      else if (chat.restartPending) {
+        restartSessionNow(chat);
+        if (!chat.started) failQueuedSteer(chat, entry, "Host disconnected before stopping.");
+      } else if (!post({ type: "interrupt", id: chat.id })) {
+        failQueuedSteer(chat, entry, "Host disconnected before stopping.");
+      }
+      return;
+    }
     entry.promptRequestId = newId();
     if (!post({ type: "prompt", agent: "codex", id: chat.id, text, images, promptRequestId: entry.promptRequestId, backgroundQueueId: entry.backgroundId })) {
       failQueuedSteer(chat, entry, "Host disconnected before sending.");
     }
+  }
+
+  function resumeClaudeSteer(chat) {
+    if (chat.harness !== "claude") return;
+    const entry = chat.queue?.find((q) => q.steering && q.awaitingClaudeStart);
+    if (!entry) return;
+    clearTimeout(entry.steerTimer);
+    entry.awaitingClaudeStart = false;
+    chat.queue.splice(chat.queue.indexOf(entry), 1);
+    entry.el?.remove();
+    entry.steering = false;
+    entry.steerFailed = false;
+    // Use the normal send path with this entry's files and context. It claims
+    // the new turn before any await, leaving the rest of the queue in place.
+    return deliverPrompt(chat, entry.text, { entry, silent: !!entry.silent });
   }
 
   function finishQueuedSteer(chat, msg) {
