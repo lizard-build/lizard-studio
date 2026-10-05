@@ -888,7 +888,13 @@
     // permission ask) — so live content anchors above the OLDEST pending
     // queued bubble when one exists, not just above the pill.
     let anchor = null;
-    if (!(opts && opts.raw) && Array.isArray(chat.queue)) {
+    // A restored permission can arrive before the transcript. Keep its controls
+    // below incoming messages so loading history cannot scroll them out of view.
+    if (!(opts && opts.raw) && !node.classList.contains("perm-card")) {
+      const pending = [...chat.permCards.values()].find((entry) => entry.card.parentNode === chat.messagesEl);
+      if (pending) anchor = pending.card;
+    }
+    if (!anchor && !(opts && opts.raw) && Array.isArray(chat.queue)) {
       const pending = chat.queue.find((e) => e.el && e.el.parentNode === chat.messagesEl);
       if (pending) anchor = pending.el;
     }
