@@ -432,13 +432,32 @@ function startBridge() {
 function startDaemon() {
   if (!daemonSocket || !daemonSocket.startsWith(HOST_DIR + "/")) process.exit(1);
   daemonServer = net.createServer((sock) => {
-    if (browserOutput && browserOutput !== sock) browserOutput.destroy();
-    browserOutput = sock;
-    clearTimeout(idleTimer);
-    const feed = frameReader(route, (len) => { log("bad browser frame", len); sock.destroy(); });
+    // Startup probes connect and close without sending a frame. They must not
+    // replace the browser; only its runtimeAttach handshake claims the pipe.
+    let attached = false;
+    const attachTimer = setTimeout(() => sock.destroy(), 10000);
+    attachTimer.unref?.();
+    const feed = frameReader((body, text) => {
+      if (sock.destroyed) return;
+      if (!attached) {
+        let msg;
+        try { msg = JSON.parse(text); } catch { sock.destroy(); return; }
+        if (msg?.type !== "runtimeAttach" || !Number.isInteger(msg.windowId) || msg.windowId < 0) {
+          sock.destroy(); return;
+        }
+        attached = true;
+        clearTimeout(attachTimer);
+        const previous = browserOutput;
+        browserOutput = sock;
+        clearTimeout(idleTimer);
+        if (previous && previous !== sock) previous.destroy();
+      }
+      if (browserOutput === sock) route(body, text);
+    }, (len) => { log("bad browser frame", len); sock.destroy(); });
     sock.on("data", feed);
     sock.on("error", () => {});
     sock.on("close", () => {
+      clearTimeout(attachTimer);
       if (browserOutput !== sock) return;
       browserOutput = null;
       log("browser bridge disconnected; active turns continue");
