@@ -115,9 +115,10 @@ window.runAuditPanelTests = async function () {
   type("#composer-input", "Original request"); enter(); await pause();
   t.emit({ type: "event", id: "audit-a", data: { type: "assistant", message: { id: "audit-proof", content: [{ type: "text", text: "Original answer stays here" }], usage: {} } } });
   t.emit({ type: "event", id: "audit-a", data: { type: "result", subtype: "success", result: "", num_turns: 1 } });
+  await pause();
   const bubble = [...document.querySelectorAll(".bubble")].find((n) => n.textContent.includes("Original request"));
   bubble.click();
-  check("A01: Codex past messages do not offer unsupported editing", !bubble.classList.contains("editable") && !document.querySelector(".msg-edit") && t.posted("rewind").length === 0);
+  check("A01: ChatGPT waits for a turn ID before offering message editing", !bubble.classList.contains("editable") && !document.querySelector(".msg-edit") && t.posted("rewind").length === 0);
   type("#composer-input", "Keep this draft");
   const count = t.storage.rkChatV2.tabs.length;
   click("#harness-btn");

@@ -5,7 +5,7 @@ window.runResumePanelTests = async function (scenario) {
   const check = (name, ok) => { if (!ok) throw new Error(name); checks.push(name); };
   const saved = () => t.storage.rkChatV2.tabs.find((c) => c.id === "resume-a");
   const emit = (msg) => t.emit({ id: "resume-a", ...msg });
-  t.emit({ type: "ready", version: 32, ok: true, home: "/test" });
+  t.emit({ type: "ready", version: 38, ok: true, home: "/test" });
   t.emit({ type: "agentReady", agent: "codex", ok: true });
   t.emit({ type: "models", agent: "codex", defaultModel: "test-model", models: [{ id: "test-model", label: "Test model", efforts: ["medium"], defaultEffort: "medium" }] });
   if (scenario === "resume-empty") {
@@ -35,6 +35,7 @@ window.runResumePanelTests = async function (scenario) {
     check("failure preserves the saved ID", saved().sessionId === "missing-thread");
     const before = t.posted("prompt").length;
     t.click(".session-failure-action");
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const state = t.storage.rkChatV2;
     const fresh = state.tabs.find((c) => c.id === state.activeId);
     check("recovery creates another chat and keeps the original", state.tabs.length === 2 && fresh.id !== "resume-a" && saved().sessionId === "missing-thread");

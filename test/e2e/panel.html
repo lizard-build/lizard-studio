@@ -30,7 +30,7 @@
       // conversation — so a test can replay a Codex session captured from the
       // live host and watch the panel render it.
       const sent = [];
-      const listeners = { message: [], disconnect: [] };
+      const listeners = { message: [], disconnect: [], runtime: [], storage: [] };
       const store = {};
 
       window.__test = {
@@ -134,13 +134,21 @@
               onDisconnect: { addListener: (fn) => listeners.disconnect.push(fn) },
             };
           },
-          sendMessage: () => {},
-          onMessage: { addListener: () => {} },
+          sendMessage: (msg, callback) => {
+            for (const listener of listeners.runtime) listener(msg, { id: "test", url: "src/panel/panel.html" }, callback || (() => {}));
+          },
+          onMessage: { addListener: (fn) => listeners.runtime.push(fn) },
         },
         storage: {
+          onChanged: { addListener: (fn) => listeners.storage.push(fn) },
           local: {
             get: (keys, cb) => cb && cb(JSON.parse(JSON.stringify(store))),
-            set: (obj, cb) => { Object.assign(store, obj); cb && cb(); },
+            set: (obj, cb) => {
+              const changes = Object.fromEntries(Object.entries(obj).map(([key, value]) => [key, { oldValue: store[key], newValue: value }]));
+              Object.assign(store, obj);
+              for (const listener of listeners.storage) listener(changes, "local");
+              cb && cb();
+            },
             remove: (k, cb) => { delete store[k]; cb && cb(); },
           },
         },
@@ -177,6 +185,11 @@
         activeId: "failure-a", lastHarness: "codex",
         tabs: [{ id: "failure-a", title: "New chat", harness: "codex", cwd: "/test/project", mode: "workspace" }],
       };
+      const editRegression = new URLSearchParams(location.search).get("regressions") === "edit";
+      if (editRegression) store.rkChatV2 = {
+        activeId: "edit-a", lastHarness: "codex",
+        tabs: [{ id: "edit-a", title: "Edit messages", harness: "codex", model: "test-model", cwd: "/test/project", sessionId: "thread-edit", mode: "workspace" }],
+      };
       const historyRegression = new URLSearchParams(location.search).get("regressions") === "history";
       const auditRegression = new URLSearchParams(location.search).get("regressions") === "audit";
       const codexRegression = auditRegression || new URLSearchParams(location.search).get("regressions") === "codex";
@@ -197,7 +210,7 @@
       // fixed minutes ago — which costs more time than it saves.
       (async () => {
         const stamp = Date.now();
-        for (const f of ["icons.js", "render.js", "activity.js", "chat.js"]) {
+        for (const f of ["../prefs-sync.js", "icons.js", "render.js", "activity.js", "chat.js"]) {
           await new Promise((resolve, reject) => {
             const s = document.createElement("script");
             s.src = `../../src/panel/${f}?t=${stamp}`;
@@ -206,6 +219,7 @@
             document.body.appendChild(s);
           });
         }
+        window.StudioPrefsSync.createStore(window.chrome);
         await new Promise((resolve) => window.RKChat.mount(document.getElementById("bed"), resolve));
         window.RKChat.activate && window.RKChat.activate();
         window.__test.mounted = true;
@@ -243,6 +257,15 @@
           });
           window.__test.backgroundResult = await window.runBackgroundPanelTests();
         }
+        if (editRegression) {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement("script");
+            script.src = "edit-panel.js?t=" + stamp;
+            script.onload = resolve; script.onerror = reject;
+            document.body.appendChild(script);
+          });
+          window.__test.editResult = await window.runEditPanelTests();
+        }
         if (codexRegression || historyRegression) {
           await new Promise((resolve, reject) => {
             const script = document.createElement("script");
@@ -261,7 +284,7 @@
             window.__test.auditResult = await window.runAuditPanelTests();
           }
         }
-      })().catch((err) => window.__test.errors.push(String(err.message)));
+      })().catch((err) => window.__test.errors.push(String(err.stack || err.message)));
     </script>
   </body>
 </html>
