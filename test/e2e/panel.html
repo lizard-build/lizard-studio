@@ -175,6 +175,10 @@
         };
       }
       const resumeRegression = new URLSearchParams(location.search).get("regressions");
+      if (resumeRegression === "claude-question") store.rkChatV2 = {
+        activeId: "question-a", lastHarness: "claude",
+        tabs: [{ id: "question-a", harness: "claude", cwd: "/test/project", model: "opus", mode: "auto", sessionId: "question-session" }],
+      };
       if (["resume-empty", "resume-missing"].includes(resumeRegression)) store.rkChatV2 = {
         activeId: "resume-a", lastHarness: "codex",
         tabs: [{ id: "resume-a", title: "New chat", harness: "codex", model: "test-model", effort: "medium", cwd: "/test/project", mode: "full",
@@ -223,6 +227,13 @@
         await new Promise((resolve) => window.RKChat.mount(document.getElementById("bed"), resolve));
         window.RKChat.activate && window.RKChat.activate();
         window.__test.mounted = true;
+        if (resumeRegression === "claude-question") {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement("script"); script.src = "claude-question-panel.js?t=" + stamp;
+            script.onload = resolve; script.onerror = reject; document.body.appendChild(script);
+          });
+          window.__test.claudeQuestionResult = await window.runClaudeQuestionPanelTests();
+        }
         if (new URLSearchParams(location.search).has("onboarding")) {
           const script = document.createElement("script");
           script.src = "onboarding-panel.js?t=" + stamp;
