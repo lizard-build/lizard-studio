@@ -3,7 +3,11 @@
 // Field patches keep a stale view from overwriting another window's chats.
 (function () {
   const copy = (value) => JSON.parse(JSON.stringify(value));
-  const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const equal = (a, b) => {
+    if (a === b) return true;
+    if (typeof a !== "object" || typeof b !== "object" || !a || !b) return false;
+    return JSON.stringify(a) === JSON.stringify(b);
+  };
   function diff(before = {}, after = {}) {
     const patch = { fields: {}, tabs: [], history: [] };
     for (const key of Object.keys(after)) {

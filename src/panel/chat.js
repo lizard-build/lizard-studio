@@ -632,12 +632,23 @@
       lastModel: lastBy.claude.model, lastEffort: lastBy.claude.effort, lastMode: lastBy.claude.mode };
   }
   function savePrefs(done) {
+    if (saveSoonTimer) { clearTimeout(saveSoonTimer); saveSoonTimer = 0; }
     if (applyingSharedPrefs || sharedRendering) { done?.(); return; }
     if (backgroundRestoring) { done?.(new Error("Chats are still loading. Try again.")); return; }
     try {
       if (!prefsSync) { done?.(new Error("Chats are still loading. Try again.")); return; }
       prefsSync.save(chatPrefsSnapshot(), done);
     } catch (error) { done?.(error); }
+  }
+  // Typing saves the draft on every keystroke; each save diffs every tab and
+  // rewrites the whole prefs blob in storage. Coalesce those into one trailing
+  // write. Any direct savePrefs() (and beforeunload) snapshots the latest
+  // state anyway, so a pending timer is simply cancelled by it.
+  const SAVE_SOON_MS = 400;
+  let saveSoonTimer = 0;
+  function savePrefsSoon() {
+    if (saveSoonTimer) return;
+    saveSoonTimer = setTimeout(() => { saveSoonTimer = 0; savePrefs(); }, SAVE_SOON_MS);
   }
   function applySharedPrefs(prefs) {
     if (!mounted) return;
@@ -3514,6 +3525,8 @@
     blk.raf = requestAnimationFrame(step);
   }
 
+  const STREAM_TAIL_BIG = 4000;
+  const STREAM_TAIL_MS = 90;
   function renderStreamSlice(chat, blk) {
     // A text content block can open (content_block_start) well before it
     // has any real characters — some turns emit a block that stays
@@ -3536,6 +3549,17 @@
       blk.md.appendChild(blk.live);
       blk.el.replaceChildren(blk.md);
     }
+    // A long open tail (a big code fence never freezes) is re-parsed and
+    // re-highlighted in full on every frame, which is quadratic over the
+    // block. Past a few KB, repaint it at most every STREAM_TAIL_MS; the pacer
+    // keeps calling until the stream stops, and finalize paints the rest.
+    const now = performance.now();
+    if (blk.shown - blk.stable > STREAM_TAIL_BIG && now - (blk.tailT || 0) < STREAM_TAIL_MS && blk.shown < blk.buf.length) {
+      blk.tailSkipped = true;
+      return;
+    }
+    blk.tailT = now;
+    blk.tailSkipped = false;
     advanceStreamScan(blk, blk.shown);
     if (blk.safe > blk.stable) {
       const done = R.markdown(blk.buf.slice(blk.stable, blk.safe));
@@ -10539,7 +10563,7 @@
     const owner = chats.get(composerChatId);
     if (owner && owner.draft !== els.input.value) {
       owner.draft = els.input.value;
-      savePrefs();
+      savePrefsSoon();
     }
     els.input.style.height = "auto";
     // An empty field uses rows="1"; wrapped placeholder text must not size it.

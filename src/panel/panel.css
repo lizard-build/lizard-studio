@@ -1852,6 +1852,14 @@ body.chat-menu-docked .chat-menu-window { margin-left: 0; }
   display: flex;
   max-width: 100%;
 }
+/* Long chats keep every message in the DOM. Let the browser skip layout and
+   paint for the ones scrolled out of view; `auto` remembers each real height
+   once seen, so the scrollbar stays steady. The last message is left out: it
+   is the one streaming and the one scrollToBottom measures. */
+.msg:not(:last-child) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
+}
 .msg-user {
   justify-content: flex-start;
 }
