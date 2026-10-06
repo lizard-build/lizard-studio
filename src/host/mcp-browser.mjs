@@ -322,6 +322,7 @@ function connect() {
 // Slow page loads can legitimately exceed the default — give navigation-ish
 // ops more headroom instead of reporting a spurious timeout while the page
 // actually finishes loading.
+// Match both hosts, then allow five seconds for their result to reach this relay.
 const OP_TIMEOUT_MS = { navigate: 45000, reload: 45000, screenshot: 45000 };
 
 function callHost(op, args) {
@@ -353,7 +354,7 @@ function callHost(op, args) {
         pending.delete(reqId);
         resolve({ ok: false, error: "Lizard Studio browser connection timed out. " + RECONNECT_HELP });
       }
-    }, OP_TIMEOUT_MS[op] || 30000);
+    }, (OP_TIMEOUT_MS[op] || 30000) + 5000);
   });
 }
 

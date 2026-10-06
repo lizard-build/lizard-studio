@@ -33,6 +33,21 @@ async function relay() {
 }
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
 
+for (const [op, hostDeadline] of [["navigate", 45000], ["reload", 45000], ["screenshot", 45000], ["click", 30000]]) {
+  test(`MCP preserves the host's ${op} error before its own deadline`, async () => {
+    const r = await relay(); r.respond(() => null);
+    const pending = r.api.handle({ id: 81, method: "tools/call", params: { name: `browser_${op}`, arguments: { tabId: 11 } } });
+    await flush();
+    for (const timer of [...r.timers]) if (timer.ms <= hostDeadline) timer.fn();
+    assert.equal(r.output.length, 0, "relay must allow time for the host's result");
+    r.sock.emit("data", JSON.stringify({ reqId: r.requests[0].reqId, ok: false, error: "Page.enable on tab 11 timed out" }) + "\n");
+    await pending;
+    assert.match(r.output[0].result.content[0].text, /Page.enable on tab 11/);
+    assert.equal(r.requests.length, 1);
+    assert.equal(r.timers.size, 0);
+  });
+}
+
 test("MCP publishes workflow schemas alongside existing browser tools", async () => {
   const r = await relay(); await r.api.handle({ id: 1, method: "tools/list" });
   const names = r.output[0].result.tools.map((t) => t.name);
@@ -60,7 +75,7 @@ for (const failure of ["disconnect", "timeout"]) test(`a browser ${failure} call
   const pending = r.api.handle({ id: 7, method: "tools/call", params: { name: "browser_click", arguments: { selector: "#save" } } });
   await flush();
   if (failure === "disconnect") r.sock.emit("close");
-  else [...r.timers].find(t => t.ms === 30000).fn();
+  else [...r.timers].find(t => t.ms === 35000).fn();
   await pending;
   const error = r.output.at(-1).result.content[0].text;
   assert.match(error, failure === "disconnect" ? /lost its browser connection/ : /connection timed out/);

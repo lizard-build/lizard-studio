@@ -222,7 +222,7 @@ function browserRequest(op, args, session) {
       if (!browserPending.has(bid)) return;
       browserPending.delete(bid);
       resolve({ ok: false, error: "Lizard Studio did not answer the browser request. Check browser access with a read before retrying an action; it may have completed. If access still fails, report this error and continue work that does not need browser access. This timeout does not establish that the side panel is closed or that reopening it will help." });
-    }, 30000);
+    }, ["navigate", "reload", "screenshot"].includes(op) ? 45000 : 30000);
     timer.unref?.();
     browserPending.set(bid, { resolve, timer });
     send({ type: "browser", bid, op, args, session: owner.id });
