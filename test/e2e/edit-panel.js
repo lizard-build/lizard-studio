@@ -13,7 +13,7 @@ window.runEditPanelTests = async function () {
     message: { id: "answer-" + n, content: [{ type: "text", text: "Answer " + n }], usage: {} } });
   const history = (request, events, nextCursor) => emit({ type: "transcript", paged: true, done: true,
     sessionId: request.sessionId, requestId: request.requestId, events, nextCursor });
-  t.emit({ type: "ready", ok: true, version: 38, home: "/test", user: "Test" });
+  t.emit({ type: "ready", ok: true, version: 39, home: "/test", user: "Test" });
   t.emit({ type: "agentReady", agent: "codex", ok: true, version: 12 });
   emit({ type: "started", cwd: "/test/project", permissionMode: "workspace" });
   event({ type: "system", subtype: "init", agent: "codex", session_id: "thread-edit", model: "test-model", cwd: "/test/project" });

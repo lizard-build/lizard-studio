@@ -5,7 +5,7 @@ window.runResumePanelTests = async function (scenario) {
   const check = (name, ok) => { if (!ok) throw new Error(name); checks.push(name); };
   const saved = () => t.storage.rkChatV2.tabs.find((c) => c.id === "resume-a");
   const emit = (msg) => t.emit({ id: "resume-a", ...msg });
-  t.emit({ type: "ready", version: 38, ok: true, home: "/test" });
+  t.emit({ type: "ready", version: 39, ok: true, home: "/test" });
   t.emit({ type: "agentReady", agent: "codex", ok: true });
   t.emit({ type: "models", agent: "codex", defaultModel: "test-model", models: [{ id: "test-model", label: "Test model", efforts: ["medium"], defaultEffort: "medium" }] });
   if (scenario === "resume-empty") {

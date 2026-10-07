@@ -443,7 +443,7 @@
   // its own in `ready`). Keep in sync with HOST_VERSION in host/claude-host.mjs.
   // A stale host is first asked to update itself (`selfUpdate`, host v4+);
   // the manual install command only shows when that goes unanswered.
-  const EXPECTED_HOST_VERSION = 38;
+  const EXPECTED_HOST_VERSION = 39;
   // How long to wait on a `selfUpdate` reply before deciding the host is too
   // old to have heard the question at all, and how long to give the new copy
   // to come back up once the old one says it's restarting.
@@ -2206,10 +2206,11 @@
     const row = el("div", "msg msg-user");
     const bubble = buildBubble(text || (opts?.hasAttachments && !attachments?.length ? "_(attached file)_" : ""), attachments, opts && opts.contexts);
     row.appendChild(bubble);
-    if (opts && opts.real && !chat.historyPage) {
-      const turnIndex = ++chat.turnIndexCounter;
+    if (opts && opts.real && (!chat.historyPage || opts.turnIndex)) {
+      // Claude history pages arrive newest-first, so the host numbers the turns.
+      const turnIndex = opts.turnIndex || ++chat.turnIndexCounter;
       row.dataset.turnIndex = String(turnIndex);
-      if (chat.harness !== "codex") wireEditableBubble(chat, bubble, turnIndex, text, attachments);
+      if (chat.harness !== "codex") wireEditableBubble(chat.historyOwner || chat, bubble, turnIndex, text, attachments);
     }
     if (opts?.real && chat.harness === "codex") {
       row.dataset.messageId = opts.messageId || "";
@@ -6590,10 +6591,9 @@
         requestHistoryPage(chat);
         return;
       }
+      // Newest turns first; earlier ones load on scroll up (requestHistoryPage).
       chat.replayed = true;
-      chat._bashIdx = 0;
-      if (Array.isArray(chat.bashHistory)) chat.bashHistory.sort((a, b) => (a.ts || 0) - (b.ts || 0));
-      post({ type: "loadTranscript", id: chat.id, sessionId: chat.sessionId, cwd: chat.cwd });
+      requestHistoryPage(chat);
       return;
     }
     // No CLI session to replay — but a bash-only tab may still have local shell
@@ -6678,6 +6678,12 @@
     page.bashHistory = chat.bashHistory.filter((entry) => !chat.historyBashSeen.has(entry.id) && (entry.ts || 0) >= oldest).sort((a, b) => (a.ts || 0) - (b.ts || 0));
     replayTranscript(page, events);
     drainBashUntil(page, Infinity);
+    if (request.initial && chat.harness !== "codex") {
+      // The page is its own chat object: carry over what the newest messages
+      // told it, and the turn count the next live turn continues from.
+      if (page.ctxTokens) { chat.ctxBase = page.ctxBase; chat.ctxTokens = page.ctxTokens; }
+      if (Number.isInteger(msg.totalTurns)) chat.turnIndexCounter += msg.totalTurns;
+    }
     for (const entry of page.bashHistory) chat.historyBashSeen.add(entry.id);
     for (const id of seen) chat.historySeen.add(id);
     const nodes = [...page.messagesEl.childNodes];
@@ -6768,7 +6774,7 @@
             commandBubbleText(content) || content.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
           // Don't replay bare `/usage` command bubbles (their output is skipped
           // above, so the lone command echo would dangle).
-          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts, replayQuestionReply: true, turnId: ev.historyTurnId, itemId: ev.historyItemId });
+          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts, replayQuestionReply: true, turnId: ev.historyTurnId, itemId: ev.historyItemId, turnIndex: ev.historyTurnIndex });
         } else if (Array.isArray(content)) {
           const texts = [];
           const images = [];
@@ -6792,7 +6798,7 @@
           // The host counts a turn for rewind only when it has a text block, so
           // an image sent with no text gets a bubble but no turn index.
           if (stripped ? !USAGE_CMD_RE.test(stripped) : images.length) {
-            userBubble(chat, stripped, images, texts.length ? { real: true, ts, replayQuestionReply: true, turnId: ev.historyTurnId, itemId: ev.historyItemId } : null);
+            userBubble(chat, stripped, images, texts.length ? { real: true, ts, replayQuestionReply: true, turnId: ev.historyTurnId, itemId: ev.historyItemId, turnIndex: ev.historyTurnIndex } : null);
           }
         }
       } else if (ev.type === "assistant") {

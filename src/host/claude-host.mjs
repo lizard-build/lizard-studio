@@ -235,7 +235,7 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v34: Codex turn ids let the worker restore a running panel without duplicate history.
 // v36: live Claude Code model catalog via the initialize control request.
 // v37: Claude history chunks echo the request id, so only the asking view renders them.
-const HOST_VERSION = 38;
+const HOST_VERSION = 39;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -2496,7 +2496,111 @@ function hasMessages(lines) {
   return false;
 }
 
-function loadTranscript(id, sessionId, cwd, requestId) {
+// ---- paged transcript ---------------------------------------------------------
+// Replaying a whole session oldest-first leaves the panel painting thousands of
+// old messages before the newest one shows. Paged reads answer newest-first:
+// the last few turns now, earlier ones when the panel asks (cursor.end is the
+// exclusive index into the filtered event list). Each real user turn carries
+// `historyTurnIndex`, counted exactly as rewindSession counts, so editing an
+// old message still cuts the right line.
+const TRANSCRIPT_PAGE_TURNS = 30;
+const TRANSCRIPT_PAGE_BYTES = 1500000;
+const TRANSCRIPT_SYNTH_RE = /<(task-notification|system-reminder|local-command-stdout|local-command-stderr|local-command-caveat)>[\s\S]*?<\/\1>\n*/g;
+let transcriptCache = null;
+
+function transcriptEvent(o) {
+  if (o.isSidechain || o.isMeta || o.isCompactSummary || o.isVisibleInTranscriptOnly) return null;
+  if (o.type === "system" && o.subtype === "local_command" && typeof o.content === "string") {
+    return { type: "local_command", content: o.content, timestamp: o.timestamp };
+  }
+  if ((o.type === "user" || o.type === "assistant") && o.message) {
+    return { type: o.type, message: o.message, timestamp: o.timestamp };
+  }
+  return null;
+}
+
+// Mirrors the turn test in rewindSession: a user line with real text that is
+// not a bare /usage command.
+function countsAsTurn(ev) {
+  if (ev.type !== "user") return false;
+  const content = ev.message.content;
+  const hasText = typeof content === "string"
+    ? content.replace(TRANSCRIPT_SYNTH_RE, "").trim().length > 0
+    : Array.isArray(content) && content.some((b) => b && b.type === "text" && b.text);
+  return hasText && !isUsageCommandTurn(content);
+}
+
+function readTranscriptEvents(file) {
+  let st;
+  try { st = statSync(file); } catch { st = null; }
+  const key = st ? file + ":" + st.size + ":" + st.mtimeMs : null;
+  if (key && transcriptCache?.key === key) return Promise.resolve(transcriptCache.events);
+  return new Promise((resolve, reject) => {
+    const events = [];
+    let turns = 0;
+    const stream = createReadStream(file, "utf8");
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    stream.on("error", (err) => { rl.close(); reject(err); });
+    rl.on("line", (line) => {
+      if (!line.trim()) return;
+      let o;
+      try { o = JSON.parse(line); } catch { return; }
+      const ev = transcriptEvent(o);
+      if (!ev) return;
+      if (countsAsTurn(ev)) ev.historyTurnIndex = ++turns;
+      events.push(ev);
+    });
+    rl.on("close", () => {
+      if (key) transcriptCache = { key, events };
+      resolve(events);
+    });
+  });
+}
+
+function sendTranscriptPage(message) {
+  const json = JSON.stringify(message);
+  if (Buffer.byteLength(json) <= MAX_MSG) return send(message);
+  // Escaped Unicode stays below Chrome's 1 MB cap at this chunk size.
+  const chunkSize = 100000;
+  for (let offset = 0; offset < json.length; offset += chunkSize) {
+    send({ type: "transcriptPart", id: message.id, sessionId: message.sessionId,
+      requestId: message.requestId, index: offset / chunkSize,
+      total: Math.ceil(json.length / chunkSize), text: json.slice(offset, offset + chunkSize) });
+  }
+}
+
+async function loadTranscriptPage(msg) {
+  const { id, sessionId, cwd, requestId } = msg;
+  const meta = { type: "transcript", id, sessionId, requestId, paged: true, done: true };
+  const file = findTranscript(sessionId, cwd);
+  if (!file) { send({ ...meta, events: [], missing: true }); return; }
+  try {
+    const all = await readTranscriptEvents(file);
+    const initial = !msg.cursor;
+    const end = initial ? all.length : Math.min(all.length, Math.max(0, Number(msg.cursor.end) || 0));
+    let start = end;
+    let turns = 0;
+    let bytes = 0;
+    while (start > 0) {
+      const ev = all[start - 1];
+      bytes += JSON.stringify(ev).length;
+      start--;
+      if (ev.historyTurnIndex && (++turns >= TRANSCRIPT_PAGE_TURNS || bytes > TRANSCRIPT_PAGE_BYTES)) break;
+    }
+    // A page opens on a user turn; leading non-turn events (no user turn
+    // before them) belong to the first page of the file.
+    if (start > 0 && !all.slice(0, start).some((ev) => ev.historyTurnIndex)) start = 0;
+    const out = { ...meta, events: all.slice(start, end), nextCursor: start > 0 ? { kind: "claude", end: start } : null };
+    if (initial) out.totalTurns = all.reduce((n, ev) => n + (ev.historyTurnIndex ? 1 : 0), 0);
+    sendTranscriptPage(out);
+  } catch (err) {
+    log("transcript page failed", err.message);
+    send({ ...meta, events: [], error: String(err?.message || err) });
+  }
+}
+
+function loadTranscript(id, sessionId, cwd, requestId, msg) {
+  if (msg?.paged) { loadTranscriptPage({ ...msg, id, sessionId, cwd, requestId }); return; }
   const file = findTranscript(sessionId, cwd);
   if (!file) {
     send({ type: "transcript", id, requestId, events: [], done: true, missing: true });
@@ -2851,7 +2955,7 @@ function handle(msg) {
       break;
     }
     case "loadTranscript":
-      loadTranscript(id, msg.sessionId, msg.cwd, msg.requestId);
+      loadTranscript(id, msg.sessionId, msg.cwd, msg.requestId, msg);
       break;
     case "rewind":
       rewindSession(id, msg.turnIndex, msg.text, msg.images);

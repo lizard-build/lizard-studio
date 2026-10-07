@@ -6,7 +6,7 @@ window.runBackgroundPanelTests = async function () {
   const states = [{ id, agent: "codex", spec: { cwd: "/test/project", model: "test-model" },
     sessionId: "thread-history", started: true, running: true, submitted: true, turnIds: ["live-turn"] }];
   t.emit({ type: "backgroundRestoreStart", sessions: states });
-  t.emit({ type: "ready", ok: true, version: 38, home: "/test" });
+  t.emit({ type: "ready", ok: true, version: 39, home: "/test" });
   t.emit({ type: "agentReady", agent: "codex", ok: true, version: 12 });
   const replay = (message) => t.emit({ type: "backgroundReplay", message });
   replay({ type: "backgroundPrompt", id, text: "Keep working" });
