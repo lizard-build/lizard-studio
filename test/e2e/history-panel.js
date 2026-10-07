@@ -62,6 +62,32 @@ window.runHistoryPanelTests = async function () {
     sessionId: large.sessionId, requestId: large.requestId, index: offset / 100000, total: Math.ceil(packet.length / 100000), text: packet.slice(offset, offset + 100000) });
   check("large messages reassemble with both ends intact", box.textContent.includes("Beginning of long message.") && box.textContent.includes("End of long message."));
   check("history completion removes the load control", box.querySelector(".history-more").hidden);
+  // A chat reopened from the menu, not restored at startup, opens the same way:
+  // at its newest message, screenshot included, and loads earlier pages on
+  // scroll up.
+  const canvas = document.createElement("canvas");
+  canvas.width = 320; canvas.height = 240;
+  canvas.getContext("2d").fillRect(0, 0, 320, 240);
+  const screenshot = canvas.toDataURL("image/png").split(",")[1];
+  document.querySelector("#menu-btn").click();
+  await frame();
+  const row =[...document.querySelectorAll(".chat-menu-item")].find((node) => node.textContent.includes("Old chat"));
+  check("the menu lists the old chat", !!row);
+  row.click();
+  const reopened = last();
+  check("reopening an old chat asks for its tail", reopened.sessionId === "session-old" && reopened.paged && reopened.cursor === null);
+  reply(reopened, [...events(40, 45), { type: "user", historyItemId: "shot", historyTurnIndex: 6,
+    message: { role: "user", content: [{ type: "text", text: "Newest question with a screenshot" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: screenshot } }] } }], { kind: "turns", value: "older-40" });
+  const oldBox = document.querySelector(".chat-messages:not(.hidden)");
+  const thumb = oldBox.querySelector(".bubble-thumb");
+  if (!thumb.complete) await new Promise((resolve) => thumb.addEventListener("load", resolve, { once: true }));
+  await frame();
+  check("a reopened chat opens at its newest message once its screenshot loads", oldBox.scrollHeight - oldBox.scrollTop - oldBox.clientHeight < 3 && oldBox.textContent.includes("Newest question") && !oldBox.textContent.includes("Message 39"));
+  oldBox.scrollTop = 20;
+  oldBox.dispatchEvent(new Event("scroll"));
+  await frame();
+  check("scrolling up in a reopened chat requests the page before", last().cursor?.value === "older-40");
   check("history causes no browser errors", t.errors.length === 0);
   return { passed: passed.length, checks: passed };
 };

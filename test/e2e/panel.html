@@ -201,6 +201,7 @@
       if (historyRegression || backgroundRegression) store.rkChatV2 = {
         activeId: "history-a", lastHarness: "codex",
         tabs: [{ id: "history-a", title: "History", harness: "codex", model: "test-model", cwd: "/test/project", sessionId: "thread-history", mode: "workspace" }],
+        history: [{ id: "history-old", title: "Old chat", harness: "claude", model: "claude-opus-5-5", cwd: "/test/project", sessionId: "session-old", mode: "default", ts: Date.now() - 86400000 }],
       };
       if (codexRegression) store.rkChatV2 = {
         activeId: "audit-a", lastHarness: "codex",

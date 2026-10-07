@@ -596,16 +596,6 @@
             const chat = makeChat({ id: t.id, title: t.title, cwd: t.cwd, harness: t.harness, model: canonicalModel(t.model), effort: t.effort, mode: t.mode, sessionId: t.sessionId, bashHistory: t.bashHistory, lastActivityAt: t.lastActivityAt, draft: t.draft, contexts: t.contexts, attachments: t.attachments, bashMode: t.bashMode, bookmarkColor: t.bookmarkColor, titleEdited: t.titleEdited, closedQuestionIds: t.closedQuestionIds });
             chat.queue = Array.isArray(t.queue) ? t.queue : [];
             chats.set(chat.id, chat);
-    let lastScrollTop = 0;
-    const earlier = () => {
-      if (chat.id === activeId && chat.messagesEl.scrollTop < 160 && chat.historyCursor) requestHistoryPage(chat);
-    };
-    chat.messagesEl.addEventListener("scroll", () => {
-      const top = chat.messagesEl.scrollTop;
-      if (top < lastScrollTop) earlier();
-      lastScrollTop = top;
-    }, { passive: true });
-    chat.messagesEl.addEventListener("wheel", (e) => { if (e.deltaY < 0) earlier(); }, { passive: true });
             order.push(chat.id);
           }
           activeId = chats.has(p.activeId) ? p.activeId : order[0];
@@ -6631,6 +6621,31 @@
       cwd: chat.cwd, requestId: request.id, cursor: chat.historyCursor, excludeTurnIds: [...(chat.backgroundTurnIds || [])], backgroundRestore: !!chat.backgroundTurnIds, paged: true })) historyFailed(chat, request);
   }
 
+  // Scrolling up near the top of the open chat loads the page before it. One
+  // capture listener on the stack serves every chat however it was opened —
+  // restored at startup, picked from the menu, or synced from another window.
+  // A wheel turn counts too, since a short page has nothing to scroll.
+  function wireHistoryScroll() {
+    const earlier = (chat) => {
+      if (chat.messagesEl.scrollTop < 160 && chat.historyCursor) requestHistoryPage(chat);
+    };
+    const openChat = (target) => {
+      const chat = chats.get(activeId);
+      return chat && chat.messagesEl.contains(target) ? chat : null;
+    };
+    els.stack.addEventListener("scroll", (e) => {
+      const chat = openChat(e.target);
+      if (!chat || e.target !== chat.messagesEl) return;
+      const top = chat.messagesEl.scrollTop;
+      if (top < (chat.lastScrollTop || 0)) earlier(chat);
+      chat.lastScrollTop = top;
+    }, { capture: true, passive: true });
+    els.stack.addEventListener("wheel", (e) => {
+      const chat = e.deltaY < 0 && openChat(e.target);
+      if (chat) earlier(chat);
+    }, { capture: true, passive: true });
+  }
+
   function historyFailed(chat, request) {
     if (chat.historyRequest !== request || !chats.has(chat.id)) return;
     clearTimeout(request.timer);
@@ -6700,6 +6715,16 @@
       chat.stick = true;
       scrollToBottom(chat);
       // Hidden tabs have no layout until activated; restoreScroll uses stick.
+      // Images have no height until they decode, so the bottom moves after
+      // this scroll. Follow it unless the reader has scrolled away since.
+      for (const img of box.querySelectorAll("img")) {
+        if (img.complete) continue;
+        img.addEventListener("load", () => {
+          if (chat.id !== activeId) return;
+          const grew = img.getBoundingClientRect().height;
+          if (box.scrollHeight - grew - box.scrollTop - box.clientHeight < 80) scrollToBottom(chat);
+        }, { once: true });
+      }
     } else if (anchor) {
       box.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
       chat.stick = false;
@@ -11320,6 +11345,7 @@
       }
     });
     mounted = true;
+    wireHistoryScroll();
 
     // Reflow drafts when the side panel opens or changes width. Ignore height
     // changes caused by autosize itself so the observer cannot loop.
