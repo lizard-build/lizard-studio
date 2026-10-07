@@ -410,6 +410,15 @@ async function selfUpdate(id) {
     for (const w of wanted) {
       if (typeof files[w] !== "string") throw new Error("missing " + w + " in tarball");
     }
+    // The registry can be behind this copy: a helper installed from source runs
+    // ahead of the last release. Swapping then installs an older host that the
+    // panel rejects as well, so only a newer HOST_VERSION may replace us.
+    const published = Number(/^const HOST_VERSION = (\d+);/m.exec(files["package/src/host/claude-host.mjs"])?.[1]);
+    if (!(published > HOST_VERSION)) {
+      send({ type: "selfUpdate", id, updated: false, version: meta.version });
+      log(`selfUpdate: registry ${meta.version} has host v${published || "?"}, not newer than v${HOST_VERSION} — keeping this copy`);
+      return;
+    }
     let changed = false;
     const present = [...HOST_FILES, ...HOST_FILES_OPTIONAL.filter((n) => typeof files[`package/src/host/${n}`] === "string")];
     for (const name of present) {
