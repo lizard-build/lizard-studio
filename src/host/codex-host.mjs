@@ -1905,7 +1905,22 @@ async function rewindSession(msg) {
     const input = (original.content || []).filter((part) => part.type !== "text");
     if (!msg.text.trim() && !input.length) throw new Error("Enter a message before sending.");
     if (sessions.get(s.id) !== s) throw new Error("The session changed. Reopen the chat before editing again.");
-    const rollback = await rpc("thread/rollback", { threadId: s.threadId, numTurns: removed.length }, 60000);
+    let reverted;
+    try {
+      reverted = await rpc("thread/revert", { threadId: s.threadId, beforeTurnId: target.id }, 60000);
+    } catch (err) {
+      // Retry only when the server rejected the method before changing history.
+      // A timeout or a storage error may follow a successful edit.
+      if (!/unknown (method|variant)|method not found|unsupported method/i.test(err?.message || "")) throw err;
+      try {
+        reverted = await rpc("thread/rollback", { threadId: s.threadId, numTurns: removed.length }, 60000);
+      } catch (legacyError) {
+        if (/unknown (method|variant)|method not found|unsupported method/i.test(legacyError?.message || "")) {
+          throw new Error("This Codex version can't edit messages. Update Codex and try again.");
+        }
+        throw legacyError;
+      }
+    }
     if (sessions.get(s.id) !== s) throw new Error("The session changed. Reopen the chat before editing again.");
     for (const id of removed) s.discardedTurns.add(id);
     for (const reqId of s.asks.keys()) {
@@ -1921,8 +1936,9 @@ async function rewindSession(msg) {
     s.turnId = null;
     s.usage = null;
     s.running = false;
-    // The panel only removes old rows after the server confirms the rollback.
-    reply({ ok: true, previousTurnId: rollback?.thread?.turns?.at(-1)?.id || null });
+    // The panel only removes old rows after the server confirms the edit.
+    reply({ ok: true, previousTurnId: reverted?.thread?.turns?.at(-1)?.id || null,
+      historyCursor: reverted?.turnsBackwardsCursor ? { kind: "turns", value: reverted.turnsBackwardsCursor } : null });
     s.rewinding = false;
     await sendPrompt({ id: s.id, text: context + msg.text, rewindInput: input, messageId: msg.requestId });
   } catch (err) {

@@ -2220,13 +2220,6 @@
   function wireCodexEdit(chat, row) {
     if (row.codexEditWired || !row.codexEdit?.turnId) return;
     row.codexEditWired = true;
-    const button = el("button", "sent-edit");
-    button.type = "button";
-    button.title = "Edit message";
-    button.setAttribute("aria-label", "Edit message");
-    button.innerHTML = ICON("edit", 13);
-    button.addEventListener("click", () => beginCodexEdit(chat, row));
-    row.appendChild(button);
     const bubble = row.querySelector(".bubble");
     bubble.classList.add("editable");
     bubble.addEventListener("click", (event) => {
@@ -2253,27 +2246,20 @@
     input.value = edit.text;
     if (md) md.replaceWith(input); else bubble.appendChild(input);
     bubble.classList.add("editing");
-    const note = el("div", "msg-edit-note", "Sending restarts the chat from here. Later messages are removed. File changes stay.");
-    const actions = el("div", "msg-edit-actions");
-    const cancel = el("button", "msg-edit-cancel", "Cancel");
-    const save = el("button", "msg-edit-save", "Save & send");
-    cancel.type = save.type = "button";
-    actions.append(cancel, save);
-    bubble.append(note, actions);
     const resize = () => { input.style.height = "auto"; input.style.height = input.scrollHeight + "px"; };
     input.addEventListener("input", resize);
     const setPending = (pending) => {
-      input.disabled = cancel.disabled = save.disabled = pending;
-      save.textContent = pending ? "Restarting…" : "Save & send";
+      input.disabled = pending;
+      if (!pending) input.focus();
     };
     const revert = () => {
       if (input.disabled) return;
       input.replaceWith(R.markdown(edit.text));
-      note.remove(); actions.remove(); bubble.classList.remove("editing");
+      bubble.classList.remove("editing");
     };
     const submit = () => {
       if (chat.rewindPending || input.disabled) return;
-      if (!input.value.trim() && !edit.hasAttachments) return;
+      if (!input.value.trim() && !edit.hasAttachments) return revert();
       const requestId = newId();
       const pending = { requestId, row, text: input.value, edit, setPending };
       chat.rewindPending = pending;
@@ -2282,8 +2268,9 @@
         finishCodexEdit(chat, { requestId, ok: false, running: chat.turnRunning, error: "Host disconnected. Your edit was not sent." });
       }
     };
-    cancel.addEventListener("click", revert);
-    save.addEventListener("click", submit);
+    input.addEventListener("blur", () => {
+      if (bubble.classList.contains("editing")) revert();
+    });
     input.addEventListener("keydown", (event) => {
       if (event.isComposing) return;
       if (event.key === "Escape") { event.preventDefault(); revert(); }
@@ -2317,7 +2304,7 @@
       const rows = [...chat.messagesEl.children];
       const earlier = rows.slice(0, rows.indexOf(pending.row)).find((row) => row.codexEdit?.turnId);
       chat.historyCursor = earlier ? { kind: "legacy", before: earlier.codexEdit.turnId }
-        : msg.previousTurnId ? { kind: "legacy", through: msg.previousTurnId } : null;
+        : msg.historyCursor || (msg.previousTurnId ? { kind: "legacy", through: msg.previousTurnId } : null);
     }
     historyNav(chat);
     // Keep queued prompts, but remove their rows while the transcript is cut.
