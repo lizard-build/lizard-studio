@@ -652,7 +652,7 @@ test("editing uses stable IDs across history pages and preserves context and ori
     if (req.method === "thread/turns/list") return req.params.cursor
       ? { data: [editTurn("t2", [{ type: "text", text: context + "Old" }, ...attachments]), editTurn("t1")] }
       : { data: [editTurn("t4"), editTurn("t3")], nextCursor: "older" };
-    if (req.method === "thread/rollback") { assert.equal(req.params.numTurns, 3); return { thread: { id: s.threadId } }; }
+    if (req.method === "thread/revert") { assert.deepEqual(req.params, { threadId: s.threadId, beforeTurnId: "t2" }); return { thread: { id: s.threadId, turns: [] }, turnsBackwardsCursor: "retained-history" }; }
     if (req.method === "turn/start") {
       assert.equal(h.messages.at(-1).type, "rewindResult");
       assert.equal(h.messages.at(-1).ok, true);
@@ -662,14 +662,49 @@ test("editing uses stable IDs across history pages and preserves context and ori
     throw new Error(req.method);
   });
   await h.api.rewindSession(editRequest());
-  assert.deepEqual(h.requests.map((r) => r.method), ["thread/turns/list", "thread/turns/list", "thread/rollback", "turn/start"]);
+  assert.deepEqual(h.requests.map((r) => r.method), ["thread/turns/list", "thread/turns/list", "thread/revert", "turn/start"]);
   assert.equal(h.messages.at(-1).type, "promptAccepted");
   assert.equal(h.messages.at(-1).turnId, "replacement");
   assert.equal(h.messages.at(-1).messageId, "edit-request");
   assert.equal(s.running, true);
+  assert.deepEqual(h.messages.find((m) => m.type === "rewindResult").historyCursor, { kind: "turns", value: "retained-history" });
   h.api.handleNotification("turn/completed", { threadId: s.threadId, turn: { id: "t4", status: "completed" } });
   assert.equal(s.running, true);
 });
+
+for (const error of ["method not found", "Invalid request: unknown variant `thread/revert`, expected one of `initialize`, `thread/rollback`"]) {
+  test(`older Codex can still edit: ${error}`, async () => {
+    const h = await host(), s = h.session(); s.running = false;
+    h.respond((req) => {
+      if (req.method === "thread/turns/list") return { data: [editTurn("t3"), editTurn("t2"), editTurn("t1")] };
+      if (req.method === "thread/revert") throw new Error(error);
+      if (req.method === "thread/rollback") {
+        assert.deepEqual(req.params, { threadId: s.threadId, numTurns: 2 });
+        return { thread: { turns: [editTurn("t1")] } };
+      }
+      if (req.method === "turn/start") return { turn: { id: "replacement" } };
+      throw new Error(req.method);
+    });
+    await h.api.rewindSession(editRequest());
+    assert.deepEqual(h.requests.map((r) => r.method), ["thread/turns/list", "thread/revert", "thread/rollback", "turn/start"]);
+    assert.equal(h.messages.find((m) => m.type === "rewindResult").previousTurnId, "t1");
+  });
+}
+
+for (const error of ["Request timed out", "Disk write failed", "Thread is busy"]) {
+  test(`an uncertain revert never falls back or sends another prompt: ${error}`, async () => {
+    const h = await host(), s = h.session(); s.running = false;
+    h.respond((req) => {
+      if (req.method === "thread/turns/list") return { data: [editTurn("t2")] };
+      if (req.method === "thread/revert") throw new Error(error);
+      throw new Error("Must not retry an uncertain edit");
+    });
+    await h.api.rewindSession(editRequest());
+    assert.deepEqual(h.requests.map((r) => r.method), ["thread/turns/list", "thread/revert"]);
+    assert.equal(h.messages.at(-1).ok, false);
+    assert.equal(s.discardedTurns.size, 0);
+  });
+}
 
 test("editing an active chat waits for turn completion and ignores late removed events", async () => {
   const h = await host(), s = h.session();
@@ -694,7 +729,7 @@ test("editing an active chat waits for turn completion and ignores late removed 
   assert.equal(s.rewinding, false);
 });
 
-for (const failure of ["missing target", "wrong user item", "rollback unsupported", "read failed"]) {
+for (const failure of ["missing target", "wrong user item", "edit unsupported", "read failed"]) {
   test(`failed edit never starts a replacement: ${failure}`, async () => {
     const h = await host(), s = h.session(); s.running = false;
     h.respond((req) => {
@@ -702,7 +737,7 @@ for (const failure of ["missing target", "wrong user item", "rollback unsupporte
         if (failure === "read failed") throw new Error("Disk read failed");
         return { data: [editTurn(failure === "missing target" ? "other" : "t2")] };
       }
-      if (req.method === "thread/rollback") throw new Error("method not found");
+      if (["thread/revert", "thread/rollback"].includes(req.method)) throw new Error("method not found");
       throw new Error("Must not start a turn");
     });
     const msg = editRequest(); if (failure === "wrong user item") msg.itemId = "later-correction";
@@ -718,7 +753,7 @@ test("first-message edit removes every turn and can restart with only an attachm
   const h = await host(), s = h.session(); s.running = false;
   h.respond((req) => {
     if (req.method === "thread/turns/list") return { data: [editTurn("t2"), editTurn("t1", [{ type: "localImage", path: "/test/one.png" }])] };
-    if (req.method === "thread/rollback") assert.equal(req.params.numTurns, 2);
+    if (req.method === "thread/revert") assert.deepEqual(req.params, { threadId: s.threadId, beforeTurnId: "t1" });
     if (req.method === "turn/start") { assert.deepEqual(req.params.input, [{ type: "localImage", path: "/test/one.png" }]); return { turn: { id: "new" } }; }
     return {};
   });
@@ -735,7 +770,7 @@ test("double submission cannot roll back twice and a stop timeout leaves history
   const timeout = [...h.timers].find((t) => t.ms === 20000); assert.ok(timeout); timeout.fn();
   await work;
   assert.equal(h.messages.at(-1).ok, false);
-  assert.equal(h.requests.some((r) => r.method === "thread/rollback"), false);
+  assert.equal(h.requests.some((r) => ["thread/revert", "thread/rollback"].includes(r.method)), false);
 });
 
 test("history carries the stable turn and user-item IDs used by edits", async () => {

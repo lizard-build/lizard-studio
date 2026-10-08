@@ -515,8 +515,7 @@
   // Play a chime when a session fully finishes (Settings → General). Off by
   // default — sound is opt-in.
   let soundOnDone = false;
-  // Last folder the user actually picked (never home — see rememberCwd). New
-  // chats default to this so reopening the panel resumes where you left off.
+  // Last folder the user picked, shared by all harnesses and models.
   let lastCwd = null;
 
   // Slash-command autocomplete (populated from each session's init event).
@@ -645,6 +644,7 @@
     const previousActiveId = activeId;
     applyingSharedPrefs = true;
     try {
+      if (prefs.lastCwd !== undefined) lastCwd = prefs.lastCwd;
       const ids = new Set((prefs.tabs || []).map((t) => t.id));
       for (const [id, chat] of chats) if (!ids.has(id)) {
         chat.messagesEl.remove();
@@ -685,12 +685,10 @@
     if (activeId && activeId !== previousActiveId) setActive(activeId);
   }
 
-  // Remember a folder the user deliberately selected so new chats can default to
-  // it. Home doesn't count as a "chosen project" — it's the unselected fallback,
-  // so we never persist it (keeps `defaultCwd` from silently locking onto ~).
+  // Remember a folder only when the user selects it. Session startup and
+  // history restore report a chat's folder, not a new folder choice.
   function rememberCwd(p) {
     if (!p) return;
-    if (home && p.replace(/\/$/, "") === home.replace(/\/$/, "")) return;
     lastCwd = p;
   }
 
@@ -1172,7 +1170,7 @@
     order = order.filter((x) => x !== id);
 
     if (!order.length) {
-      createChat({ cwd: chat.cwd });
+      createChat({ cwd: defaultCwd() || chat.cwd });
     } else if (activeId === id) {
       setActive(order[order.length - 1]);
     } else {
@@ -2220,13 +2218,6 @@
   function wireCodexEdit(chat, row) {
     if (row.codexEditWired || !row.codexEdit?.turnId) return;
     row.codexEditWired = true;
-    const button = el("button", "sent-edit");
-    button.type = "button";
-    button.title = "Edit message";
-    button.setAttribute("aria-label", "Edit message");
-    button.innerHTML = ICON("edit", 13);
-    button.addEventListener("click", () => beginCodexEdit(chat, row));
-    row.appendChild(button);
     const bubble = row.querySelector(".bubble");
     bubble.classList.add("editable");
     bubble.addEventListener("click", (event) => {
@@ -2253,27 +2244,20 @@
     input.value = edit.text;
     if (md) md.replaceWith(input); else bubble.appendChild(input);
     bubble.classList.add("editing");
-    const note = el("div", "msg-edit-note", "Sending restarts the chat from here. Later messages are removed. File changes stay.");
-    const actions = el("div", "msg-edit-actions");
-    const cancel = el("button", "msg-edit-cancel", "Cancel");
-    const save = el("button", "msg-edit-save", "Save & send");
-    cancel.type = save.type = "button";
-    actions.append(cancel, save);
-    bubble.append(note, actions);
     const resize = () => { input.style.height = "auto"; input.style.height = input.scrollHeight + "px"; };
     input.addEventListener("input", resize);
     const setPending = (pending) => {
-      input.disabled = cancel.disabled = save.disabled = pending;
-      save.textContent = pending ? "Restarting…" : "Save & send";
+      input.disabled = pending;
+      if (!pending) input.focus();
     };
     const revert = () => {
       if (input.disabled) return;
       input.replaceWith(R.markdown(edit.text));
-      note.remove(); actions.remove(); bubble.classList.remove("editing");
+      bubble.classList.remove("editing");
     };
     const submit = () => {
       if (chat.rewindPending || input.disabled) return;
-      if (!input.value.trim() && !edit.hasAttachments) return;
+      if (!input.value.trim() && !edit.hasAttachments) return revert();
       const requestId = newId();
       const pending = { requestId, row, text: input.value, edit, setPending };
       chat.rewindPending = pending;
@@ -2282,8 +2266,9 @@
         finishCodexEdit(chat, { requestId, ok: false, running: chat.turnRunning, error: "Host disconnected. Your edit was not sent." });
       }
     };
-    cancel.addEventListener("click", revert);
-    save.addEventListener("click", submit);
+    input.addEventListener("blur", () => {
+      if (bubble.classList.contains("editing")) revert();
+    });
     input.addEventListener("keydown", (event) => {
       if (event.isComposing) return;
       if (event.key === "Escape") { event.preventDefault(); revert(); }
@@ -2317,7 +2302,7 @@
       const rows = [...chat.messagesEl.children];
       const earlier = rows.slice(0, rows.indexOf(pending.row)).find((row) => row.codexEdit?.turnId);
       chat.historyCursor = earlier ? { kind: "legacy", before: earlier.codexEdit.turnId }
-        : msg.previousTurnId ? { kind: "legacy", through: msg.previousTurnId } : null;
+        : msg.historyCursor || (msg.previousTurnId ? { kind: "legacy", through: msg.previousTurnId } : null);
     }
     historyNav(chat);
     // Keep queued prompts, but remove their rows while the transcript is cut.
@@ -5282,7 +5267,7 @@
           // truth, so never auto-replay the on-disk transcript over it. (For a
           // restored tab, maybeReplay already set this before init arrived.)
           chat.replayed = true;
-          if (d.cwd) { chat.cwd = d.cwd; rememberCwd(d.cwd); }
+          if (d.cwd) chat.cwd = d.cwd;
           if (d.session_id) chat.sessionId = d.session_id;
           if (Array.isArray(d.slash_commands)) chat.slashCommands = withLocalCommands(d.slash_commands, chat.harness);
           if (Array.isArray(d.skills)) chat.skills = d.skills;
@@ -6137,7 +6122,7 @@
           chat.suppressExitNote = false; // any pending suppression is moot now
           // A (re)spawned process can't answer asks from the previous one.
           clearPermCards(chat);
-          if (msg.cwd) { chat.cwd = msg.cwd; rememberCwd(msg.cwd); }
+          if (msg.cwd) chat.cwd = msg.cwd;
           if (msg.permissionMode) chat.mode = msg.permissionMode;
           if (chat.id === activeId) syncComposer();
           requestBranches(chat);
@@ -10419,8 +10404,7 @@
     if (lastHarness && lastHarness !== DEFAULT_HARNESS) wanted.add(lastHarness);
     for (const c of chats.values()) if (c.harness && c.harness !== DEFAULT_HARNESS) wanted.add(c.harness);
     for (const agent of wanted) {
-      const chat = [...chats.values()].find((c) => c.harness === agent && c.cwd);
-      post({ type: "prewarm", agent, cwd: (chat && chat.cwd) || lastCwd || undefined });
+      post({ type: "prewarm", agent, cwd: defaultCwd() || undefined });
     }
   }
 
@@ -10473,7 +10457,7 @@
   function chooseHarness(chat, id) {
     if (!chat || chat.harness === id) return;
     if ((!chat.empty && !chatHasEmptyView(chat)) || chat.turnRunning || chat.queue.length) {
-      createChat({ cwd: chat.cwd, harness: id });
+      createChat({ cwd: defaultCwd(), harness: id });
       return;
     }
     const hadSession = chat.started || chat.sessionId;
