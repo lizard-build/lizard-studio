@@ -113,7 +113,7 @@ test('a restored worker that lost the session releases its pending answer', () =
   const p = setup(), entry = p.ask(); entry.activate(0);
   p.chat.turnRunning = true; p.chat.bashRuns = new Map();
   Object.assign(p.scope, {
-    backgroundRestoreStates: [], backgroundRestoring: true,
+    backgroundRestoreStates: [], backgroundRestorePartial: false, backgroundRestoring: true,
     systemNote() {}, endTurn(chat) { chat.turnRunning = false; },
     renderTabs() {}, syncComposer() {}, prewarmHarnesses() {}, finishAgentCheck() {},
   });

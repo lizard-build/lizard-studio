@@ -9,6 +9,7 @@
 (function () {
   let backgroundRestoring = false;
   let backgroundRestoreStates = [];
+  let backgroundRestorePartial = false;
   let sharedRendering = false, applyingSharedPrefs = false, prefsSync = null;
   const RECONNECT_MS = 1200;
   const R = window.RKRender;
@@ -5943,6 +5944,7 @@
     if (msg.type === "backgroundRestoreStart") {
       backgroundRestoring = true;
       backgroundRestoreStates = msg.sessions || [];
+      backgroundRestorePartial = !!msg.partial;
       for (const state of backgroundRestoreStates) {
         const old = chats.get(state.id);
         const chat = makeChat({ ...old, id: state.id, harness: state.agent,
@@ -5990,7 +5992,9 @@
     }
     if (msg.type === "backgroundRestoreEnd") {
       const restoredIds = new Set(backgroundRestoreStates.map((state) => state.id));
-      for (const chat of chats.values()) {
+      // Opening a deferred chat restores only that chat. Every other chat is
+      // still live in the worker, so only a full snapshot can prove a loss.
+      for (const chat of backgroundRestorePartial ? [] : chats.values()) {
         if (restoredIds.has(chat.id)) continue;
         failAsyncQuestionSends(chat);
         if (!chat.started) continue;
@@ -6016,6 +6020,7 @@
         if (!chat.backgroundDeferred && chat.started && !chat.turnRunning && !state.failed && !chat.permCards.size) dispatchNextQueued(chat);
       }
       backgroundRestoreStates = [];
+      backgroundRestorePartial = false;
       renderTabs(); updateTabDots(); syncComposer(); savePrefs();
       prewarmHarnesses(); finishAgentCheck();
       return;

@@ -11,7 +11,7 @@ function restore({ savedId = null, resume = null, submitted = false, running = f
   const old = { id: "a", harness: "codex", sessionId: savedId, codexHasSubmittedTurn: !!savedId, messagesEl: element() };
   const scope = {
     chats: new Map([["a", old]]), order: ["a"], activeId: "a",
-    backgroundRestoring: false, backgroundRestoreStates: [], connected: true, hostReady: true,
+    backgroundRestoring: false, backgroundRestoreStates: [], backgroundRestorePartial: false, connected: true, hostReady: true,
     els: { stack: { appendChild() {} } }, clearTimeout,
     makeChat: (opts) => ({ ...opts, empty: !opts.sessionId, codexHasSubmittedTurn: !!opts.sessionId,
       messagesEl: element(), permCards: new Map(), queue: [] }),

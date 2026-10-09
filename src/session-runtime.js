@@ -338,7 +338,9 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
     if (msg.type === "backgroundReplaySession") {
       if (!existing || !origin || !deferredReplays.get(origin)?.delete(msg.id)) return;
       if (!existing.controller) existing.controller = origin;
-      send(origin, { type: "backgroundRestoreStart", sessions: [stateFor(existing, origin)] });
+      // This snapshot lists one chat, not every live session. The panel must
+      // not read the other chats' absence as a lost host.
+      send(origin, { type: "backgroundRestoreStart", partial: true, sessions: [stateFor(existing, origin)] });
       replaySession(origin, existing);
       send(origin, { type: "backgroundRestoreEnd" });
       return;

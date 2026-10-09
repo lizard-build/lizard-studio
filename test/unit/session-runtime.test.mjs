@@ -432,6 +432,7 @@ test("opening many large chats replays only the selected chat until another is o
   const lazy = r.panel(1, { lazyReplay: true, activeId: "chat-0" });
   const snapshot = lazy.sent.find(m => m.type === "backgroundRestoreStart");
   assert.equal(snapshot.sessions.length, 80);
+  assert.equal(snapshot.partial, undefined, "the attach snapshot lists every live session");
   assert.equal(snapshot.sessions.filter(s => s.replayDeferred).length, 79);
   assert.ok(lazy.sent.filter(m => m.type === "backgroundReplay").every(m => m.message.id === "chat-0"));
   assert.ok(JSON.stringify(lazy.sent).length < 100000, "hidden transcripts must not cross the panel port");
@@ -442,6 +443,8 @@ test("opening many large chats replays only the selected chat until another is o
   const before = lazy.sent.length;
   lazy.emit({ type: "backgroundReplaySession", id: "chat-1" });
   const restored = lazy.sent.slice(before);
+  assert.equal(restored[0].partial, true, "a one-chat replay must not read as a full snapshot");
+  assert.deepEqual(restored[0].sessions.map(s => s.id), ["chat-1"]);
   assert.equal(restored[0].sessions[0].replayDeferred, false);
   assert.equal(restored[0].sessions[0].observer, false);
   assert.ok(restored.some(m => m.message?.data?.text?.length === 50000));
