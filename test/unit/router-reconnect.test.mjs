@@ -16,7 +16,7 @@ function daemon() {
     process: { exit() { throw Error("unexpected exit"); } },
     net: { createServer(fn) { accept = fn; return server; }, createConnection: () => new EventEmitter() },
     route: (_body, text) => routed.push(JSON.parse(text)),
-    log() {}, maybeIdleExit() {}, chmodSync() {}, unlinkSync() {}, startHosts() {},
+    log() {}, maybeIdleExit() {}, restartIfStale: () => false, chmodSync() {}, unlinkSync() {}, startHosts() {},
     setTimeout(fn) { const timer = { fn, unref() {} }; timers.add(timer); return timer; },
     clearTimeout(timer) { timers.delete(timer); },
   };

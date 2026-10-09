@@ -64,13 +64,15 @@ test('router sends ChatGPT workspace requests to Codex and shared folder request
       spawned.push({ bin, args, options, child });
       return child;
     } }) },
-    'node:fs': { existsSync: () => true, chmodSync() {}, unlinkSync() {} },
+    'node:fs': { existsSync: () => true, chmodSync() {}, unlinkSync() {}, readFileSync: () => 'code' },
+    'node:crypto': { createHash: (await import('node:crypto')).createHash },
     'node:child_process': { spawn() { throw Error('unexpected detached spawn'); } },
     'node:net': { default: {} },
     'node:path': path,
     './hostkit.mjs': { HOST_DIR: '/test', makeLog: () => () => {}, frameReader: () => () => {}, frameRaw: (raw) => raw, writeFrame: (_stream, obj) => { notices.push(obj); }, redact() {} },
   };
-  const context = createContext({ process: proc, Buffer, setTimeout: (fn) => { timers.push(fn); return { unref() {} }; } });
+  const context = createContext({ process: proc, Buffer, setTimeout: (fn) => { timers.push(fn); return { unref() {} }; },
+    setInterval: () => ({ unref() {} }) });
   const module = new SourceTextModule(readFileSync(new URL('../../src/host/router.mjs', import.meta.url), 'utf8') + '\nexport { route, recordChildMessage, replayToBrowser };', { context });
   await module.link((name) => {
     const values = imports[name];

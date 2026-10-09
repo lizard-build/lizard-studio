@@ -32,9 +32,10 @@
 //   panel -> any:     { ..., agent }                   pick the host explicitly
 //   router -> panel:  { type:"agentExit", agent, code } a host died
 
-import { existsSync, chmodSync, unlinkSync } from "node:fs";
+import { existsSync, chmodSync, unlinkSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import net from "node:net";
 import { HOST_DIR, makeLog, frameReader, frameRaw, writeFrame, redact } from "./hostkit.mjs";
 import { createHostSpawner } from "./codex-spawn.mjs";
@@ -94,6 +95,38 @@ let shuttingDown = false;
 let primaryRestartDelay = 500;
 let browserOutput = daemonMode ? null : process.stdout;
 let idleTimer = null;
+const runningCommands = new Set(); // composer shell commands still running
+
+// The session daemon outlives extension reloads, and the worker can keep its
+// connection open for days. An install or a self-update then changes the files
+// on disk while every host still runs the code it started with. Remember that
+// code and restart once it changes and nothing is running. A restart closes the
+// browser connection; the worker reconnects and starts the new copy.
+const CODE_FILES = ["router.mjs", "hostkit.mjs", "codex-spawn.mjs", "claude-host.mjs", "codex-host.mjs", "mcp-browser.mjs"];
+const STALE_CHECK_MS = 30000;
+// A finished turn can be followed at once by a queued prompt from the panel.
+const SETTLE_MS = 5000;
+let lastBusyAt = 0;
+function codeHash() {
+  const hash = createHash("sha256");
+  for (const name of CODE_FILES) {
+    hash.update(name + "\0");
+    try { hash.update(readFileSync(join(HOST_DIR, name))); } catch { hash.update("missing"); }
+  }
+  return hash.digest("hex");
+}
+const loadedCode = bridgeMode ? null : codeHash();
+function busy() {
+  return runningCommands.size > 0 || [...sessionState.values()].some((s) => s.running);
+}
+function restartIfStale() {
+  if (bridgeMode || shuttingDown) return false;
+  if (busy()) { lastBusyAt = Date.now(); return false; }
+  if (Date.now() - lastBusyAt < SETTLE_MS || codeHash() === loadedCode) return false;
+  log("host files changed on disk — restarting to load the new copy");
+  shutdown(0);
+  return true;
+}
 
 const MAX_JOURNAL_BYTES = 32 * 1024 * 1024;
 function writeToBrowser(body) {
@@ -130,6 +163,8 @@ function recordChildMessage(name, body) {
   if (["ready", "agentReady", "models", "planUsage"].includes(msg.type)) {
     readyFrames.set(msg.type + (msg.agent || ""), Buffer.from(body));
   }
+  if (msg.type === "bashStart" && msg.execId != null) runningCommands.add(msg.execId);
+  if (msg.type === "bashExit" && runningCommands.delete(msg.execId)) lastBusyAt = Date.now();
   const state = msg.id == null ? null : sessionState.get(msg.id);
   if (state && state.agent === name) {
     if (msg.type === "started") state.started = true;
@@ -143,6 +178,7 @@ function recordChildMessage(name, body) {
       if (msg.turnId) state.turnIds.add(msg.turnId);
     }
     if (msg.type === "event" && msg.data?.type === "result" || msg.type === "interrupted" || msg.type === "exit") {
+      if (state.running) lastBusyAt = Date.now();
       state.running = false;
       state.failed = !!msg.data?.is_error || msg.type !== "event";
       if (msg.type === "exit") state.started = false;
@@ -203,9 +239,12 @@ function spawnAgent(name) {
 
   let proc;
   try {
+    // The daemon markers stay with the daemon. A router started from a chat
+    // would otherwise read them as its own and quit at once.
+    const { LIZARD_STUDIO_ROUTER_DAEMON: _daemon, LIZARD_STUDIO_ROUTER_SOCKET: _socket, ...env } = process.env;
     proc = hostSpawner.spawn(process.execPath, [path], {
       cwd: process.cwd(),
-      env: { ...process.env, LIZARD_STUDIO_ROUTER_PID: String(process.pid) },
+      env: { ...env, LIZARD_STUDIO_ROUTER_PID: String(process.pid) },
     });
   } catch (err) {
     log("spawn failed for", name, err && err.message);
@@ -268,6 +307,9 @@ function spawnAgent(name) {
       state.started = false;
       state.failed = true;
     }
+    // Shell commands run in the claude host and cannot report back without it.
+    if (name === "claude") runningCommands.clear();
+    lastBusyAt = Date.now();
     if (name === "claude") readyFrames.delete("ready");
     readyFrames.delete("agentReady" + name);
     notifyPanel({ type: "agentExit", agent: name, code: code == null ? -1 : code, signal: signal || undefined });
@@ -308,6 +350,8 @@ function route(raw, text) {
   }
 
   if (msg?.type === "runtimeAttach") {
+    // A browser reconnect after an install must not land on the old hosts.
+    if (restartIfStale()) return;
     replayToBrowser();
     return;
   }
@@ -370,6 +414,7 @@ const daemonSocket = daemonMode ? process.env.LIZARD_STUDIO_ROUTER_SOCKET : null
 let daemonServer = null;
 function startHosts() {
   log("router v" + ROUTER_VERSION + " starting, node=" + process.version + ", dir=" + HOST_DIR);
+  setInterval(restartIfStale, STALE_CHECK_MS).unref();
   spawnAgent("claude");
   setTimeout(() => {
     if (shuttingDown) return;
@@ -461,7 +506,7 @@ function startDaemon() {
       if (browserOutput !== sock) return;
       browserOutput = null;
       log("browser bridge disconnected; active turns continue");
-      maybeIdleExit();
+      if (!restartIfStale()) maybeIdleExit();
     });
   });
   daemonServer.on("error", (err) => { log("daemon socket error:", err?.message); process.exit(1); });
