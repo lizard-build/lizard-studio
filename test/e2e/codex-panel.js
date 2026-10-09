@@ -11,7 +11,7 @@ window.runCodexPanelTests = async function () {
   emit({ type: "ready", ok: true, version: 37, home: "/test", user: "Test" });
   check("an older host enters the update flow", t.posted("selfUpdate").length === 1);
   check("an older host cannot start a chat", t.posted("start").length === 0);
-  emit({ type: "ready", ok: true, version: 39, home: "/test", user: "Test" });
+  emit({ type: "ready", ok: true, version: 40, home: "/test", user: "Test" });
   emit({ type: "agentReady", agent: "codex", ok: true, version: 12 });
   check("reasoning stays on Default before the catalog arrives", document.querySelector("#effort-btn").disabled && t.text("#effort-btn") === "Default");
   check("starting without metadata sends no guessed effort", t.posted("start").some((m) => m.agent === "codex") && t.posted("start").filter((m) => m.agent === "codex").every((m) => m.effort == null));
@@ -173,7 +173,7 @@ window.runCodexPanelTests = async function () {
   check("question interactions report no runtime errors", t.errors.length === 0);
 
   await new Promise((resolve) => setTimeout(resolve, 1300));
-  emit({ type: "ready", ok: true, version: 39, home: "/test", user: "Test" });
+  emit({ type: "ready", ok: true, version: 40, home: "/test", user: "Test" });
   emit({ type: "agentReady", agent: "codex", ok: true, version: 12 });
 
   for (const id of ["audit-a", "audit-b"]) emit({ type: "started", id, cwd: "/test/project", permissionMode: "workspace" });

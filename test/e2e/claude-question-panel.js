@@ -9,7 +9,7 @@ window.runClaudeQuestionPanelTests = async function () {
   ] };
   t.emit({ type: "backgroundRestoreStart", sessions: [{ id, agent: "claude", spec: { cwd: "/test/project", model: "opus" },
     sessionId: "question-session", started: true, running: true, submitted: true }] });
-  t.emit({ type: "ready", ok: true, version: 39 });
+  t.emit({ type: "ready", ok: true, version: 40 });
   const permission = { type: "permission", id, requestId: "question-request", toolUseId: "question-tool", toolName: "AskUserQuestion", input };
   t.emit({ type: "backgroundReplay", message: permission });
   t.emit({ type: "backgroundRestoreEnd" });

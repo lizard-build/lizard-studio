@@ -235,7 +235,9 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v34: Codex turn ids let the worker restore a running panel without duplicate history.
 // v36: live Claude Code model catalog via the initialize control request.
 // v37: Claude history chunks echo the request id, so only the asking view renders them.
-const HOST_VERSION = 39;
+// v40: the router restarts once new host files land, so an update reaches the
+//      ChatGPT host and the router too, not only this one.
+const HOST_VERSION = 40;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
