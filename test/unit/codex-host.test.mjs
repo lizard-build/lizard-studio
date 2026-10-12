@@ -9,7 +9,9 @@ import * as crypto from "node:crypto";
 // Load the full shipped host. Only OS boundaries are replaced: no CLI,
 // account, user files, live browser, or network is touched by these tests.
 async function host() {
-  const messages = [], requests = [], timers = new Set();
+  const messages = [], requests = [], timers = new Set(), intervals = [], stamps = {};
+  let now = 1_000_000;
+  class TestDate extends Date { static now() { return now; } }
   const proc = new EventEmitter();
   Object.assign(proc, { platform: "darwin", execPath: "/test/node", env: {}, stdin: new EventEmitter(), stdout: new EventEmitter() });
   proc.stdout.write = (frame) => messages.push(JSON.parse(frame.subarray(4).toString()));
@@ -17,7 +19,8 @@ async function host() {
   server.listen = (_port, _host, ready) => ready();
   server.address = () => ({ port: 9999 });
   const noop = () => {};
-  const fs = { existsSync: () => true, readFileSync: () => "{}", writeFileSync: noop, mkdirSync: noop, copyFileSync: noop, renameSync: noop };
+  const fs = { existsSync: () => true, readFileSync: () => "{}", writeFileSync: noop, mkdirSync: noop, copyFileSync: noop, renameSync: noop,
+    realpathSync: (p) => p, statSync: (p) => ({ size: 1, mtimeMs: stamps[p] || 1 }) };
   const imports = {
     "./codex-spawn.mjs": { createCodexSpawner: () => ({ spawn: () => { throw new Error("spawn blocked in test"); }, close: noop }) },
     "node:crypto": crypto, "node:path": path, "node:fs": fs,
@@ -29,12 +32,13 @@ async function host() {
     },
   };
   const context = createContext({
-    process: proc, Buffer, console,
+    process: proc, Buffer, console, Date: TestDate,
     setTimeout: (fn, ms) => { const timer = { fn, ms, unref: noop }; timers.add(timer); return timer; },
+    setInterval: (fn) => { intervals.push(fn); return { unref: noop }; },
     clearTimeout: (timer) => timers.delete(timer),
   });
   const source = readFileSync(new URL("../../src/host/codex-host.mjs", import.meta.url), "utf8");
-  const module = new SourceTextModule(source + `\nexport { browserClients, cancelBrowserWorkflows, handle, loadModels, loadSkills, loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, restartSession, rewindSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
+  const module = new SourceTextModule(source + `\nexport { browserClients, cancelBrowserWorkflows, handle, loadModels, diskStamp, retireStaleAppServer, onAppExit, loadSkills, loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, restartSession, rewindSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
   await module.link((name) => {
     const values = imports[name];
     assert.ok(values, `unexpected import: ${name}`);
@@ -60,7 +64,8 @@ async function host() {
     api.sessions.set(id, s); api.byThread.set(s.threadId, id);
     return s;
   }
-  return { api, messages, requests, timers, session, respond: (fn) => { reply = fn; } };
+  return { api, messages, requests, timers, intervals, stamps, session, respond: (fn) => { reply = fn; },
+    advance: (ms) => { now += ms; } };
 }
 
 test("context counts cache hits once, updates after the final item, and never uses cumulative totals", async () => {
@@ -601,6 +606,7 @@ test("model catalog includes every page, preserves efforts and honors the config
   const model = (id, efforts) => ({ id, displayName: id, supportedReasoningEfforts: efforts.map(reasoningEffort => ({ reasoningEffort })), defaultReasoningEffort: "medium" });
   h.respond(req => {
     if (req.method === "config/read") return { config: { model: "gpt-6-sol", model_reasoning_effort: "high" } };
+    if (req.method === "account/read") return { account: { type: "chatgpt" }, requiresOpenaiAuth: true };
     assert.equal(req.method, "model/list");
     if (!req.params.cursor) return { data: [model("gpt-6-astra", ["max", "ultra"]), { id: "hidden", hidden: true }], nextCursor: "second" };
     assert.equal(req.params.cursor, "second");
@@ -631,6 +637,69 @@ test("failed model refresh preserves the last complete catalog and allows retry"
   h.respond(req => req.method === "config/read" ? { config: {} } : { data: [{ id: "gpt-6-sol", isDefault: true }] });
   await h.api.loadModels();
   assert.equal(h.messages.at(-1).defaultModel, "gpt-6-sol");
+});
+
+function killable(h) {
+  const proc = h.api.app.proc, exits = new EventEmitter(), kills = [];
+  proc.once = (event, fn) => exits.once(event, fn);
+  proc.kill = (signal) => { kills.push(signal); h.api.onAppExit(proc, 0, null); exits.emit("exit"); };
+  return kills;
+}
+
+test("a changed auth.json replaces the app-server only once every chat is idle, and chats resume quietly", async () => {
+  const h = await host(), s = h.session(), opening = h.session("b");
+  Object.assign(opening, { opening: true, running: false, threadId: null });
+  h.api.app.stamp = h.api.diskStamp();
+  const kills = killable(h);
+  await h.api.retireStaleAppServer();
+  assert.equal(kills.length, 0);
+  h.stamps["/test/home/.codex/auth.json"] = 2;
+  await h.api.retireStaleAppServer();
+  assert.equal(kills.length, 0, "a turn is running");
+  s.running = false;
+  h.advance(4000);
+  await h.api.retireStaleAppServer();
+  assert.equal(kills.length, 0, "a queued prompt may still arrive");
+  h.advance(2000);
+  await h.api.retireStaleAppServer();
+  assert.deepEqual(kills, ["SIGTERM"]);
+  assert.deepEqual(h.messages.filter((m) => m.type === "exit").map((m) => [m.id, m.quiet]), [["a", true]]);
+  assert.equal(s.threadId, null); assert.equal(h.api.byThread.has("thread-a"), false);
+  assert.equal(opening.opening, true);
+  assert.equal(h.messages.some((m) => m.type === "error" || m.data?.is_error), false);
+});
+
+test("a new codex binary also replaces the app-server, but its own sign-in does not", async () => {
+  const h = await host(), s = h.session();
+  s.running = false;
+  h.api.app.stamp = h.api.diskStamp();
+  const kills = killable(h);
+  h.stamps["/test/home/.codex/auth.json"] = 2;
+  h.api.handleNotification("account/login/completed", { success: true });
+  await h.api.retireStaleAppServer();
+  assert.equal(kills.length, 0);
+  h.stamps["/test/codex"] = 2;
+  await h.api.retireStaleAppServer();
+  assert.equal(kills.length, 1);
+});
+
+test("the picker says when ChatGPT stops accepting the sign-in", async () => {
+  const cases = [
+    [() => { throw new Error("workspace routing discovery unauthorized (401)"); }, /expired.*\/login/],
+    [() => ({ account: null, requiresOpenaiAuth: true }), /Not signed in.*\/login/],
+    [() => ({ account: { type: "chatgpt" }, requiresOpenaiAuth: true }), null],
+    [() => ({ account: null, requiresOpenaiAuth: false }), null],
+    [() => { throw new Error("offline"); }, null],
+  ];
+  for (const [account, error] of cases) {
+    const h = await host();
+    h.respond((req) => req.method === "config/read" ? { config: {} } : req.method === "account/read" ? account() : { data: [{ id: "gpt-6-luna" }] });
+    await h.api.loadModels();
+    const last = h.messages.at(-1);
+    if (!error) { assert.equal(last.type, "models"); continue; }
+    assert.equal(h.messages.at(-2).type, "models");
+    assert.equal(last.type, "modelsError"); assert.match(last.error, error);
+  }
 });
 
 test("repeated model cursors stop and report an error", async () => {

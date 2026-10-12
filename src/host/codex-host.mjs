@@ -35,7 +35,7 @@
 import { createCodexSpawner } from "./codex-spawn.mjs";
 import { randomBytes } from "node:crypto";
 import net from "node:net";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, renameSync, realpathSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import {
@@ -260,6 +260,8 @@ const app = {
   nextId: 1,
   pending: new Map(), // jsonrpc id -> { resolve, reject, timer }
   codexHome: null, // where this Codex keeps its files, from the handshake
+  stamp: null, // the binary and auth.json this server started from (see diskStamp)
+  stopping: null, // the process a restart asked to exit
 };
 
 function appSend(obj) {
@@ -355,10 +357,11 @@ function ensureProviderKey(p) {
   return !!app.proc;
 }
 
-function restartAppServer() {
+function restartAppServer(reason) {
   const proc = app.proc;
   if (!proc) return Promise.resolve();
-  log("restarting app-server to pick up a custom provider key");
+  log("restarting app-server:", reason);
+  app.stopping = proc;
   return new Promise((resolve) => {
     proc.once("exit", () => resolve());
     try {
@@ -370,6 +373,63 @@ function restartAppServer() {
     setTimeout(resolve, 3000);
   }).then(() => startAppServer());
 }
+
+// ---- stale app-server ----------------------------------------------------------
+// The host keeps one app-server for days, and Codex loads its binary and reads
+// auth.json only when it starts. Update Codex, or sign in again from the CLI or
+// the ChatGPT app, and the old server keeps the old build and a token ChatGPT
+// may have revoked. Its model/list then falls back to a stale catalog without an
+// error: 0.159.2 showed three models where the account had seven. So note what
+// the server started from, and replace it once either file changes and nothing
+// is in flight. Our own server rewrites auth.json when it refreshes its token;
+// that costs one extra restart.
+
+const STALE_CHECK_MS = 30000;
+// A finished turn can be followed at once by a queued prompt from the panel.
+const SETTLE_MS = 5000;
+let lastBusyAt = 0;
+let replacing = null;
+
+function fileStamp(path) {
+  try {
+    const real = realpathSync(path);
+    const { size, mtimeMs } = statSync(real);
+    return `${real}:${size}:${mtimeMs}`;
+  } catch {
+    return "missing";
+  }
+}
+
+function diskStamp() {
+  return { codex: fileStamp(CODEX), auth: fileStamp(join(app.codexHome || CODEX_HOME, "auth.json")) };
+}
+
+function staleReason() {
+  if (!app.ready || !app.stamp) return "";
+  const now = diskStamp();
+  if (now.codex !== app.stamp.codex) return "the codex binary changed";
+  if (now.auth !== app.stamp.auth) return "auth.json changed";
+  return "";
+}
+
+function appServerBusy() {
+  const busy = anyTurnRunning() || app.pending.size > 0 || !!loginId
+    || [...sessions.values()].some((s) => s.rewinding);
+  if (busy) lastBusyAt = Date.now();
+  return busy || Date.now() - lastBusyAt < SETTLE_MS;
+}
+
+/** Replace a stale app-server when nothing needs it. Never rejects. */
+function retireStaleAppServer() {
+  if (replacing) return replacing;
+  const why = staleReason();
+  if (!why || appServerBusy()) return Promise.resolve();
+  replacing = restartAppServer(why)
+    .catch((err) => log("app-server restart failed:", err && err.message))
+    .finally(() => { replacing = null; });
+  return replacing;
+}
+setInterval(retireStaleAppServer, STALE_CHECK_MS).unref();
 
 function startAppServer() {
   if (app.ready) return Promise.resolve();
@@ -411,28 +471,7 @@ function startAppServer() {
       if (text) log("app-server stderr:", text.slice(0, 1000));
     });
 
-    proc.on("exit", (code, signal) => {
-      log("app-server exited code=", code, "signal=", signal);
-      if (app.proc !== proc) return;
-      app.ready = false;
-      app.proc = null;
-      app.starting = null;
-      for (const p of app.pending.values()) {
-        clearTimeout(p.timer);
-        p.reject(new Error("ChatGPT connection closed"));
-      }
-      app.pending.clear();
-      prewarmed.clear();
-      // Keep the panel's saved thread id. Mark each session stopped so the next
-      // prompt resumes that history through a new server.
-      for (const s of sessions.values()) {
-        if (s.running) endTurnWith(s, true, "ChatGPT stopped unexpectedly.");
-        if (s.threadId) byThread.delete(s.threadId);
-        s.threadId = null;
-        s.started = false;
-        send({ type: "exit", agent: "codex", id: s.id, code: code ?? 1 });
-      }
-    });
+    proc.on("exit", (code, signal) => onAppExit(proc, code, signal));
 
     proc.on("error", (err) => {
       log("app-server process error:", err && err.message);
@@ -447,6 +486,7 @@ function startAppServer() {
       app.ready = true;
       app.starting = null;
       app.codexHome = (info && info.codexHome) || null;
+      app.stamp = diskStamp();
       log("app-server ready, codexHome=", app.codexHome);
       loadModels();
       shipBundledSkills();
@@ -458,6 +498,35 @@ function startAppServer() {
   });
 
   return app.starting;
+}
+
+function onAppExit(proc, code, signal) {
+  log("app-server exited code=", code, "signal=", signal);
+  if (app.proc !== proc) return;
+  // A restart we asked for: every chat was idle, and the next prompt resumes
+  // it on the new server, so the panel has nothing to report.
+  const planned = app.stopping === proc;
+  app.stopping = null;
+  app.ready = false;
+  app.proc = null;
+  app.starting = null;
+  for (const p of app.pending.values()) {
+    clearTimeout(p.timer);
+    p.reject(new Error("ChatGPT connection closed"));
+  }
+  app.pending.clear();
+  prewarmed.clear();
+  // Keep the panel's saved thread id. Mark each session stopped so the next
+  // prompt resumes that history through a new server.
+  for (const s of sessions.values()) {
+    // Still waiting for a server to open its thread on. The new one will do.
+    if (planned && s.opening) continue;
+    if (s.running) endTurnWith(s, true, "ChatGPT stopped unexpectedly.");
+    if (s.threadId) byThread.delete(s.threadId);
+    s.threadId = null;
+    s.started = false;
+    send({ type: "exit", agent: "codex", id: s.id, code: code ?? 1, ...(planned ? { quiet: true } : {}) });
+  }
 }
 
 function onAppMessage(msg) {
@@ -636,7 +705,26 @@ async function refreshModels() {
   } catch (err) {
     log("model/list failed:", err && err.message);
     send({ type: "modelsError", agent: "codex", error: "Couldn’t refresh models. Try again." });
+    return;
   }
+  await checkSignIn();
+}
+
+/**
+ * model/list answers even when ChatGPT no longer accepts our token: Codex falls
+ * back to the catalog it shipped with, and nothing in the reply says so. Ask
+ * about the account, and put the reason under the list in the picker.
+ */
+async function checkSignIn() {
+  let error = "";
+  try {
+    const res = await rpc("account/read", {}, 20000);
+    if (res && !res.account && res.requiresOpenaiAuth) error = "Not signed in to ChatGPT. Type /login to sign in.";
+  } catch (err) {
+    if (/\b401\b|unauthori[sz]ed/i.test(err?.message || "")) error = "ChatGPT sign-in expired. Type /login to sign in again.";
+    else log("account/read failed:", err && err.message);
+  }
+  if (error) send({ type: "modelsError", agent: "codex", error });
 }
 
 /** Only send an effort the chosen model actually offers. */
@@ -1041,6 +1129,8 @@ function handleNotification(method, params) {
       break;
     }
     case "account/login/completed": {
+      // Our own server wrote this auth.json and already uses it.
+      if (params.success && app.ready) app.stamp = diskStamp();
       rateLimits.clear();
       send({ type: "planUsage", agent: "codex", limits: [] });
       loginId = null;
@@ -1245,6 +1335,7 @@ function endTurnWith(s, isError, message) {
   if (s.silenceTimer) { clearTimeout(s.silenceTimer); s.silenceTimer = null; }
   if (!s.running && !isError) return;
   s.running = false;
+  lastBusyAt = Date.now();
   for (const reqId of s.asks.keys()) {
     send({ type: "permissionCancel", id: s.id, requestId: reqId });
     rpcReplyError(reqId, "turn ended");
@@ -1510,7 +1601,8 @@ async function startSession(msg) {
   sessions.set(id, s);
 
   try {
-    if (ensureProviderKey(s.provider)) await restartAppServer();
+    if (ensureProviderKey(s.provider)) await restartAppServer("to pick up a custom provider key");
+    else await retireStaleAppServer();
     await startAppServer();
     if (sessions.get(id) !== s) return;
   } catch (err) {
@@ -2131,10 +2223,10 @@ function handle(msg) {
     case "authLogin": startLogin(msg.id); break;
     case "authCancel": cancelLogin(msg.id); break;
     case "prewarm":
-      startAppServer().then(() => { if (msg.cwd) runPrewarm(msg.cwd); }).catch((err) => log("prewarm start failed:", err && err.message));
+      retireStaleAppServer().then(startAppServer).then(() => { if (msg.cwd) runPrewarm(msg.cwd); }).catch((err) => log("prewarm start failed:", err && err.message));
       break;
     case "refreshModels":
-      startAppServer().then(loadModels).catch(() => send({ type: "modelsError", agent: "codex", error: "Couldn’t connect to ChatGPT. Try again." }));
+      retireStaleAppServer().then(startAppServer).then(loadModels).catch(() => send({ type: "modelsError", agent: "codex", error: "Couldn’t connect to ChatGPT. Try again." }));
       break;
     case "planUsage":
       refreshPlanUsage();
