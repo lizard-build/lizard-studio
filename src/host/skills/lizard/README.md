@@ -16,9 +16,8 @@ support the [Agent Skills](https://agentskills.io) format.
 
 This repo intentionally stays tiny. The `SKILL.md` here is a **bootstrap**: it
 
-1. loads the full, up-to-date guide for the task straight from the CLI:
-   `lizard skills get sandbox --json` for sandboxes and
-   `lizard skills get core --json` for deploys, installing the CLI first only if it's
+1. loads the full, up-to-date guide (sandboxes and deploys) straight from the CLI
+   via `lizard skills get core --json`, installing the CLI first only if it's
    missing (`curl -fsSL https://lizard.build/install.sh | bash` on macOS and
    Linux, `npm install -g @lizard-build/cli` on Windows), and
 2. checks for a newer CLI (`lizard upgrade --check`) so the guidance stays
