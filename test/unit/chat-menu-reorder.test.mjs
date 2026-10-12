@@ -30,7 +30,7 @@ function setup() {
     history: [{ id: 'old', title: 'Old chat', ts: 10 }], activeId: 'b', chatMenuDragId: null, chatMenuDragFinish: null, chatMenuRename: null,
     document: eventTarget, window: eventTarget,
     requestAnimationFrame: fn => { frames.set(++nextFrame, fn); return nextFrame; }, cancelAnimationFrame: id => frames.delete(id),
-    els: { chatMenuList: list }, BOOKMARK_COLORS: [], FLAG_SVG: '', FLAG_EMPTY_SVG: '', flagMenu: null, toggleFlagMenu() {},
+    els: { chatMenuList: list }, BOOKMARK_COLORS: [], BOOKMARK_SVG: '', BOOKMARK_EMPTY_SVG: '', bookmarkMenu: null, toggleBookmarkMenu() {},
     el: node, ICON: () => '', tabDotWaiting: () => false, tabDotRunning: () => false, relTime: () => '',
     renderTabs: () => tabOrders.push([...scope.order]), savePrefs: () => saved.push([...scope.order]),
     renderChatMenuList: () => { menuRenders++; },

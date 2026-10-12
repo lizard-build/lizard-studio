@@ -5,9 +5,9 @@ import vm from 'node:vm';
 
 const source = readFileSync(new URL('../../src/panel/chat.js', import.meta.url), 'utf8');
 const consts = source.slice(source.indexOf('  const BOOKMARK_COLORS = ['), source.indexOf('  let tabTip = null'));
-const picker = source.slice(source.indexOf('  function flagPicker('), source.indexOf('  // The chat menu\'s flag picker'));
+const picker = source.slice(source.indexOf('  function bookmarkPicker('), source.indexOf('  // The chat menu\'s bookmark picker'));
 
-// Just enough of an element for flagPicker: attributes, children, click handlers.
+// Just enough of an element for bookmarkPicker: attributes, children, click handlers.
 function el(tag, className) {
   const node = {
     tag, className, dataset: {}, style: {}, attrs: {}, children: [], handlers: {},
@@ -26,22 +26,22 @@ function setup(bookmarkColor) {
   vm.runInContext(consts.replace(/^  const /gm, 'var ') + picker, scope);
   const target = { id: 'a', bookmarkColor };
   let changes = 0;
-  const box = scope.flagPicker(target, () => changes++);
+  const box = scope.bookmarkPicker(target, () => changes++);
   const pressed = () => box.children.filter((b) => b.attrs['aria-pressed'] === 'true').map((b) => b.dataset.bookmarkColor);
   const choice = (id) => box.children.find((b) => b.dataset.bookmarkColor === id);
   return { target, box, pressed, choice, changes: () => changes };
 }
 
-test('the picker offers no flag plus every color and marks the current one', () => {
+test('the picker offers no bookmark plus every color and marks the current one', () => {
   const p = setup(null);
   assert.deepEqual(p.box.children.map((b) => b.dataset.bookmarkColor), ['', 'violet', 'pink', 'coral', 'white']);
   assert.deepEqual(p.pressed(), ['']);
-  assert.equal(p.choice('').attrs['aria-label'], 'No flag');
-  assert.equal(p.choice('coral').attrs['aria-label'], 'Coral flag');
+  assert.equal(p.choice('').attrs['aria-label'], 'No bookmark');
+  assert.equal(p.choice('coral').attrs['aria-label'], 'Coral bookmark');
   assert.deepEqual(setup('pink').pressed(), ['pink']);
 });
 
-test('picking a color sets it, and picking it again or no flag clears it', () => {
+test('picking a color sets it, and picking it again or no bookmark clears it', () => {
   const p = setup(null);
   p.choice('violet').click();
   assert.equal(p.target.bookmarkColor, 'violet'); assert.deepEqual(p.pressed(), ['violet']);

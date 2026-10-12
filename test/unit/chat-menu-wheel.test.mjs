@@ -38,7 +38,7 @@ function setup({ initialOpen = false, initialWidth = 400, docked = false } = {})
     els: { chatMenu: menu, chatShell: shell, chatMenuGuard: guard, chatMenuList: {}, chatMenuSearch: search, menuBtn, newChat, windowMode },
     chatMenuScroller: null, chatMenuMoving: false, chatMenuRenderPending: false, chatMenuDragId: null, chatMenuRename: null,
     reducedMotion: { matches: false }, HISTORY_PAGE_SIZE: 40, historyVisibleLimit: 40,
-    menuRegistry: [], menuFilter: '', renderChatMenuList: () => rendered++, finishChatMenuRename() {}, finishChatMenuDrag() {}, closeFlagMenu() {},
+    menuRegistry: [], menuFilter: '', renderChatMenuList: () => rendered++, finishChatMenuRename() {}, finishChatMenuDrag() {}, closeBookmarkMenu() {},
     // Any JS animation/release timer is a regression: Chrome owns this gesture.
     setTimeout() { throw Error('Native menu must not infer release from time'); },
     requestAnimationFrame() { throw Error('Native menu must not animate scroll with JS'); },

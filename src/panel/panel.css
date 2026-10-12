@@ -1768,10 +1768,10 @@ body.chat-menu-docked .chat-menu-window { margin-left: 0; }
 .chat-menu-item.dot-wait .chat-menu-dot { background: var(--other-blue); box-shadow: none; animation: pulse 1.6s ease-in-out infinite; }
 .chat-menu-item.dot-run .chat-menu-dot { background: var(--warn-soft); box-shadow: none; animation: pulse 1.6s ease-in-out infinite; }
 .chat-menu-item.dot-unseen .chat-menu-dot { background: var(--control-primary); box-shadow: none; }
-/* The flag right after the dot: a grey outline until a color is picked. The
-   negative margins keep the icon, not its 18px hit box, spaced off its
+/* The bookmark right after the dot: a grey outline until a color is picked.
+   The negative margins keep the icon, not its 18px hit box, spaced off its
    neighbours. */
-.chat-menu-flag {
+.chat-menu-bookmark {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1788,12 +1788,12 @@ body.chat-menu-docked .chat-menu-window { margin-left: 0; }
   cursor: pointer;
   transition: color 0.12s, background 0.12s;
 }
-.chat-menu-flag:hover,
-.chat-menu-flag[aria-expanded="true"] { background: rgba(255, 255, 255, 0.08); }
-.chat-menu-flag:not(.set):hover,
-.chat-menu-flag:not(.set)[aria-expanded="true"] { color: var(--text-secondary); }
-.chat-menu-flag:focus-visible { outline: 1px solid var(--control-primary); outline-offset: -1px; }
-.chat-flag-menu {
+.chat-menu-bookmark:hover,
+.chat-menu-bookmark[aria-expanded="true"] { background: rgba(255, 255, 255, 0.08); }
+.chat-menu-bookmark:not(.set):hover,
+.chat-menu-bookmark:not(.set)[aria-expanded="true"] { color: var(--text-secondary); }
+.chat-menu-bookmark:focus-visible { outline: 1px solid var(--control-primary); outline-offset: -1px; }
+.chat-bookmark-menu {
   position: absolute;
   z-index: 5;
   padding: 4px;
@@ -1802,7 +1802,7 @@ body.chat-menu-docked .chat-menu-window { margin-left: 0; }
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 }
-.chat-flag-menu .tab-bookmark-picker { margin: 0; gap: 2px; }
+.chat-bookmark-menu .tab-bookmark-picker { margin: 0; gap: 2px; }
 .chat-menu-time {
   flex: 0 0 auto;
   font-size: 10.5px;
