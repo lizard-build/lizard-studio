@@ -1255,13 +1255,16 @@
     { id: "coral", label: "Coral", color: "#ff927c" },
     { id: "white", label: "White", color: "#e9edf4" },
   ];
-  const BOOKMARK_SVG = '<svg width="12" height="14" viewBox="0 0 12 14" fill="currentColor" aria-hidden="true"><path d="M3 1h6a1 1 0 0 1 1 1v11L6 10.5 2 13V2a1 1 0 0 1 1-1Z"/></svg>';
+  // A chat's flag. It is saved as bookmarkColor: it started out as a bookmark.
+  const FLAG_PATH = "M2.75 13V1.75M2.75 2.25h7.5L8.5 5l1.75 2.75h-7.5";
+  const FLAG_SVG = `<svg width="12" height="14" viewBox="0 0 12 14" fill="currentColor" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${FLAG_PATH}Z"/></svg>`;
+  const FLAG_EMPTY_SVG = `<svg width="12" height="14" viewBox="0 0 12 14" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${FLAG_PATH}"/></svg>`;
   let tabTip = null, tabTipTimer = null, tabTipAnchor = null;
   function bookmarkMark(color) {
     const mark = el("span", "tab-bookmark");
     mark.style.color = color.color;
-    mark.innerHTML = BOOKMARK_SVG;
-    mark.title = `${color.label} bookmark`;
+    mark.innerHTML = FLAG_SVG;
+    mark.title = `${color.label} flag`;
     mark.setAttribute("role", "img");
     mark.setAttribute("aria-label", mark.title);
     return mark;
@@ -1269,7 +1272,7 @@
   function updateTabBookmark(tab, chat) {
     tab.querySelector(".tab-bookmark")?.remove();
     const color = BOOKMARK_COLORS.find((c) => c.id === chat.bookmarkColor);
-    tab.setAttribute("aria-label", chat.title + (color ? `, ${color.label} bookmark` : ""));
+    tab.setAttribute("aria-label", chat.title + (color ? `, ${color.label} flag` : ""));
     if (!color) return;
     tab.prepend(bookmarkMark(color));
   }
@@ -1278,7 +1281,7 @@
     tabTip = el("div", "chat-tab-tip");
     tabTip.id = "chat-tab-details";
     tabTip.setAttribute("role", "dialog");
-    tabTip.setAttribute("aria-label", "Chat details and bookmark");
+    tabTip.setAttribute("aria-label", "Chat details and flag");
     tabTip.inert = true;
     tabTip.addEventListener("mouseenter", () => clearTimeout(tabTipTimer));
     tabTip.addEventListener("mouseleave", scheduleHideTabTip);
@@ -1326,30 +1329,12 @@
         tip.appendChild(row);
         return row;
       };
-      const picker = el("div", "tab-bookmark-picker");
-      picker.setAttribute("role", "group");
-      picker.setAttribute("aria-label", "Bookmark color");
-      for (const color of BOOKMARK_COLORS) {
-        const button = el("button", "tab-bookmark-choice");
-        button.type = "button";
-        button.title = color.label;
-        button.setAttribute("aria-label", `${color.label} bookmark`);
-        button.setAttribute("aria-pressed", String(chat.bookmarkColor === color.id));
-        button.dataset.bookmarkColor = color.id;
-        button.style.color = color.color;
-        button.innerHTML = BOOKMARK_SVG;
-        button.addEventListener("click", () => {
-          chat.bookmarkColor = chat.bookmarkColor === color.id ? null : color.id;
-          updateTabBookmark(tabEl, chat);
-          for (const choice of picker.querySelectorAll("button")) {
-            choice.setAttribute("aria-pressed", String(choice.dataset.bookmarkColor === chat.bookmarkColor));
-          }
-          placeTabInd();
-          renderChatMenuList();
-          savePrefs();
-        });
-        picker.appendChild(button);
-      }
+      const picker = flagPicker(chat, () => {
+        updateTabBookmark(tabEl, chat);
+        placeTabInd();
+        renderChatMenuList();
+        savePrefs();
+      });
       tip.appendChild(picker);
       tipLine("chat-tab-tip-title", null, chat.title);
       tipLine("chat-tab-tip-row", "folder", shortPath(chat.cwd) || "No folder selected");
@@ -1365,6 +1350,96 @@
       if (focusPicker) (picker.querySelector('[aria-pressed="true"]') || picker.querySelector("button")).focus();
     }, focusPicker ? 0 : 350);
   }
+  // "No flag" and one button per color. Picking the current color clears it too.
+  function flagPicker(target, onChange) {
+    const picker = el("div", "tab-bookmark-picker");
+    picker.setAttribute("role", "group");
+    picker.setAttribute("aria-label", "Flag color");
+    for (const color of [{ id: "", label: "No flag" }, ...BOOKMARK_COLORS]) {
+      const button = el("button", "tab-bookmark-choice");
+      button.type = "button";
+      button.title = color.label;
+      button.setAttribute("aria-label", color.id ? `${color.label} flag` : color.label);
+      button.setAttribute("aria-pressed", String((target.bookmarkColor || "") === color.id));
+      button.dataset.bookmarkColor = color.id;
+      if (color.id) button.style.color = color.color;
+      button.innerHTML = color.id ? FLAG_SVG : FLAG_EMPTY_SVG;
+      button.addEventListener("click", (e) => {
+        e.stopPropagation();
+        target.bookmarkColor = color.id && target.bookmarkColor !== color.id ? color.id : null;
+        for (const choice of picker.querySelectorAll("button")) {
+          choice.setAttribute("aria-pressed", String(choice.dataset.bookmarkColor === (target.bookmarkColor || "")));
+        }
+        onChange(e);
+      });
+      picker.appendChild(button);
+    }
+    return picker;
+  }
+
+  // The chat menu's flag picker: a small box under the row's flag, inside the
+  // menu panel so the overlay menu doesn't take a click in it as one outside.
+  let flagMenu = null; // { target, anchor, box }
+  function toggleFlagMenu(anchor, target, fromKeyboard) {
+    const same = flagMenu && flagMenu.target === target;
+    closeFlagMenu();
+    if (same) return;
+    const box = el("div", "chat-flag-menu");
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-label", "Flag color");
+    const picker = flagPicker(target, (e) => {
+      closeFlagMenu();
+      if (chats.get(target.id) === target) renderTabs();
+      else renderChatMenuList();
+      savePrefs();
+      // A keyboard pick hands focus back to the rebuilt row's flag.
+      if (e.detail !== 0) return;
+      const flag = target.id && els.chatMenuList.querySelector(`.chat-menu-flag[data-flag-for="${CSS.escape(target.id)}"]`);
+      (flag || els.chatMenuSearch).focus({ preventScroll: true });
+    });
+    box.appendChild(picker);
+    els.chatMenu.querySelector(".chat-menu-panel").appendChild(box);
+    flagMenu = { target, anchor, box };
+    anchor.setAttribute("aria-expanded", "true");
+    placeFlagMenu();
+    // A mouse leaves focus on the flag; a keyboard moves it to the colors.
+    if (fromKeyboard) (picker.querySelector('[aria-pressed="true"]') || picker.querySelector("button")).focus({ preventScroll: true });
+  }
+  function closeFlagMenu() {
+    if (!flagMenu) return;
+    flagMenu.anchor.setAttribute("aria-expanded", "false");
+    flagMenu.box.remove();
+    flagMenu = null;
+  }
+  // Under the flag, or above it when the panel runs out of room. Closes once
+  // the row scrolls out of the list or leaves it.
+  function placeFlagMenu() {
+    if (!flagMenu) return;
+    const { anchor, box } = flagMenu;
+    const list = els.chatMenuList.getBoundingClientRect();
+    const a = anchor.getBoundingClientRect();
+    if (!anchor.isConnected || a.bottom <= list.top || a.top >= list.bottom) { closeFlagMenu(); return; }
+    const panel = box.parentElement.getBoundingClientRect();
+    const below = a.bottom - panel.top + 4;
+    const top = below + box.offsetHeight <= panel.height - 4 ? below : a.top - panel.top - box.offsetHeight - 4;
+    box.style.top = Math.max(4, top) + "px";
+    box.style.left = Math.max(4, Math.min(a.left - panel.left - 5, panel.width - box.offsetWidth - 4)) + "px";
+  }
+  function setupFlagMenu() {
+    document.addEventListener("pointerdown", (e) => {
+      if (flagMenu && !flagMenu.box.contains(e.target) && !flagMenu.anchor.contains(e.target)) closeFlagMenu();
+    }, true);
+    document.addEventListener("keydown", (e) => {
+      if (!flagMenu || e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const anchor = flagMenu.anchor;
+      closeFlagMenu();
+      if (anchor.isConnected) anchor.focus({ preventScroll: true });
+    }, true);
+    els.chatMenuList.addEventListener("scroll", placeFlagMenu, { passive: true });
+  }
+
   function hideTabTip() {
     clearTimeout(tabTipTimer);
     tabTipAnchor?.setAttribute("aria-expanded", "false");
@@ -1638,6 +1713,7 @@
       prepareChatMenu();
       if (focusSearch && !els.chatMenu.contains(document.activeElement)) els.chatMenuSearch.focus({ preventScroll: true });
     } else {
+      closeFlagMenu();
       els.chatShell.classList.remove("pushed");
       els.chatShell.inert = false;
       if (els.chatMenu.contains(document.activeElement)) els.menuBtn.focus({ preventScroll: true });
@@ -1813,6 +1889,8 @@
     chatMenuRename = null;
     const list = els.chatMenuList;
     const scrollTop = list.scrollTop;
+    // A focused flag keeps focus through the rebuild (a save re-renders too).
+    const focusedFlag = list.contains(document.activeElement) ? document.activeElement.dataset.flagFor : "";
     historyHasMore = false;
     list.innerHTML = "";
     const q = menuFilter.trim().toLowerCase();
@@ -1820,6 +1898,7 @@
     const rows = q ? all.filter((r) => r.title.toLowerCase().includes(q)) : all;
     if (!rows.length) {
       list.appendChild(el("div", "chat-menu-empty", q ? "No matches." : "No chats yet."));
+      placeFlagMenu();
       return;
     }
     let bucket = null;
@@ -1833,6 +1912,8 @@
       list.appendChild(chatMenuRow(entry));
     }
     list.scrollTop = scrollTop;
+    if (focusedFlag) list.querySelector(`.chat-menu-flag[data-flag-for="${CSS.escape(focusedFlag)}"]`)?.focus({ preventScroll: true });
+    placeFlagMenu(); // follow its row, or close if the row is gone
     historyHasMore = rows.length > visibleCount;
     // Also fill a tall viewport when the first page has no scrollbar yet.
     if (historyHasMore) scheduleChatHistoryLoad();
@@ -2043,8 +2124,28 @@
     // glance. A chat with nothing to say still gets one, drawn hollow, so no
     // title starts a step to the left of its neighbours.
     row.appendChild(el("span", "chat-menu-dot"));
-    const bookmark = BOOKMARK_COLORS.find((c) => c.id === (chat || entry.item)?.bookmarkColor);
-    if (bookmark) row.appendChild(bookmarkMark(bookmark));
+    // The flag follows the dot on every row: an empty outline until it gets
+    // a color, so titles keep one starting line either way.
+    const target = chat || entry.item;
+    const color = BOOKMARK_COLORS.find((c) => c.id === target.bookmarkColor);
+    const flag = el("button", "chat-menu-flag" + (color ? " set" : ""));
+    flag.type = "button";
+    if (target.id) flag.dataset.flagFor = target.id;
+    flag.innerHTML = color ? FLAG_SVG : FLAG_EMPTY_SVG;
+    if (color) flag.style.color = color.color;
+    flag.title = color ? `${color.label} flag` : "Add a flag";
+    flag.setAttribute("aria-label", flag.title);
+    flag.setAttribute("aria-haspopup", "dialog");
+    flag.setAttribute("aria-expanded", "false");
+    if (flagMenu && flagMenu.target === target) {
+      flagMenu.anchor = flag;
+      flag.setAttribute("aria-expanded", "true");
+    }
+    flag.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleFlagMenu(flag, target, e.detail === 0);
+    });
+    row.appendChild(flag);
     row.appendChild(el("div", "chat-menu-row-title", entry.title));
     row.appendChild(el("span", "chat-menu-time", entry.ts ? relTime(entry.ts) : ""));
 
@@ -11117,6 +11218,7 @@
     chatMenuScroller = setupChatMenuScroller(els.chatMenuViewport, { initialOpen: !!window.RKPanelWindow?.detached, docked: !!window.RKPanelWindow?.detached });
     els.chatMenuViewport.addEventListener("wheel", chatMenuScroller.onWheel, { passive: false });
     els.chatMenuList.addEventListener("scroll", scheduleChatHistoryLoad, { passive: true });
+    setupFlagMenu();
     window.addEventListener("resize", scheduleChatHistoryLoad);
     els.chatMenuSearch.addEventListener("input", () => {
       menuFilter = els.chatMenuSearch.value;
