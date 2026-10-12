@@ -2271,7 +2271,9 @@ async function cloudStudio(id) {
     log("cloudStudio: sandbox", sandboxId);
 
     reply({ step: "desktop", sandboxId });
-    const desktop = await runLizard(lizard, ["sandbox", "desktop", sandboxId], 120000);
+    // Starting a desktop is idempotent, so one timed-out start (exit 4) is retried.
+    let desktop = await runLizard(lizard, ["sandbox", "desktop", sandboxId], 120000);
+    if (desktop.code === 4) desktop = await runLizard(lizard, ["sandbox", "desktop", sandboxId], 120000);
     const url = desktop.json?.url;
     if (!desktop.ok || !url) throw new Error(lizardError(desktop, "Starting the desktop"));
 
