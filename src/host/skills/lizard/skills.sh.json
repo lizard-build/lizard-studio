@@ -3,8 +3,8 @@
   "notGrouped": "bottom",
   "groupings": [
     {
-      "title": "Deploy",
-      "description": "Deploy and manage apps, agents, workers, and managed databases on Lizard via the lizard CLI.",
+      "title": "Sandboxes and deploys",
+      "description": "Run code and agents in cloud sandboxes, and deploy apps, workers and databases, with the lizard CLI.",
       "skills": [
         "lizard"
       ]
