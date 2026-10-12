@@ -2160,6 +2160,16 @@ body.chat-menu-docked .chat-menu-window { margin-left: 0; }
 .md-h { font-size: 15px; font-weight: 600; margin: 12px 0 6px; }
 .md-list { margin: 6px 0; padding-left: 20px; }
 .md-list li { margin: 2px 0; }
+.md-list .md-list { margin: 2px 0; }
+.md-list li > p { margin: 4px 0 0; }
+.md-quote {
+  margin: 8px 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--border-primary);
+  color: var(--text-secondary);
+}
+.md-quote > *:last-child { margin-bottom: 0; }
+.md-hr { margin: 12px 0; border: 0; border-top: 1px solid var(--border-primary); }
 .md a { color: var(--other-blue); text-decoration: none; }
 .md a:hover { text-decoration: underline; }
 .md a.path { cursor: pointer; overflow-wrap: anywhere; }

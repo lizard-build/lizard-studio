@@ -177,12 +177,16 @@
   }
 
   // ---- inline markdown ------------------------------------------------------
-  // `code`, **bold**, *italic*, [text](url). Input is raw; output is escaped+safe.
-  function emphasis(text) {
-    return escapeHtml(text)
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
-      .replace(/\b_([^_\n]+)_\b/g, "<em>$1</em>");
+  // `code`, **bold**, *italic*, ~~strike~~, [text](url). Input is raw; output is escaped+safe.
+  // A mark opens only before a non-space and closes only after one, as in
+  // CommonMark, so "*.md or *.txt" and "2 * 3 * 4" stay plain text.
+  function emphasis(html) {
+    return html
+      .replace(/\*\*\*(?=\S)([^*]*?\S)\*\*\*/g, "<strong><em>$1</em></strong>")
+      .replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, "<strong>$1</strong>")
+      .replace(/~~(?=\S)([^~\n]*?\S)~~/g, "<del>$1</del>")
+      .replace(/(^|[^*])\*(?=[^\s*])([^*\n]*?[^\s*])\*(?!\*)/g, "$1<em>$2</em>")
+      .replace(/(?<![\p{L}\p{N}_])_(?=\S)([^_\n]*?\S)_(?![\p{L}\p{N}_])/gu, "<em>$1</em>");
   }
 
   function markdownPath(destination) {
@@ -196,47 +200,110 @@
     return /[\\/]/.test(path) || /^[^\s]+\.[a-z\d]+$/i.test(path) ? path : "";
   }
 
+  // A bare URL ends before trailing punctuation and emphasis marks
+  // ("**https://x.com**,") and before a ")" it never opened.
+  function trimUrl(url) {
+    let clean = url;
+    for (let prev = ""; prev !== clean; ) {
+      prev = clean;
+      clean = clean.replace(/[.,!?;:*_~]+$/, "");
+      if (clean.endsWith(")") && (clean.match(/\)/g) || []).length > (clean.match(/\(/g) || []).length) clean = clean.slice(0, -1);
+    }
+    return clean;
+  }
+
   function inlineMarkdown(text, links = true) {
-    const source = String(text == null ? "" : text);
-    // Render each token once. Later emphasis/URL passes must never rewrite
-    // code contents, file paths, href attributes, or an existing link label.
-    const tokens = /`([^`]+)`|\[([^\]\n]+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))*)\)|(https?:\/\/[^\s<>`]+)/g;
+    // Private-use characters mark the placeholders below; drop any in the input.
+    const source = String(text == null ? "" : text).replace(/[]/g, "");
+    // Escapes, code, links and URLs render first and wait behind placeholders,
+    // so emphasis can wrap them (**see `x`**) but never rewrite what's inside:
+    // code contents, file paths, href attributes, an existing link label.
+    const parked = [];
+    const park = (html) => "" + (parked.push(html) - 1) + "";
+    const tokens = /\\([\\`*_~[\]()#|<>])|(?<!`)(`+)(?!`)([\s\S]*?[^`])\2(?!`)|\[([^\]\n]+)\]\((<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))*)\)|<(https?:\/\/[^\s<>]+)>|(https?:\/\/[^\s<>`]+)/g;
+    const anchor = (href) =>
+      `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(href)}</a>`;
     let html = "";
     let cursor = 0;
     for (const match of source.matchAll(tokens)) {
-      html += emphasis(source.slice(cursor, match.index));
-      const [raw, code, label, destination, url] = match;
-      if (code !== undefined) {
+      html += escapeHtml(source.slice(cursor, match.index));
+      const [raw, escaped, , codeSpan, label, destination, autolink, url] = match;
+      if (escaped !== undefined) {
+        html += park(escapeHtml(escaped));
+      } else if (codeSpan !== undefined) {
+        // As in CommonMark: line breaks read as spaces, and one space of
+        // padding on both sides is dropped (`` `x` `` shows `x`).
+        let code = codeSpan.replace(/\n/g, " ");
+        if (/^ [\s\S]* $/.test(code) && /\S/.test(code)) code = code.slice(1, -1);
         const path = links && pathLinks ? filePath(code) : "";
-        html += path
+        html += park(path
           ? `<code class="inline path" data-path="${escapeHtml(path)}" role="link" tabindex="0" title="Open ${escapeHtml(path)}">${escapeHtml(code)}</code>`
-          : `<code class="inline">${escapeHtml(code)}</code>`;
-      } else if (label !== undefined && links) {
-        const target = destination.trim().replace(/^<([\s\S]*)>$/, "$1");
-        const title = inlineMarkdown(label, false);
-        if (/^https?:\/\/[^\s]+$/i.test(target)) {
-          html += `<a href="${escapeHtml(target)}" target="_blank" rel="noopener noreferrer">${title}</a>`;
+          : `<code class="inline">${escapeHtml(code)}</code>`);
+      } else if (label !== undefined) {
+        if (!links) {
+          html += escapeHtml(raw);
         } else {
-          const path = pathLinks ? markdownPath(target) : "";
-          html += path
-            ? `<a class="path" data-path="${escapeHtml(path)}" role="link" tabindex="0" title="Open ${escapeHtml(path)}">${title}</a>`
-            : escapeHtml(raw);
+          const target = destination.trim().replace(/^<([\s\S]*)>$/, "$1");
+          const title = inlineMarkdown(label, false);
+          if (/^https?:\/\/[^\s]+$/i.test(target)) {
+            html += park(`<a href="${escapeHtml(target)}" target="_blank" rel="noopener noreferrer">${title}</a>`);
+          } else {
+            const path = pathLinks ? markdownPath(target) : "";
+            html += park(path
+              ? `<a class="path" data-path="${escapeHtml(path)}" role="link" tabindex="0" title="Open ${escapeHtml(path)}">${title}</a>`
+              : escapeHtml(raw));
+          }
         }
-      } else if (url && links) {
-        let clean = url.replace(/[.,!?;:]+$/, "");
-        while (clean.endsWith(")") && (clean.match(/\)/g) || []).length > (clean.match(/\(/g) || []).length) clean = clean.slice(0, -1);
-        html += `<a href="${escapeHtml(clean)}" target="_blank" rel="noopener noreferrer">${escapeHtml(clean)}</a>${escapeHtml(url.slice(clean.length))}`;
-      } else html += emphasis(raw);
+      } else if (autolink !== undefined) {
+        html += park(links ? anchor(autolink) : escapeHtml(autolink));
+      } else {
+        const clean = trimUrl(url);
+        html += park(links ? anchor(clean) : escapeHtml(clean)) + escapeHtml(url.slice(clean.length));
+      }
       cursor = match.index + raw.length;
     }
-    return html + emphasis(source.slice(cursor));
+    html += escapeHtml(source.slice(cursor));
+    return emphasis(html).replace(/(\d+)/g, (_, n) => parked[n]);
   }
 
   // ---- block markdown -> element -------------------------------------------
-  function markdown(text) {
+  const FENCE_RE = /^( {0,3})(`{3,})[ \t]*([^\s`]*)[^`]*$/;
+  const HEADING_RE = /^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/;
+  const HR_RE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+  const QUOTE_RE = /^ {0,3}>/;
+  const LIST_RE = /^(\s*)([-*]|\d+[.)])\s+(.*)$/;
+  // Nested blocks recurse; past this depth the rest renders as plain text.
+  const MAX_DEPTH = 16;
+
+  // Indentation width, a tab counting as four columns.
+  function indentOf(s) {
+    let width = 0;
+    for (const c of s) {
+      if (c === " ") width++;
+      else if (c === "\t") width += 4;
+      else break;
+    }
+    return width;
+  }
+
+  function dedent(s, cols) {
+    let width = 0;
+    let k = 0;
+    while (k < s.length && width < cols && (s[k] === " " || s[k] === "\t")) width += s[k++] === "\t" ? 4 : 1;
+    return s.slice(k);
+  }
+
+  function markdown(text, depth = 0) {
     const root = document.createElement("div");
     root.className = "md";
-    const lines = String(text == null ? "" : text).split("\n");
+    const source = String(text == null ? "" : text);
+    if (depth > MAX_DEPTH) {
+      const p = document.createElement("p");
+      p.innerHTML = inlineMarkdown(source).replace(/\n/g, "<br>");
+      root.appendChild(p);
+      return root;
+    }
+    const lines = source.split("\n");
     let i = 0;
     let list = null; // current <ul>/<ol>
 
@@ -248,10 +315,10 @@
     };
 
     // Split a GFM table row into trimmed cells, tolerating optional leading and
-    // trailing pipes.
+    // trailing pipes. "\|" is a pipe inside a cell, code spans included.
     const splitRow = (s) => {
-      const t = s.trim().replace(/^\|/, "").replace(/\|$/, "");
-      return t.split("|").map((c) => c.trim());
+      const t = s.trim().replace(/^\|/, "").replace(/(?<!\\)\|$/, "");
+      return t.split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, "|"));
     };
     // A delimiter row is all-dashes cells (e.g. |---|:--:|---:|) — what marks the
     // line after the header as the start of a table.
@@ -261,28 +328,31 @@
         const cells = splitRow(s);
         return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
       })();
+    const isTableStart = (k) => lines[k].indexOf("|") !== -1 && k + 1 < lines.length && isDelimRow(lines[k + 1]);
 
     while (i < lines.length) {
       const line = lines[i];
 
-      // fenced code block
-      const fence = line.match(/^```(\w+)?\s*$/);
+      // fenced code block — may be indented, as inside a list item
+      const fence = line.match(FENCE_RE);
       if (fence) {
         flushList();
-        const lang = fence[1] || "";
+        const pad = fence[1].length;
         const body = [];
         i++;
-        while (i < lines.length && !/^```\s*$/.test(lines[i])) {
-          body.push(lines[i]);
+        while (i < lines.length) {
+          const close = lines[i].match(/^ {0,3}(`{3,})\s*$/);
+          if (close && close[1].length >= fence[2].length) break;
+          body.push(lines[i].slice(Math.min(pad, lines[i].match(/^ */)[0].length)));
           i++;
         }
         i++; // skip closing fence
-        root.appendChild(codeBlock(body.join("\n"), lang));
+        root.appendChild(codeBlock(body.join("\n"), fence[3]));
         continue;
       }
 
       // heading
-      const h = line.match(/^(#{1,4})\s+(.*)$/);
+      const h = line.match(HEADING_RE);
       if (h) {
         flushList();
         const el = document.createElement("h" + h[1].length);
@@ -293,10 +363,32 @@
         continue;
       }
 
-      // list item (- * or 1.)
-      const li = line.match(/^(\s*)([-*]|\d+\.)\s+(.*)$/);
+      // thematic break — checked before lists, since "* * *" also reads as one
+      if (HR_RE.test(line)) {
+        flushList();
+        const hr = document.createElement("hr");
+        hr.className = "md-hr";
+        root.appendChild(hr);
+        i++;
+        continue;
+      }
+
+      // blockquote: strip one ">" level and render the rest as markdown
+      if (QUOTE_RE.test(line)) {
+        flushList();
+        const body = [];
+        while (i < lines.length && QUOTE_RE.test(lines[i])) body.push(lines[i++].replace(/^ {0,3}> ?/, ""));
+        const quote = document.createElement("blockquote");
+        quote.className = "md-quote";
+        quote.append(...markdown(body.join("\n"), depth + 1).childNodes);
+        root.appendChild(quote);
+        continue;
+      }
+
+      // list item (- * 1. or 1))
+      const li = line.match(LIST_RE);
       if (li) {
-        const ordered = /\d+\./.test(li[2]);
+        const ordered = /\d/.test(li[2]);
         if (!list || list.dataset.ordered !== String(ordered)) {
           flushList();
           list = document.createElement(ordered ? "ol" : "ul");
@@ -308,23 +400,36 @@
             if (n > 1) list.start = n;
           }
         }
+        // The item owns the lines indented under its marker — wrapped text,
+        // nested lists, code fences — and the blank lines between them, and
+        // renders them as markdown of its own.
+        const indent = indentOf(li[1]);
+        const col = indent + line.length - li[1].length - li[3].length;
+        const body = [li[3]];
+        i++;
+        while (i < lines.length) {
+          let j = i;
+          while (j < lines.length && !lines[j].trim()) j++;
+          if (j === lines.length) break;
+          const lead = indentOf(lines[j]);
+          // Text wrapped right under the item stays in it even when it is
+          // indented less than the item's own text.
+          const wrapped = j === i && lead >= 2 && !LIST_RE.test(lines[j]);
+          if (lead < indent + 2 && !wrapped) break;
+          for (; i <= j; i++) body.push(dedent(lines[i], col));
+        }
         const item = document.createElement("li");
-        item.innerHTML = inlineMarkdown(li[3]);
+        const content = markdown(body.join("\n"), depth + 1);
+        // The first paragraph is the item's own text, not a block inside it.
+        const first = content.firstElementChild;
+        if (first && first.tagName === "P") first.replaceWith(...first.childNodes);
+        item.append(...content.childNodes);
         list.appendChild(item);
-        i++;
-        continue;
-      }
-
-      // indented continuation of the previous list item's text
-      // (insertAdjacentHTML appends without re-serializing the whole <li>)
-      if (list && /^\s{2,}\S/.test(line) && list.lastElementChild) {
-        list.lastElementChild.insertAdjacentHTML("beforeend", "<br>" + inlineMarkdown(line.trim()));
-        i++;
         continue;
       }
 
       // GFM table: a header row immediately followed by a delimiter row.
-      if (line.indexOf("|") !== -1 && i + 1 < lines.length && isDelimRow(lines[i + 1])) {
+      if (isTableStart(i)) {
         flushList();
         const headers = splitRow(line);
         const aligns = splitRow(lines[i + 1]).map((c) => {
@@ -371,25 +476,27 @@
         if (list) {
           let j = i + 1;
           while (j < lines.length && !lines[j].trim()) j++;
-          if (!(j < lines.length && /^(\s*)([-*]|\d+\.)\s+/.test(lines[j]))) flushList();
+          if (!(j < lines.length && LIST_RE.test(lines[j]))) flushList();
         }
         i++;
         continue;
       }
 
-      // paragraph (gather consecutive non-special lines; also stop at a table
-      // header+delimiter pair, so a table not preceded by a blank line isn't
-      // absorbed and rendered as raw pipes)
+      // paragraph (gather consecutive lines until one starts another block;
+      // a table header+delimiter pair counts, so a table not preceded by a
+      // blank line isn't absorbed and rendered as raw pipes)
       flushList();
       const para = [line];
       i++;
       while (
         i < lines.length &&
         lines[i].trim() &&
-        !/^```/.test(lines[i]) &&
-        !/^#{1,4}\s/.test(lines[i]) &&
-        !/^(\s*)([-*]|\d+\.)\s+/.test(lines[i]) &&
-        !(lines[i].indexOf("|") !== -1 && i + 1 < lines.length && isDelimRow(lines[i + 1]))
+        !FENCE_RE.test(lines[i]) &&
+        !HEADING_RE.test(lines[i]) &&
+        !HR_RE.test(lines[i]) &&
+        !QUOTE_RE.test(lines[i]) &&
+        !LIST_RE.test(lines[i]) &&
+        !isTableStart(i)
       ) {
         para.push(lines[i]);
         i++;

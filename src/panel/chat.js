@@ -3584,10 +3584,11 @@
   // Incremental scan for the last "safe" freeze offset in a stream block's
   // buffer: a blank-line boundary outside any ``` fence that doesn't split a
   // list continuing across blank lines (render.js keeps such a list open — a
-  // frozen half would restart an <ol>'s numbering). A boundary is committed
-  // only once the first complete line after the blank run is known. Every line
-  // is scanned once per stream, so scanning is O(length) total.
-  const STREAM_LIST_RE = /^(\s*)([-*]|\d+\.)\s+/;
+  // frozen half would restart an <ol>'s numbering) or cut an item from the
+  // indented lines render.js nests inside it. A boundary is committed only
+  // once the first complete line after the blank run is known. Every line is
+  // scanned once per stream, so scanning is O(length) total.
+  const STREAM_LIST_RE = /^(\s*)([-*]|\d+[.)])\s+/;
   // `limit` caps the scan at the typewriter's revealed prefix — only fully
   // revealed lines may be frozen, and the rest is rescanned as it appears.
   function advanceStreamScan(blk, limit) {
@@ -3599,18 +3600,21 @@
       const line = buf.slice(i, nl);
       const t = line.trim();
       if (blk.fenceOpen) {
-        if (/^```/.test(t)) { blk.fenceOpen = false; blk.prevList = false; }
+        // A fence closes on a run of at least as many backticks as opened it.
+        const close = /^`{3,}$/.exec(t);
+        if (close && close[0].length >= blk.fenceOpen) { blk.fenceOpen = 0; blk.prevList = blk.fenceInList; }
       } else if (!t) {
         if (blk.cand === -1) blk.cand = i; // boundary at the blank run's start
       } else {
-        const isFence = /^```/.test(t);
-        const isList = !isFence && STREAM_LIST_RE.test(line);
+        const fence = /^(`{3,})[^`]*$/.exec(t);
+        const isList = !fence && STREAM_LIST_RE.test(line);
+        const nested = blk.prevList && /^[ \t]/.test(line);
         if (blk.cand !== -1) {
-          if (!(blk.prevList && isList)) blk.safe = blk.cand;
+          if (!(blk.prevList && (isList || nested))) blk.safe = blk.cand;
           blk.cand = -1;
         }
-        if (isFence) blk.fenceOpen = true;
-        blk.prevList = isList;
+        if (fence) { blk.fenceOpen = fence[1].length; blk.fenceInList = nested; }
+        blk.prevList = isList || nested;
       }
       i = nl + 1;
     }
@@ -3655,7 +3659,7 @@
             // typewriter state (see paceStreamBlock)
             shown: 0, done: false, lastT: 0, carry: 0,
             // incremental-render state (see renderStreamSlice/advanceStreamScan)
-            md: null, live: null, stable: 0, scan: 0, safe: 0, cand: -1, fenceOpen: false, prevList: false,
+            md: null, live: null, stable: 0, scan: 0, safe: 0, cand: -1, fenceOpen: 0, fenceInList: false, prevList: false,
           });
         } else if (cb.type === "thinking") {
           // Reasoning is not shown in the transcript. No DOM is created.
