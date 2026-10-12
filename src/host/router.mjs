@@ -60,11 +60,12 @@ const CODEX_BID_BASE = 1_000_000_000;
 
 // Messages that have nothing to do with which agent runs a chat: picking a
 // folder, opening a file, git, the composer's shell mode, the host's own
-// updater. They are implemented once, in the claude host, and they go there
-// whatever agent the chat belongs to — duplicating them into every new host
-// would be four copies of the same code waiting to drift apart.
+// updater, starting Lizard Studio in a sandbox. They are implemented once, in
+// the claude host, and they go there whatever agent the chat belongs to —
+// duplicating them into every new host would be four copies of the same code
+// waiting to drift apart.
 const SHARED_OPS = new Set([
-  "pickFolder", "openPath", "stashFile",
+  "pickFolder", "openPath", "stashFile", "cloudStudio",
   "gitBranches", "checkoutBranch", "gitDiff",
   "bashExec", "bashKill",
   "killShell", "probeShellPort", "probeShells",

@@ -465,6 +465,11 @@
   // Host protocol version last reported in `ready` (0 until the host connects).
   // Surfaced read-only in the Settings → General tab.
   let hostVersion = 0;
+  // Lizard Studio in a Lizard sandbox (host v41+): the request in flight, and
+  // whether this panel itself already runs in one (then the button is hidden).
+  const CLOUD_HOST_VERSION = 41;
+  let cloudReq = null;
+  let hostInSandbox = false;
   // Grace timer for host self-update: set when a stale host is asked to update
   // itself; if it fires the host never answered (too old) — show the manual
   // install command instead.
@@ -6055,6 +6060,16 @@
         if (hostReady) prewarmHarnesses();
         home = msg.home || home;
         hostVersion = msg.version || 0;
+        // A Lizard sandbox names the folder chats start in (LIZARD_STUDIO_CWD),
+        // so nothing there asks for one.
+        hostInSandbox = msg.inSandbox === true;
+        if (msg.defaultCwd) {
+          if (!lastCwd) lastCwd = msg.defaultCwd;
+          for (const c of chats.values()) if (!c.cwd && !c.started) c.cwd = msg.defaultCwd;
+          savePrefsSoon();
+          syncComposer();
+        }
+        syncCloudButton();
         refreshSettingsIfOpen();
         // The extension updates via git/store, but the native host runs from a
         // copy in ~/.lizard-studio that install.sh seeds — so a stale host is
@@ -6449,6 +6464,9 @@
         break;
       case "bashExit":
         if (chat) finishBashRun(chat, msg.execId, msg.code, msg.signal, msg.error);
+        break;
+      case "cloudStudio":
+        onCloudStudio(msg);
         break;
       case "needsFolder":
         // Host refused to start without a valid directory (none given, or the
@@ -10577,6 +10595,54 @@
     renderTabs();
   }
 
+  // ---- Lizard Studio in a sandbox ---------------------------------------------
+  // The host creates a desktop sandbox through the local lizard CLI, opens Lizard
+  // Studio in its Chromium and answers with the desktop's stream URL (it embeds
+  // the desktop's password, so it is opened, never shown or stored).
+  const CLOUD_STEPS = { create: "Creating a sandbox…", desktop: "Starting the desktop…", studio: "Opening Lizard Studio…" };
+  const CLOUD_LABEL = "Run in a sandbox";
+
+  function syncCloudButton() {
+    if (!els.cloudBtn) return;
+    els.cloudBtn.classList.toggle("hidden", hostInSandbox || hostVersion < CLOUD_HOST_VERSION);
+  }
+
+  function cloudNote(text, isError) {
+    els.cloudNote.textContent = text || "";
+    els.cloudNote.classList.toggle("hidden", !text);
+    els.cloudNote.classList.toggle("is-error", !!isError);
+  }
+
+  function startCloudStudio() {
+    if (cloudReq) return;
+    const id = "cloud-" + Date.now().toString(36);
+    if (!post({ type: "cloudStudio", id })) {
+      cloudNote("Lizard Studio's host isn't connected.", true);
+      return;
+    }
+    cloudReq = id;
+    els.cloudBtn.disabled = true;
+    els.cloudLabel.textContent = CLOUD_STEPS.create;
+    cloudNote("");
+  }
+
+  function onCloudStudio(msg) {
+    if (!cloudReq || msg.id !== cloudReq) return;
+    if (!msg.done) {
+      els.cloudLabel.textContent = CLOUD_STEPS[msg.step] || CLOUD_STEPS.create;
+      return;
+    }
+    cloudReq = null;
+    els.cloudBtn.disabled = false;
+    els.cloudLabel.textContent = CLOUD_LABEL;
+    if (!msg.ok || !msg.url) {
+      cloudNote(msg.error || "The sandbox didn't start.", true);
+      return;
+    }
+    chrome.tabs.create({ url: msg.url, active: true });
+    cloudNote("Opened in a new tab. The sandbox runs for an hour.");
+  }
+
   function promptForFolder(chat) {
     const cur = chat.cwd || home || "";
     const next = window.prompt("Project folder path:", cur);
@@ -10936,6 +11002,9 @@
     els.chatMenuSearch = root.querySelector("#chat-menu-search");
     els.chatMenuList = root.querySelector("#chat-menu-list");
     els.settingsBtn = root.querySelector("#settings-btn");
+    els.cloudBtn = root.querySelector("#cloud-btn");
+    els.cloudLabel = root.querySelector("#cloud-btn-label");
+    els.cloudNote = root.querySelector("#cloud-note");
     els.settingsOverlay = root.querySelector("#settings-overlay");
     els.settingsClose = root.querySelector("#settings-close");
     els.settingsTabs = root.querySelector("#settings-tabs");
@@ -10991,6 +11060,7 @@
     root.querySelector("#chat-menu-mark").innerHTML = LIZARD(20);
     root.querySelector("#chat-menu-search-ic").innerHTML = ICON("search", 13);
     root.querySelector("#settings-btn-ic").innerHTML = ICON("gear", 16);
+    root.querySelector("#cloud-btn-ic").innerHTML = ICON("cloud", 16);
     els.settingsClose.innerHTML = ICON("x", 15);
     root.querySelector("#folder-ic").innerHTML = ICON("folder", 14);
     root.querySelector("#branch-ic").innerHTML = ICON("git-branch", 13);
@@ -11123,6 +11193,10 @@
       historyVisibleLimit = HISTORY_PAGE_SIZE;
       els.chatMenuList.scrollTop = 0;
       renderChatMenuList();
+    });
+    els.cloudBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      startCloudStudio();
     });
     els.settingsBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -11417,6 +11491,11 @@
         </div>
         <div id="chat-menu-list" class="chat-menu-list"></div>
         <div class="chat-menu-foot">
+          <button id="cloud-btn" class="chat-menu-foot-btn hidden" title="Open Lizard Studio in a new Lizard sandbox with its own browser">
+            <span id="cloud-btn-ic" class="chat-menu-foot-ic"></span>
+            <span id="cloud-btn-label">Run in a sandbox</span>
+          </button>
+          <div id="cloud-note" class="chat-menu-foot-note hidden" role="status"></div>
           <button id="settings-btn" class="chat-menu-foot-btn" title="Settings">
             <span id="settings-btn-ic" class="chat-menu-foot-ic"></span>
             <span>Settings</span>

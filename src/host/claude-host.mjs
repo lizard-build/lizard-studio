@@ -40,6 +40,9 @@
 //                                                                 just before the turnIndex-th human
 //                                                                 turn, then kill + resume the session
 //   { type:"pickFolder", id }                                      native folder chooser
+//   { type:"cloudStudio", id }                                     start Lizard Studio in a new Lizard
+//                                                                 sandbox with its own Chromium, through
+//                                                                 the local lizard CLI (→ cloudStudio)
 //   { type:"openPath", id, path, cwd?, reveal? }                   open a file/folder the user clicked in
 //                                                                 the transcript with the OS default app
 //                                                                 (reveal: show it in Finder/Explorer
@@ -65,7 +68,9 @@
 //                                                                 (AskUserQuestion answers)
 //
 // Protocol — host -> panel:
-//   { type:"ready",   version, home, claudePath, ok }          sent once on connect (no id)
+//   { type:"ready",   version, home, claudePath, ok,           sent once on connect (no id). defaultCwd:
+//     defaultCwd?, inSandbox? }                                where new chats start; inSandbox: this
+//                                                              Studio runs in a Lizard sandbox
 //   { type:"started", id, pid, cwd, model, effort, permissionMode }
 //   { type:"interrupted", id }                                 the turn was hard-stopped; a respawn follows
 //   { type:"shellKilled", id, taskId, shellId, ok, error }     reply to killShell
@@ -79,6 +84,8 @@
 //   { type:"folder",  id, path }                               null path == cancelled
 //   { type:"fileStashed", id, reqId, ok, name, path?, error? } reply to stashFile
 //   { type:"openPath", id, path, ok, error? }                  reply to openPath
+//   { type:"cloudStudio", id, step?, done?, ok?, url?,         progress of a cloudStudio ("create",
+//     sandboxId?, error? }                                     "desktop", "studio"), then done
 //   { type:"gitBranches", id, cwd, isRepo, current, branches, checkedOut? }
 //   { type:"gitDiff", id, cwd, isRepo, files, insertions, deletions }
 //   { type:"configRead",  id, key, scope, ok, content?, path?, exists?, error? }
@@ -237,7 +244,9 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v37: Claude history chunks echo the request id, so only the asking view renders them.
 // v40: the router restarts once new host files land, so an update reaches the
 //      ChatGPT host and the router too, not only this one.
-const HOST_VERSION = 40;
+// v41: cloudStudio — Lizard Studio in a Lizard sandbox; `ready` carries the
+//      sandbox's default chat folder.
+const HOST_VERSION = 41;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -2197,6 +2206,97 @@ function pickFolder(id) {
   });
 }
 
+// ---- Lizard Studio in a sandbox ---------------------------------------------
+// A new Lizard sandbox from the `desktop` template, whose Chromium runs this
+// extension with its own host, Claude Code and Codex (dragonlabs-platform
+// templates/desktop.Dockerfile, `lizard-desktop studio`). Everything goes
+// through the user's own lizard CLI, so the sandbox lands in the account and
+// default project they signed in with there, and Studio never holds a Lizard
+// credential. The final reply carries the desktop's stream URL, which embeds the
+// desktop's password: it goes to the panel only, never to the log.
+const CLOUD_LIFETIME_MS = 60 * 60 * 1000;
+let cloudBusy = false;
+
+function resolveLizard() {
+  const win = process.platform === "win32";
+  const names = win ? ["lizard.cmd", "lizard.exe"] : ["lizard"];
+  for (const dir of (CHILD_ENV.PATH || "").split(win ? ";" : ":")) {
+    if (!dir) continue;
+    for (const name of names) if (existsSync(join(dir, name))) return join(dir, name);
+  }
+  // The install script's own copy, for a shell profile that never added it to PATH.
+  const own = join(homedir(), ".lizard", "bin", win ? "lizard.exe" : "lizard");
+  return existsSync(own) ? own : null;
+}
+
+// Run `lizard <args> --json`. JSON mode never prompts or opens a browser; a
+// failure prints { error: { code, message } } on stdout. --json goes before a
+// `--`: what follows it is the command to run in the sandbox.
+function runLizard(bin, args, timeout) {
+  const end = args.indexOf("--");
+  const argv = end < 0 ? [...args, "--json"] : [...args.slice(0, end), "--json", ...args.slice(end)];
+  return new Promise((resolve) => {
+    // A .cmd needs a shell on Windows (spawn EINVAL otherwise); the arguments
+    // here are fixed words and a sandbox id, nothing a shell would reinterpret.
+    execFile(bin, argv, { env: CHILD_ENV, timeout, maxBuffer: 4 * 1024 * 1024, shell: bin.endsWith(".cmd") },
+      (err, stdout) => {
+        let json = null;
+        const out = String(stdout || "");
+        try { json = JSON.parse(out.slice(out.indexOf("{"))); } catch (_) {}
+        resolve({ ok: !err, code: err ? (typeof err.code === "number" ? err.code : null) : 0, json, timedOut: !!(err && err.killed) });
+      });
+  });
+}
+
+function lizardError(r, what) {
+  if (r.timedOut) return `${what} took too long.`;
+  if (r.code === 2 || r.json?.error?.code === "NOT_AUTHENTICATED") return "Sign in to Lizard first: run lizard login in a terminal.";
+  return r.json?.error?.message || `${what} failed (lizard exited with code ${r.code ?? "?"}).`;
+}
+
+async function cloudStudio(id) {
+  const reply = (fields) => send({ type: "cloudStudio", id, ...fields });
+  if (cloudBusy) return reply({ done: true, ok: false, error: "A sandbox is already starting." });
+  const lizard = resolveLizard();
+  if (!lizard) {
+    return reply({ done: true, ok: false, error: "Install Lizard CLI first: curl -fsSL https://lizard.build/install.sh | bash" });
+  }
+  cloudBusy = true;
+  let sandboxId = null;
+  try {
+    reply({ step: "create" });
+    const created = await runLizard(lizard, ["sandbox", "create", "-t", "desktop", "--timeout", String(CLOUD_LIFETIME_MS)], 120000);
+    sandboxId = created.json?.id || created.json?.sandboxId || null;
+    if (!created.ok || !sandboxId) return reply({ done: true, ok: false, error: lizardError(created, "Creating the sandbox") });
+    log("cloudStudio: sandbox", sandboxId);
+
+    reply({ step: "desktop", sandboxId });
+    const desktop = await runLizard(lizard, ["sandbox", "desktop", sandboxId], 120000);
+    const url = desktop.json?.url;
+    if (!desktop.ok || !url) throw new Error(lizardError(desktop, "Starting the desktop"));
+
+    reply({ step: "studio", sandboxId });
+    const studio = await runLizard(lizard, ["sandbox", "exec", sandboxId, "--", "lizard-desktop", "studio"], 120000);
+    if (!studio.ok) {
+      // 2 is lizard-desktop's usage error: a desktop image from before Studio.
+      throw new Error(studio.code === 2 || studio.code === 3
+        ? "This region's desktop sandboxes don't have Lizard Studio yet."
+        : lizardError(studio, "Opening Lizard Studio"));
+    }
+    reply({ done: true, ok: true, url, sandboxId });
+    sandboxId = null;
+  } catch (err) {
+    reply({ done: true, ok: false, error: String((err && err.message) || err) });
+  } finally {
+    cloudBusy = false;
+    // A sandbox that never got Studio open is deleted, not left running on the user's bill.
+    if (sandboxId) {
+      log("cloudStudio: removing", sandboxId);
+      runLizard(lizard, ["sandbox", "rm", sandboxId, "-y"], 60000).catch(() => {});
+    }
+  }
+}
+
 // ---- open a path in the desktop ---------------------------------------------
 // The panel turns file paths in the transcript into links; a click lands here.
 // Nothing is run through a shell — the path is one argument to the platform
@@ -2974,6 +3074,9 @@ function handle(msg) {
     case "pickFolder":
       pickFolder(id);
       break;
+    case "cloudStudio":
+      cloudStudio(id);
+      break;
     case "openPath":
       openPath(id, msg.path, msg.cwd, msg.reveal);
       break;
@@ -3076,4 +3179,8 @@ function osUserName() {
 // nothing, so report not-installed — the panel's Install Claude Code step
 // (with its 4s recheck) is what gets the user out of that state. The old
 // `|| CLAUDE === "claude"` made ok always-true and the step unreachable.
-send({ type: "ready", version: HOST_VERSION, home: homedir(), claudePath: CLAUDE, user: osUserName(), ok: existsSync(CLAUDE) });
+// In a Lizard sandbox, Chromium's environment (lizard-open.py) names the folder
+// new chats start in, so they never ask for one.
+const SANDBOX_CWD = process.env.LIZARD_STUDIO_CWD && existsSync(process.env.LIZARD_STUDIO_CWD) ? process.env.LIZARD_STUDIO_CWD : undefined;
+send({ type: "ready", version: HOST_VERSION, home: homedir(), claudePath: CLAUDE, user: osUserName(), ok: existsSync(CLAUDE),
+  defaultCwd: SANDBOX_CWD, inSandbox: process.env.LIZARD_STUDIO_SANDBOX === "1" });
