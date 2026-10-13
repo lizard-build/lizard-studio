@@ -30,9 +30,19 @@ Run immediately:
 lizard skills get core --json
 ```
 
-This returns `{ name, frontmatter, content, ... }`. Read `content` in full - it is
-the complete, up-to-date Lizard guide: sandboxes, deploys, addons, sign-in, exit
-codes, billing, everything. Follow it for the rest of the task.
+This returns `{ name, frontmatter, content, references, ... }`. Read `content` in
+full - it is the up-to-date Lizard guide to the whole platform: sandboxes,
+deploys, addons, sign-in, exit codes, billing. Follow it for the rest of the task.
+
+`references` lists three deeper guides: `sandboxes`, `deploys` and `sdk` (building
+on Lizard from code). Load one only when the task needs that depth:
+
+```
+lizard skills get core --ref sdk --json
+```
+
+If the CLI rejects `--ref` (versions before 4.0.45), skip it: on those versions
+`content` already holds everything.
 
 If it loads, skip the recovery in Step 2 and go straight to **Step 4** to act -
 assume the user is already logged in. Do not run `command -v lizard`, do not log
