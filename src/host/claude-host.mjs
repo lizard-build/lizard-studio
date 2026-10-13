@@ -2265,7 +2265,11 @@ async function cloudStudio(id) {
   let sandboxId = null;
   try {
     reply({ step: "create" });
-    const created = await runLizard(lizard, ["sandbox", "create", "-t", "desktop", "--timeout", String(CLOUD_LIFETIME_MS)], 120000);
+    // LIZARD_STUDIO_SNAPSHOT (e.g. exported in the login shell): start from this
+    // private snapshot of a desktop sandbox instead of the template, to try a
+    // desktop image before it ships.
+    const from = CHILD_ENV.LIZARD_STUDIO_SNAPSHOT ? ["--snapshot", CHILD_ENV.LIZARD_STUDIO_SNAPSHOT] : ["-t", "desktop"];
+    const created = await runLizard(lizard, ["sandbox", "create", ...from, "--timeout", String(CLOUD_LIFETIME_MS)], 120000);
     sandboxId = created.json?.id || created.json?.sandboxId || null;
     if (!created.ok || !sandboxId) return reply({ done: true, ok: false, error: lizardError(created, "Creating the sandbox") });
     log("cloudStudio: sandbox", sandboxId);
