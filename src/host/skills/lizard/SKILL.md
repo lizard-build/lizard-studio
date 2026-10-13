@@ -27,12 +27,21 @@ reach for `npx`, even just to check whether it works.
 Run immediately:
 
 ```
+lizard upgrade --check --json
 lizard skills get core --json
 ```
 
-This returns `{ name, frontmatter, content, references, ... }`. Read `content` in
-full - it is the up-to-date Lizard guide to the whole platform: sandboxes,
-deploys, addons, sign-in, exit codes, billing. Follow it for the rest of the task.
+The guide ships inside the CLI, so an old CLI teaches old commands (sandbox
+templates and old machines often carry one). If the check says
+`updateAvailable: true`, run `lizard upgrade --json`, then load the guide again.
+If that answers `upgraded: false` with a `hint`, run the hint (for example
+`npm install -g @lizard-build/cli@latest`). A check that fails (offline,
+rate-limited) is no reason to stop: use the guide you have.
+
+`lizard skills get core --json` returns `{ name, frontmatter, content, references,
+... }`. Read `content` in full - it is the up-to-date Lizard guide to the whole
+platform: sandboxes, deploys, addons, sign-in, exit codes, billing. Follow it for
+the rest of the task.
 
 `references` lists three deeper guides: `sandboxes`, `deploys` and `sdk` (building
 on Lizard from code). Load one only when the task needs that depth:
@@ -46,8 +55,8 @@ If the CLI rejects `--ref` (versions before 4.0.45), skip it: on those versions
 
 If it loads, skip the recovery in Step 2 and go straight to **Step 4** to act -
 assume the user is already logged in. Do not run `command -v lizard`, do not log
-in preemptively, and do not install anything. Only drop to Step 3 if a command
-actually reports no auth.
+in preemptively, and do not install anything beyond the upgrade above. Only drop
+to Step 3 if a command actually reports no auth.
 
 ## Step 2 - Recover only on failure
 
