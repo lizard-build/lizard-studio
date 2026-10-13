@@ -9,7 +9,18 @@ const panelURL = "chrome-extension://test/src/panel/panel.html";
 function setup(search = "") {
   const listeners = new Set(), timers = new Set(), created = [], updates = [], messages = [], order = [];
   let closed = 0, reloads = 0;
+  // Session storage with change events, as Chrome reports them to every page.
+  const session = {}, storageListeners = new Set();
+  const changed = (key, newValue) => { for (const fn of storageListeners) fn({ [key]: { newValue } }, "session"); };
   const chrome = {
+    storage: {
+      session: {
+        get: (key, cb) => cb({ [key]: session[key] }),
+        set: (items, cb) => { for (const [key, value] of Object.entries(items)) { session[key] = value; changed(key, value); } cb?.(); },
+        remove: (key, cb) => { delete session[key]; changed(key, undefined); cb?.(); },
+      },
+      onChanged: { addListener: f => storageListeners.add(f), removeListener: f => storageListeners.delete(f) },
+    },
     runtime: { id: "test", getURL: p => "chrome-extension://test/" + p,
       onMessage: { addListener: f => listeners.add(f), removeListener: f => listeners.delete(f) },
       sendMessage: (m, cb) => { messages.push(m); cb(); } },
@@ -34,7 +45,7 @@ function setup(search = "") {
     setTimeout: fn => { timers.add(fn); return fn; }, clearTimeout: fn => timers.delete(fn),
   });
   const receive = (msg, sender, respond = () => {}) => { for (const fn of listeners) fn(msg, sender, respond); };
-  return { chrome, api: window.RKPanelWindow, created, updates, messages, listeners, timers, order, receive,
+  return { chrome, api: window.RKPanelWindow, created, updates, messages, listeners, timers, order, receive, session, storageListeners,
     get closed() { return closed; }, get reloads() { return reloads; },
     ready(url = created[0].url, id = "test", tab = { id: 80 }) {
       receive({ type: "studioWindowReady", handoff: "handoff-token", sourceWindowId: 7 }, { id, url, tab });
@@ -78,28 +89,41 @@ test("failed saves, failed tab creation and load timeouts keep the source view o
   await assert.rejects(moving, /not finished opening/); assert.equal(slow.closed, 0);
 });
 
-test("return opens the side panel synchronously and waits for saved chats and a side-panel receipt", async () => {
+test("return opens the side panel synchronously and notes the handoff once chats are saved", async () => {
   const p = setup("?mode=tab&sourceWindowId=7&sourceTabId=12"); let saved;
   const moving = p.api.open(() => { p.order.push("save"); return new Promise(resolve => { saved = resolve; }); });
   assert.deepEqual(p.order, ["sidePanel.open"], "Chrome must receive the click before any await");
-  await flush();
-  let state;
-  p.receive({ type: "studioDockState", sourceWindowId: 7 }, { id: "test", url: panelURL }, value => { state = value; });
-  await flush(); assert.equal(state, undefined);
-  saved(); await flush(); assert.equal(state.handoff, "handoff-token");
+  assert.deepEqual({ ...p.session["studioDock:7"], at: 0 }, { handoff: "handoff-token", saved: false, at: 0 }, "the note goes out in the click's turn");
+  await flush(); assert.equal(p.session["studioDock:7"].saved, false);
+  saved(); await flush();
+  assert.equal(p.session["studioDock:7"].saved, true);
+  assert.equal(p.messages.at(-1).type, "studioDockReload");
   p.ready(panelURL); await flush(); assert.equal(p.closed, 0, "a tab cannot impersonate the side panel");
-  p.receive({ type: "studioWindowReady", handoff: state.handoff, sourceWindowId: 7 }, { id: "test", url: panelURL });
+  p.receive({ type: "studioWindowReady", handoff: "handoff-token", sourceWindowId: 7 }, { id: "test", url: panelURL });
   await moving;
   assert.equal(p.closed, 1); assert.equal(p.updates.at(-1).id, 12); assert.equal(p.api.transferring, true);
+  assert.equal(p.session["studioDock:7"], undefined, "the note is cleared after the move");
 });
 
-test("a side panel waits for handoff storage before loading and reports readiness", async () => {
-  const p = setup(); let reply;
-  p.chrome.runtime.sendMessage = (msg, cb) => { p.messages.push(msg); if (msg.type === "studioDockState") reply = cb; else cb(); };
+test("a side panel starts at once without a note and never messages other views", async () => {
+  const p = setup();
+  await p.api.prepare();
+  assert.equal(p.messages.length, 0); assert.equal(p.storageListeners.size, 0); assert.equal(p.timers.size, 0);
+  p.api.ready(); await flush(); assert.equal(p.messages.length, 0, "no move, nothing to acknowledge");
+  const stale = setup();
+  stale.session["studioDock:7"] = { handoff: "old", saved: true, at: Date.now() - 60000 };
+  await stale.api.prepare(); stale.api.ready(); await flush();
+  assert.equal(stale.messages.length, 0, "a stale note from an old move is ignored");
+});
+
+test("a side panel waits for the moving tab's save before loading and reports readiness", async () => {
+  const p = setup();
+  p.session["studioDock:7"] = { handoff: "receipt", saved: false, at: Date.now() };
   let prepared = false;
   const prepare = p.api.prepare().then(() => { prepared = true; });
   await flush(); assert.equal(prepared, false);
-  reply({ handoff: "receipt" }); await prepare;
+  p.chrome.storage.session.set({ "studioDock:7": { handoff: "receipt", saved: true, at: Date.now() } });
+  await prepare; assert.equal(p.timers.size, 0); assert.equal(p.storageListeners.size, 0);
   p.api.ready(); await flush();
   assert.equal(p.messages.at(-1).type, "studioWindowReady"); assert.equal(p.messages.at(-1).handoff, "receipt");
   p.receive({ type: "studioDockReload", sourceWindowId: 7, handoff: "receipt" }, { id: "test", url: panelURL, tab: { id: 80 } });
@@ -108,6 +132,19 @@ test("a side panel waits for handoff storage before loading and reports readines
   assert.equal(p.reloads, 0);
   p.receive({ type: "studioDockReload", sourceWindowId: 7 }, { id: "test", url: panelURL, tab: { id: 80 } });
   assert.equal(p.reloads, 1); assert.equal(p.api.transferring, true, "old panel must not overwrite the saved draft during reload");
+});
+
+test("a slow save lets the panel start, and the reload message restarts it once mounted", async () => {
+  const p = setup();
+  p.session["studioDock:7"] = { handoff: "receipt", saved: false, at: Date.now() };
+  const prepare = p.api.prepare();
+  await flush(); for (const fn of p.timers) fn();
+  await prepare; assert.equal(p.storageListeners.size, 0);
+  p.receive({ type: "studioDockReload", sourceWindowId: 7, handoff: "receipt" }, { id: "test", url: panelURL, tab: { id: 80 } });
+  assert.equal(p.reloads, 0, "never reload before the panel has mounted");
+  p.api.ready();
+  assert.equal(p.reloads, 1); assert.equal(p.api.transferring, true);
+  assert.equal(p.messages.length, 0, "a panel without the receipt does not claim the move");
 });
 
 test("a denied side-panel open preserves the Studio tab", async () => {
