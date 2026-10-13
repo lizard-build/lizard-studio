@@ -1768,9 +1768,9 @@ body.chat-menu-docked .chat-menu-window { margin-left: 0; }
 .chat-menu-item.dot-wait .chat-menu-dot { background: var(--other-blue); box-shadow: none; animation: pulse 1.6s ease-in-out infinite; }
 .chat-menu-item.dot-run .chat-menu-dot { background: var(--warn-soft); box-shadow: none; animation: pulse 1.6s ease-in-out infinite; }
 .chat-menu-item.dot-unseen .chat-menu-dot { background: var(--control-primary); box-shadow: none; }
-/* The bookmark right after the dot: a grey outline until a color is picked.
-   The negative margins keep the icon, not its 18px hit box, spaced off its
-   neighbours. */
+/* The bookmark right after the dot: until a color is picked, an outline in
+   the hollow dot's own grey. The negative margins keep the icon, not its 18px
+   hit box, spaced off its neighbours. */
 .chat-menu-bookmark {
   display: inline-flex;
   align-items: center;
@@ -1784,7 +1784,7 @@ body.chat-menu-docked .chat-menu-window { margin-left: 0; }
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--text-tertiary);
+  color: var(--border-primary);
   cursor: pointer;
   transition: color 0.12s, background 0.12s;
 }
