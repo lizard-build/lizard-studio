@@ -44,6 +44,7 @@ struct ModelRow {
 struct Catalog {
     models: Vec<ModelRow>,
     default_model: Option<String>,
+    default_effort: Option<String>,
 }
 
 #[derive(Default)]
@@ -772,8 +773,9 @@ impl StudioApp {
         }
     }
 
-    /// `LIZARD_STUDIO_SEND=<folder>|<mode>|<prompt>` starts a Claude chat
-    /// there and sends the prompt; `LIZARD_STUDIO_ALLOW_AFTER=<ms>` then
+    /// `LIZARD_STUDIO_SEND=<folder>|<mode>|<prompt>` starts a chat there
+    /// (Claude, or ChatGPT with `LIZARD_STUDIO_SEND_AGENT=codex`) and sends
+    /// the prompt; `LIZARD_STUDIO_ALLOW_AFTER=<ms>` then
     /// answers "Yes" to permission asks after that long.
     #[cfg(feature = "snapshot")]
     fn send_test_prompt(&mut self, cx: &mut Context<Self>) {
@@ -781,11 +783,17 @@ impl StudioApp {
         let mut parts = spec.splitn(3, '|');
         let (Some(cwd), Some(mode), Some(prompt)) = (parts.next(), parts.next(), parts.next()) else { return };
         let host = self.host.clone();
-        let chat = cx.new(|cx| ChatSession::fresh(Agent::Claude, Some(cwd.to_string()), host, cx));
+        let agent = match std::env::var("LIZARD_STUDIO_SEND_AGENT").as_deref() {
+            Ok("codex") => Agent::Codex,
+            _ => Agent::Claude,
+        };
+        let chat = cx.new(|cx| ChatSession::fresh(agent, Some(cwd.to_string()), host, cx));
         chat.update(cx, |c, _| {
             c.meta.id = format!("preview-send-{}", now_ms());
             c.meta.permission_mode = Some(mode.to_string());
-            c.meta.effort = Some("low".into());
+            if agent == Agent::Claude {
+                c.meta.effort = Some("low".into());
+            }
         });
         self.watch_chat(&chat, cx);
         self.chats.push(chat.clone());
@@ -898,7 +906,11 @@ fn catalog_from(msg: &Value) -> Catalog {
                 .collect()
         })
         .unwrap_or_default();
-    Catalog { models, default_model: msg.get("defaultModel").and_then(Value::as_str).map(str::to_string) }
+    Catalog {
+        models,
+        default_model: msg.get("defaultModel").and_then(Value::as_str).map(str::to_string),
+        default_effort: msg.get("defaultEffort").and_then(Value::as_str).map(str::to_string),
+    }
 }
 
 /// chat.js CONTEXT_LIMITS_FALLBACK, matched against the resolved model id.
@@ -1691,7 +1703,10 @@ impl StudioApp {
             Agent::Claude => ["low", "medium", "high", "xhigh", "max", "ultracode"].iter().map(|s| s.to_string()).collect(),
             Agent::Codex => model_row.as_ref().map(|m| m.efforts.clone()).unwrap_or_default(),
         };
-        let effort_value = effort.clone().or_else(|| model_row.as_ref().and_then(|m| m.default_effort.clone()));
+        let effort_value = effort
+            .clone()
+            .or_else(|| model_row.as_ref().and_then(|m| m.default_effort.clone()))
+            .or_else(|| catalog.default_effort.clone().filter(|e| efforts.contains(e)));
         let limit = context_limit(model_row.as_ref(), current_model.as_deref());
         let fraction = if limit > 0 { ctx_tokens as f32 / limit as f32 } else { 0. };
         let modes = modes_for(agent);
