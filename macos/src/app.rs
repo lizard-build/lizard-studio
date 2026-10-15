@@ -198,17 +198,8 @@ impl StudioApp {
             this.watch_chat(&chat, cx);
             this.chats.push(chat);
         }
-        let last_open = this
-            .chats
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.read(cx).meta.open)
-            .max_by_key(|(_, c)| c.read(cx).meta.updated_at)
-            .map(|(i, _)| i);
-        match last_open {
-            Some(ix) => this.active = ix,
-            None => this.new_chat_entity(cx),
-        }
+        // Every launch starts on a fresh chat, first in the list.
+        this.new_chat_entity(cx);
         #[cfg(feature = "snapshot")]
         this.open_preview(cx);
         #[cfg(feature = "snapshot")]
@@ -456,14 +447,26 @@ impl StudioApp {
     }
 
     fn persist(&mut self, chat: &Entity<ChatSession>, cx: &mut Context<Self>) {
-        let chat = chat.read(cx);
-        if chat.id().starts_with("preview-") || chat.is_blank() {
-            return;
-        }
-        self.store.upsert(chat.meta.clone());
+        let meta = {
+            let chat = chat.read(cx);
+            if chat.id().starts_with("preview-") || chat.is_blank() {
+                return;
+            }
+            chat.meta.clone()
+        };
+        self.store.upsert(meta);
+        // Saved in the list's own order, so a relaunch shows it unchanged.
+        let order: Vec<String> = self.chats.iter().map(|c| c.read(cx).id().to_string()).collect();
+        self.store.set_order(&order);
     }
 
-    /// Add a blank chat at the end of the open ones and show it.
+    /// Put a new chat first in the list and show it.
+    fn add_on_top(&mut self, chat: Entity<ChatSession>) {
+        self.chats.insert(0, chat);
+        self.active = 0;
+    }
+
+    /// Add a blank chat on top of the open ones and show it.
     fn new_chat_entity(&mut self, cx: &mut Context<Self>) {
         let agent = self.store.last_agent();
         let cwd = self.store.last_cwd();
@@ -475,8 +478,7 @@ impl StudioApp {
             chat
         });
         self.watch_chat(&chat, cx);
-        self.chats.push(chat);
-        self.active = self.chats.len() - 1;
+        self.add_on_top(chat);
     }
 
     /// Local or Cloud for the chat about to start; a chat that already ran
@@ -706,8 +708,7 @@ impl StudioApp {
             let host = self.host.clone();
             let chat = cx.new(|cx| ChatSession::fresh(agent, Some(cwd.clone()), host, cx));
             self.watch_chat(&chat, cx);
-            self.chats.push(chat);
-            self.active = self.chats.len() - 1;
+            self.add_on_top(chat);
         }
         self.store.remember_start(&cwd, self.chats[self.active].read(cx).meta.agent);
         self.activated(cx);
@@ -776,8 +777,7 @@ impl StudioApp {
                 fresh
             });
             self.watch_chat(&fresh, cx);
-            self.chats.push(fresh);
-            self.active = self.chats.len() - 1;
+            self.add_on_top(fresh);
         } else {
             chat.update(cx, |chat, cx| {
                 chat.meta.agent = agent;
@@ -935,8 +935,7 @@ impl StudioApp {
             }
         });
         self.watch_chat(&chat, cx);
-        self.chats.push(chat.clone());
-        self.active = self.chats.len() - 1;
+        self.add_on_top(chat.clone());
         let prompt = prompt.to_string();
         chat.update(cx, |c, cx| c.submit(prompt, Vec::new(), cx));
         if let Some(ms) = std::env::var("LIZARD_STUDIO_ALLOW_AFTER").ok().and_then(|v| v.parse::<u64>().ok()) {

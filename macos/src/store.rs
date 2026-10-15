@@ -130,6 +130,16 @@ impl Store {
         self.save();
     }
 
+    /// Order the saved chats like `ids`; any not named keep their place after.
+    pub fn set_order(&mut self, ids: &[String]) {
+        let rank = |id: &str| ids.iter().position(|x| x == id).unwrap_or(usize::MAX);
+        let before: Vec<String> = self.file.chats.iter().map(|c| c.id.clone()).collect();
+        self.file.chats.sort_by_key(|c| rank(&c.id));
+        if self.file.chats.iter().map(|c| &c.id).ne(before.iter()) {
+            self.save();
+        }
+    }
+
     pub fn remove(&mut self, id: &str) {
         self.file.chats.retain(|c| c.id != id);
         self.save();
