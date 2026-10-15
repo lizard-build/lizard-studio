@@ -113,6 +113,8 @@ pub enum ChatEvent {
     Changed,
     /// A turn ended (for the sidebar's "finished while away" dot).
     TurnEnded,
+    /// The agent reported its working folder.
+    CwdChanged,
 }
 
 impl EventEmitter<ChatEvent> for ChatSession {}
@@ -128,6 +130,12 @@ pub struct ChatSession {
     pub turn_tokens: u64,
     pub msg_tokens: u64,
     pub ctx_tokens: u64,
+    /// Codex reports its own context window per turn.
+    pub ctx_window: Option<u64>,
+    /// The folder the agent reports in `system/init`; it follows a `cd` into
+    /// a worktree, and the git bar reads it.
+    pub live_cwd: Option<String>,
+    pub tasks: Vec<Task>,
     ctx_base: u64,
     pub status_word: &'static str,
     pub permissions: Vec<Permission>,
@@ -148,6 +156,7 @@ pub struct ChatSession {
 
 impl ChatSession {
     pub fn new(meta: SavedChat, host: Rc<HostLink>, cx: &mut Context<Self>) -> Self {
+        let live_cwd = meta.work_cwd.clone();
         let list = ListState::new(0, ListAlignment::Top, px(400.));
         list.set_follow_mode(FollowMode::Tail);
         // Reaching the top pages in older history, like the panel does.
@@ -172,6 +181,9 @@ impl ChatSession {
             msg_tokens: 0,
             ctx_tokens: 0,
             ctx_base: 0,
+            ctx_window: None,
+            live_cwd,
+            tasks: Vec::new(),
             status_word: "Deploy on Lizard",
             permissions: Vec::new(),
             queued: VecDeque::new(),
@@ -206,6 +218,7 @@ impl ChatSession {
             bookmark: None,
             open: true,
             title_edited: false,
+            work_cwd: None,
         };
         Self::new(meta, host, cx)
     }
@@ -299,14 +312,21 @@ impl ChatSession {
         self.push(Item::Notice { warn, text: text.into() }, cx);
     }
 
+    /// The folder paths resolve against: the agent's live one, else the chat's.
+    pub fn work_cwd(&self) -> Option<String> {
+        self.live_cwd.clone().or_else(|| self.meta.cwd.clone())
+    }
+
     fn assistant_item(&mut self, msg_id: Option<String>, text: &str, cx: &mut Context<Self>) -> usize {
         self.tools_open = false;
-        let view = cx.new(|cx| TextViewState::markdown(text, cx).selectable(true));
+        let shown = link_paths(text, self.work_cwd().as_deref());
+        let view = cx.new(|cx| TextViewState::markdown(&shown, cx).selectable(true));
         self.push(Item::Assistant { msg_id, text: text.to_string(), view, footer: None }, cx)
     }
 
     fn user_item(&mut self, text: &str, cx: &mut Context<Self>) {
-        let view = cx.new(|cx| TextViewState::markdown(text, cx).selectable(true));
+        let shown = link_paths(text, self.work_cwd().as_deref());
+        let view = cx.new(|cx| TextViewState::markdown(&shown, cx).selectable(true));
         self.push(Item::User { view }, cx);
     }
 
@@ -600,6 +620,13 @@ impl ChatSession {
                     self.end_turn(cx);
                 }
             }
+            "contextUsage" => {
+                self.ctx_window = msg.get("window").and_then(Value::as_u64).or(self.ctx_window);
+                if let Some(usage) = msg.get("usage").filter(|u| !u.is_null()) {
+                    self.note_ctx_usage(Some(usage));
+                }
+                cx.notify();
+            }
             "transcript" => self.on_transcript(msg, cx),
             "transcriptPart" => self.on_transcript_part(msg, cx),
             _ => {}
@@ -656,6 +683,15 @@ impl ChatSession {
                     if let Some(list) = data.get("slash_commands").and_then(Value::as_array) {
                         self.commands = list.iter().filter_map(Value::as_str).map(str::to_string).collect();
                     }
+                    if let Some(cwd) = data.get("cwd").and_then(Value::as_str) {
+                        let cwd = cwd.trim_end_matches('/').to_string();
+                        if self.live_cwd.as_deref() != Some(cwd.as_str()) {
+                            self.live_cwd = Some(cwd.clone());
+                            self.meta.work_cwd = Some(cwd);
+                            self.touch(cx);
+                            cx.emit(ChatEvent::CwdChanged);
+                        }
+                    }
                 }
             }
             "stream_event" => {
@@ -674,14 +710,22 @@ impl ChatSession {
                 }
             }
             "user" => {
-                if let Some(content) = data.pointer("/message/content").and_then(Value::as_array) {
-                    for block in content {
-                        if block.get("type").and_then(Value::as_str) == Some("tool_result") {
-                            self.fill_tool_result(block, cx);
+                match data.pointer("/message/content") {
+                    Some(Value::Array(content)) => {
+                        for block in content {
+                            match block.get("type").and_then(Value::as_str) {
+                                Some("tool_result") => self.fill_tool_result(block, cx),
+                                Some("text") => {
+                                    scan_task_notice(&mut self.tasks, block.get("text").and_then(Value::as_str).unwrap_or(""))
+                                }
+                                _ => {}
+                            }
                         }
                     }
-                    cx.notify();
+                    Some(Value::String(text)) => scan_task_notice(&mut self.tasks, text),
+                    _ => {}
                 }
+                cx.notify();
             }
             "result" => {
                 let is_error = data.get("is_error").and_then(Value::as_bool).unwrap_or(false);
@@ -783,6 +827,7 @@ impl ChatSession {
                     if self.tool_index.contains_key(&tool_id) {
                         continue;
                     }
+                    note_task_start(&mut self.tasks, block);
                     self.push_tool(
                         ToolCall {
                             id: tool_id,
@@ -803,16 +848,19 @@ impl ChatSession {
     /// Codex can stream less than the final text; the canonical copy wins.
     fn repaint_streamed(&mut self, msg_id: Option<&str>, canonical: &str, cx: &mut Context<Self>) {
         let Some(msg_id) = msg_id else { return };
+        let cwd = self.work_cwd();
         let found = self.items.iter_mut().rev().find_map(|item| match item {
             Item::Assistant { msg_id: Some(id), text, view, .. } if id == msg_id => Some((text, view)),
             _ => None,
         });
         match found {
             Some((text, view)) => {
-                if canonical.len() > text.len() && canonical.starts_with(text.trim_end()) {
+                if canonical.len() >= text.len() && canonical.starts_with(text.trim_end()) {
                     *text = canonical.to_string();
-                    let canonical = canonical.to_string();
-                    view.update(cx, |v, cx| v.set_text(&canonical, cx));
+                }
+                let shown = link_paths(text, cwd.as_deref());
+                if shown != *text || canonical.len() >= text.len() {
+                    view.update(cx, |v, cx| v.set_text(&shown, cx));
                 }
             }
             None => {
@@ -829,6 +877,7 @@ impl ChatSession {
                 let is_error = block.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                 tool.status = if is_error { ToolStatus::Error } else { ToolStatus::Done };
                 tool.output = Some(result_text(block.get("content")));
+                note_task_result(&mut self.tasks, &tool.id, tool.output.as_deref().unwrap_or(""), is_error);
             }
         }
         cx.notify();
@@ -1059,6 +1108,7 @@ impl ChatSession {
         let mut open_group = false;
         let mut turn_start = 0usize;
         let mut last_at = 0u64;
+        let cwd = self.work_cwd();
 
         fn footer(items: &mut [Item], from: usize, at: u64) {
             let mut copy = Vec::new();
@@ -1098,6 +1148,8 @@ impl ChatSession {
                                                     let is_error = block.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                                                     tool.status = if is_error { ToolStatus::Error } else { ToolStatus::Done };
                                                     tool.output = Some(result_text(block.get("content")));
+                                                    let output = tool.output.clone().unwrap_or_default();
+                                                    note_task_result(&mut self.tasks, id, &output, is_error);
                                                 }
                                             }
                                         }
@@ -1108,10 +1160,13 @@ impl ChatSession {
                         }
                         _ => {}
                     }
-                    let text = clean_user_text(&texts.join("\n"));
+                    let raw = texts.join("\n");
+                    scan_task_notice(&mut self.tasks, &raw);
+                    let text = clean_user_text(&raw);
                     if !text.is_empty() && !text.starts_with("/usage") {
                         footer(&mut items, turn_start, last_at);
-                        let view = cx.new(|cx| TextViewState::markdown(&text, cx).selectable(true));
+                        let shown = link_paths(&text, cwd.as_deref());
+                        let view = cx.new(|cx| TextViewState::markdown(&shown, cx).selectable(true));
                         items.push(Item::User { view });
                         open_group = false;
                         turn_start = items.len();
@@ -1130,7 +1185,8 @@ impl ChatSession {
                                 if text.trim().is_empty() || text == "No response requested." {
                                     continue;
                                 }
-                                let view = cx.new(|cx| TextViewState::markdown(text, cx).selectable(true));
+                                let shown = link_paths(text, cwd.as_deref());
+                                let view = cx.new(|cx| TextViewState::markdown(&shown, cx).selectable(true));
                                 items.push(Item::Assistant { msg_id: msg_id.clone(), text: text.to_string(), view, footer: None });
                                 open_group = false;
                             }
@@ -1139,6 +1195,7 @@ impl ChatSession {
                                 if tools.contains_key(&id) {
                                     continue;
                                 }
+                                note_task_start(&mut self.tasks, block);
                                 let tool = ToolCall {
                                     id: id.clone(),
                                     name: block.get("name").and_then(Value::as_str).unwrap_or("Tool").to_string(),
@@ -1614,4 +1671,219 @@ pub fn permission_options(perm: &Permission, agent: Agent) -> Vec<String> {
     };
     let who = if agent == Agent::Codex { "ChatGPT" } else { "Claude" };
     vec!["Yes".into(), always, format!("No, and tell {who} what to do differently (esc)")]
+}
+
+// ---- background tasks (chat.js noteToolStart / scanBgNotice) ----------------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TaskKind {
+    Agent,
+    Shell,
+    Preview,
+}
+
+pub struct Task {
+    pub tool_id: String,
+    pub kind: TaskKind,
+    /// The shell or agent id a completion notice names.
+    pub handle: Option<String>,
+    pub running: bool,
+}
+
+/// A subagent, a background command or a preview server is a task.
+fn note_task_start(tasks: &mut Vec<Task>, block: &Value) {
+    let id = block.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+    let input = block.get("input");
+    let kind = match name {
+        "Task" | "Agent" => TaskKind::Agent,
+        "Bash" if input.and_then(|i| i.get("run_in_background")).and_then(Value::as_bool) == Some(true) => TaskKind::Shell,
+        n if n.ends_with("preview_start") => TaskKind::Preview,
+        _ => return,
+    };
+    if tasks.iter().any(|t| t.tool_id == id) {
+        return;
+    }
+    tasks.push(Task { tool_id: id, kind, handle: None, running: true });
+}
+
+fn note_task_result(tasks: &mut [Task], tool_id: &str, output: &str, is_error: bool) {
+    let Some(task) = tasks.iter_mut().find(|t| t.tool_id == tool_id) else { return };
+    match task.kind {
+        // A background agent answers at once with its id and finishes later.
+        TaskKind::Agent => {
+            let handle = after_label(output, "agentId:");
+            if !is_error && handle.is_some() && output.to_lowercase().contains("launched") {
+                task.handle = handle;
+            } else {
+                task.running = false;
+            }
+        }
+        TaskKind::Shell => {
+            task.handle = after_label(output, "ID:").or_else(|| output.split_whitespace().find(|w| w.starts_with("bash_")).map(str::to_string));
+            if is_error {
+                task.running = false;
+            }
+        }
+        TaskKind::Preview => {
+            if is_error {
+                task.running = false;
+            }
+        }
+    }
+}
+
+/// The CLI's synthetic "task finished" turns end the task they name.
+fn scan_task_notice(tasks: &mut [Task], text: &str) {
+    if text.is_empty() || !tasks.iter().any(|t| t.running && t.handle.is_some()) {
+        return;
+    }
+    let lower = text.to_lowercase();
+    const DONE: &[&str] = &[
+        "completed", "complete", "exited", "exit code", "finished", "killed", "terminated", "stopped", "no longer running",
+    ];
+    if !DONE.iter().any(|w| lower.contains(w)) {
+        return;
+    }
+    for task in tasks.iter_mut().filter(|t| t.running) {
+        if let Some(handle) = &task.handle {
+            if mentions_id(text, handle) {
+                task.running = false;
+            }
+        }
+    }
+}
+
+fn after_label(text: &str, label: &str) -> Option<String> {
+    let start = text.find(label)? + label.len();
+    let id: String = text[start..]
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
+/// `id` as a whole token: "bash_1" must not match inside "bash_10".
+fn mentions_id(text: &str, id: &str) -> bool {
+    let is_id = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    text.match_indices(id).any(|(at, _)| {
+        let before = text[..at].chars().next_back().map_or(true, |c| !is_id(c));
+        let after = text[at + id.len()..].chars().next().map_or(true, |c| !is_id(c));
+        before && after
+    })
+}
+
+impl ChatSession {
+    pub fn task_counts(&self) -> (usize, usize) {
+        (self.tasks.iter().filter(|t| t.running).count(), self.tasks.len())
+    }
+}
+
+// ---- file paths in inline code (render.js filePath) -------------------------
+
+/// The link scheme a path chip carries; the click opens the file.
+pub const OPEN_SCHEME: &str = "lizard-open:";
+
+/// Turn inline code that names a file into a link, as the panel does, so it
+/// shows blue and opens on click. Fenced code is left alone.
+pub fn link_paths(text: &str, cwd: Option<&str>) -> String {
+    if !text.contains('`') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 32);
+    let mut fenced = false;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+            out.push_str(line);
+        } else if fenced || !line.contains('`') {
+            out.push_str(line);
+        } else {
+            out.push_str(&link_line(line, cwd));
+        }
+    }
+    out
+}
+
+fn link_line(line: &str, cwd: Option<&str>) -> String {
+    let mut out = String::with_capacity(line.len() + 32);
+    let mut i = 0;
+    while let Some(rel) = line[i..].find('`') {
+        let start = i + rel;
+        let run = line[start..].chars().take_while(|c| *c == '`').count();
+        if run != 1 {
+            out.push_str(&line[i..start + run]);
+            i = start + run;
+            continue;
+        }
+        let Some(end_rel) = line[start + 1..].find('`') else { break };
+        let end = start + 1 + end_rel;
+        let code = &line[start + 1..end];
+        let in_link = line[..start].ends_with('[') || line[end + 1..].starts_with(']');
+        out.push_str(&line[i..start]);
+        match file_path(code).filter(|_| !in_link) {
+            Some(path) => {
+                let target = resolve_path(&path, cwd);
+                out.push_str(&format!("[`{code}`](<{OPEN_SCHEME}{target}>)"));
+            }
+            None => out.push_str(&line[start..=end]),
+        }
+        i = end + 1;
+    }
+    out.push_str(&line[i..]);
+    out
+}
+
+/// render.js filePath: a path with a folder in it, never a command or a URL.
+fn file_path(code: &str) -> Option<String> {
+    let mut s = code.trim();
+    // "file.ts:42:7" — the position is for an editor, not part of the name.
+    if let Some((head, tail)) = s.rsplit_once(':') {
+        if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
+            s = head;
+            if let Some((head, tail)) = s.rsplit_once(':') {
+                if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
+                    s = head;
+                }
+            }
+        }
+    }
+    if s.is_empty() || s.len() > 400 {
+        return None;
+    }
+    if s.chars().any(|c| "&<>|*?`$;()\n".contains(c)) || s.contains(" -") || s.contains("\t-") {
+        return None;
+    }
+    if let Some(colon) = s.find("://") {
+        if s[..colon].chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c)) && !s[..colon].is_empty() {
+            return None;
+        }
+    }
+    let rooted = s.starts_with("~/")
+        || s.starts_with("./")
+        || s.starts_with("../")
+        || s.starts_with('/')
+        || (s.len() > 2 && s.as_bytes()[1] == b':' && (s.as_bytes()[2] == b'/' || s.as_bytes()[2] == b'\\'));
+    if rooted {
+        return s.chars().any(|c| !"~./\\".contains(c)).then(|| s.to_string());
+    }
+    if s.chars().any(char::is_whitespace) {
+        return None;
+    }
+    s.contains('/').then(|| s.to_string())
+}
+
+fn resolve_path(path: &str, cwd: Option<&str>) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        return crate::host::home_dir().join(rest).to_string_lossy().to_string();
+    }
+    if path.starts_with('/') {
+        return path.to_string();
+    }
+    match cwd {
+        Some(cwd) => std::path::Path::new(cwd).join(path).to_string_lossy().to_string(),
+        None => path.to_string(),
+    }
 }

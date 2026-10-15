@@ -80,12 +80,20 @@ fn main() {
             },
         ]);
 
-        let bounds = Bounds::centered(None, size(px(1180.), px(820.)), cx);
+        // LIZARD_STUDIO_SIZE=<w>x<h> sets the first window's size.
+        let (width, height) = std::env::var("LIZARD_STUDIO_SIZE")
+            .ok()
+            .and_then(|v| {
+                let (w, h) = v.split_once('x')?;
+                Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
+            })
+            .unwrap_or((1180., 820.));
+        let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions {
                 title: Some("Lizard Studio".into()),
                 appears_transparent: true,
-                traffic_light_position: Some(point(px(14.), px(10.))),
+                traffic_light_position: Some(point(px(12.), px(8.))),
             }),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(760.), px(520.))),

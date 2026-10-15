@@ -39,6 +39,7 @@ LIZARD_STUDIO_SNAPSHOT_QUIT=1 ./target/debug/lizard-studio
 - `LIZARD_STUDIO_OPEN=<session id>:<folder>` opens a saved Claude session read-only.
 - `LIZARD_STUDIO_SEND=<folder>|<mode>|<prompt>` starts a chat and sends the prompt; `LIZARD_STUDIO_ALLOW_AFTER=<ms>` answers "Yes" to permission asks.
 - `LIZARD_STUDIO_EXPAND=1` opens every tool group.
+- `LIZARD_STUDIO_SIZE=<w>x<h>` sizes the window; `LIZARD_STUDIO_STORE=<file>` reads a fixture chat list; `LIZARD_STUDIO_RUNNING=<id,id>` shows those chats as running; `LIZARD_STUDIO_OPEN_AT` and `LIZARD_STUDIO_OPEN_WORKDIR` place the opened session in the list and set its working folder.
 - `LIZARD_STUDIO_DEBUG=1` logs host messages.
 
 Neither kind of test chat is saved.

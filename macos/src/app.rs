@@ -27,14 +27,13 @@ use crate::ui::{self, MenuEntry, caret, lizard, ph, pulse};
 use crate::{NewChat, StopTurn};
 
 const MIN_HOST_VERSION: u64 = 40;
-const TITLEBAR_H: f32 = 30.;
+const TITLEBAR_H: f32 = 28.;
 const BOOKMARKS: &[(&str, u32)] = &[("Violet", 0xb69aff), ("Pink", 0xf18ac5), ("Coral", 0xff927c), ("White", 0xe9edf4)];
 
 #[derive(Clone)]
 struct ModelRow {
     id: String,
     label: String,
-    resolved: Option<String>,
     context_limit: Option<u64>,
     efforts: Vec<String>,
     default_effort: Option<String>,
@@ -58,7 +57,9 @@ struct HostState {
 
 #[derive(Clone, Default)]
 struct GitInfo {
+    is_repo: bool,
     branch: Option<String>,
+    files: u64,
     added: u64,
     removed: u64,
 }
@@ -195,6 +196,15 @@ impl StudioApp {
         this.open_preview(cx);
         #[cfg(feature = "snapshot")]
         this.send_test_prompt(cx);
+        // LIZARD_STUDIO_RUNNING=<id,id> shows those chats as running.
+        #[cfg(feature = "snapshot")]
+        if let Ok(ids) = std::env::var("LIZARD_STUDIO_RUNNING") {
+            for id in ids.split(',') {
+                if let Some(chat) = this.chat_by_id(id, cx) {
+                    chat.update(cx, |c, cx| c.restore_from_daemon(true, true, cx));
+                }
+            }
+        }
         this.connect(cx);
         this.activated(cx);
         if std::env::var_os("LIZARD_STUDIO_SNAPSHOT").is_none() {
@@ -341,7 +351,12 @@ impl StudioApp {
                     if !active {
                         chat.update(cx, |c, _| c.unseen = true);
                     }
-                    if let Some(cwd) = chat.read(cx).meta.cwd.clone() {
+                    if let Some(cwd) = chat.read(cx).work_cwd() {
+                        this.refresh_git(cwd, cx);
+                    }
+                }
+                ChatEvent::CwdChanged => {
+                    if let Some(cwd) = chat.read(cx).work_cwd() {
                         this.refresh_git(cwd, cx);
                     }
                 }
@@ -430,8 +445,8 @@ impl StudioApp {
             let c = chat.read(cx);
             (c.meta.cwd.clone(), c.meta.agent)
         };
-        if let Some(cwd) = cwd.clone() {
-            self.refresh_git(cwd, cx);
+        if let Some(work) = chat.read(cx).work_cwd() {
+            self.refresh_git(work, cx);
         }
         if chat.read(cx).commands.is_empty() {
             chat.read(cx).request_commands();
@@ -838,11 +853,13 @@ impl StudioApp {
             bookmark: None,
             open: true,
             title_edited: true,
+            work_cwd: std::env::var("LIZARD_STUDIO_OPEN_WORKDIR").ok(),
         };
         let chat = cx.new(|cx| ChatSession::new(meta, host, cx));
         self.watch_chat(&chat, cx);
-        self.chats.insert(0, chat);
-        self.active = 0;
+        let at = std::env::var("LIZARD_STUDIO_OPEN_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(0).min(self.chats.len());
+        self.chats.insert(at, chat);
+        self.active = at;
         self.prune_blank(cx);
     }
 }
@@ -861,20 +878,42 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// The host's gitDiff, summed: changes not yet on the remote's default branch
+/// (unpushed commits and uncommitted edits) plus untracked files.
 fn git_info(cwd: &str) -> GitInfo {
     let run = |args: &[&str]| -> Option<String> {
         let out = std::process::Command::new("git").arg("-C").arg(cwd).args(args).output().ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string())
     };
-    let branch = run(&["rev-parse", "--abbrev-ref", "HEAD"]).filter(|b| !b.is_empty() && b != "HEAD");
-    let mut info = GitInfo { branch, ..Default::default() };
-    if info.branch.is_some() {
-        if let Some(stat) = run(&["diff", "--numstat", "HEAD"]) {
-            for line in stat.lines() {
-                let mut parts = line.split_whitespace();
-                info.added += parts.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
-                info.removed += parts.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
-            }
+    let Some(status) = run(&["status", "--porcelain=v1", "--untracked-files=all"]) else {
+        return GitInfo::default();
+    };
+    let mut info = GitInfo { is_repo: true, ..Default::default() };
+    info.branch = run(&["rev-parse", "--abbrev-ref", "HEAD"]).map(|b| b.trim().to_string()).filter(|b| !b.is_empty() && b != "HEAD");
+    let default = run(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).map(|r| r.trim().to_string());
+    let mut base = None;
+    for candidate in [default.as_deref(), Some("origin/main"), Some("origin/master")].into_iter().flatten() {
+        if let Some(mb) = run(&["merge-base", "HEAD", candidate]).map(|m| m.trim().to_string()).filter(|m| !m.is_empty()) {
+            base = Some(mb);
+            break;
+        }
+    }
+    let has_tracked = status.lines().any(|l| !l.starts_with("??") && !l.starts_with("!!"));
+    let numstat = match &base {
+        Some(base) => run(&["diff", "--numstat", base.as_str()]),
+        None if has_tracked => run(&["diff", "--numstat", "HEAD"]).filter(|o| !o.trim().is_empty()).or_else(|| run(&["diff", "--numstat"])),
+        None => None,
+    };
+    for line in numstat.unwrap_or_default().lines() {
+        let mut parts = line.split_whitespace();
+        info.added += parts.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+        info.removed += parts.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+        info.files += 1;
+    }
+    for path in status.lines().filter_map(|l| l.strip_prefix("?? ")) {
+        info.files += 1;
+        if let Ok(text) = std::fs::read_to_string(std::path::Path::new(cwd).join(path)) {
+            info.added += text.lines().count() as u64;
         }
     }
     info
@@ -897,7 +936,6 @@ fn catalog_from(msg: &Value) -> Catalog {
                     Some(ModelRow {
                         id,
                         label,
-                        resolved: row.get("resolvedModel").and_then(Value::as_str).map(str::to_string),
                         context_limit: row.get("contextLimit").and_then(Value::as_u64),
                         efforts,
                         default_effort: row.get("defaultEffort").and_then(Value::as_str).map(str::to_string),
@@ -913,27 +951,17 @@ fn catalog_from(msg: &Value) -> Catalog {
     }
 }
 
-/// chat.js CONTEXT_LIMITS_FALLBACK, matched against the resolved model id.
+/// chat.js contextLimit: the catalog's limit for the model id, then the
+/// built-in table by exact id, else 200k.
 fn context_limit(row: Option<&ModelRow>, model: Option<&str>) -> u64 {
     if let Some(limit) = row.and_then(|r| r.context_limit) {
         return limit;
     }
-    let id = row.and_then(|r| r.resolved.clone()).or(model.map(str::to_string)).unwrap_or_default();
-    for (prefix, limit) in [
-        ("claude-opus-4-8", 1_000_000),
-        ("claude-opus-5", 1_000_000),
-        ("claude-sonnet-5", 1_000_000),
-        ("claude-fable-5", 1_000_000),
-        ("claude-haiku-4-5", 200_000),
-    ] {
-        if id.starts_with(prefix) {
-            return limit;
-        }
+    match model.unwrap_or("") {
+        "claude-opus-4-8" | "claude-opus-5" | "claude-sonnet-5" | "claude-fable-5" => 1_000_000,
+        "claude-haiku-4-5" => 200_000,
+        _ => 200_000,
     }
-    if ["opus", "sonnet", "fable"].iter().any(|m| id == *m) {
-        return 1_000_000;
-    }
-    200_000
 }
 
 /// (id, full label, pill label, hint) — chat.js MODES / CODEX_MODES.
@@ -1215,26 +1243,15 @@ impl StudioApp {
             .flex_col()
             .flex_none()
             .bg(hex(BG_SECONDARY))
-            // Room for the traffic lights; drags the window.
-            .child(
-                div()
-                    .id("sidebar-titlebar")
-                    .h(px(TITLEBAR_H))
-                    .flex_none()
-                    .on_mouse_down(MouseButton::Left, |event, window, _| {
-                        if event.click_count == 2 {
-                            window.titlebar_double_click();
-                        } else {
-                            window.start_window_move();
-                        }
-                    }),
-            )
+            // The chat's `box-shadow: -1px 0 0 #2e2e2e` lands on this pixel.
+            .border_r_1()
+            .border_color(hex(BORDER))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .pt(px(6.))
+                    .pt(px(14.))
                     .pb(px(10.))
                     .px(px(16.))
                     .child(lizard(20., hex(EMERALD)).ml(px(-2.)))
@@ -1272,7 +1289,6 @@ impl StudioApp {
                     .pb(px(8.))
                     .flex()
                     .flex_col()
-                    .gap(px(2.))
                     .when(empty, |d| {
                         d.child(
                             div()
@@ -1284,10 +1300,11 @@ impl StudioApp {
                                 .child(if query.is_empty() { "No chats yet." } else { "No matches." }),
                         )
                     })
+                    // Rows sit 2px apart; a group label sits right on its rows.
                     .when(has_open, |d| d.child(group_label("Active", true)))
-                    .children(open_elements)
+                    .child(div().flex().flex_col().gap(px(2.)).children(open_elements))
                     .when(has_closed, |d| d.child(group_label("History", !has_open)))
-                    .children(closed_elements),
+                    .child(div().flex().flex_col().gap(px(2.)).children(closed_elements)),
             )
             .child(
                 div()
@@ -1487,7 +1504,7 @@ impl StudioApp {
                     .border_color(hex(BORDER))
                     .cursor_pointer()
                     .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(command.into())))
-                    .child(div().font_family("JetBrains Mono").text_size(px(12.)).child(command))
+                    .child(div().font_family("Lizard Mono").text_size(px(12.)).child(command))
                     .child(ph("copy", 13., hex(TEXT_TERTIARY))),
             )
             .child(
@@ -1613,23 +1630,7 @@ impl StudioApp {
                             ),
                         )
                     })
-                    // A thin strip at the top drags the window.
-                    .child(
-                        div()
-                            .id("chat-titlebar")
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .right_0()
-                            .h(px(12.))
-                            .on_mouse_down(MouseButton::Left, |event, window, _| {
-                                if event.click_count == 2 {
-                                    window.titlebar_double_click();
-                                } else {
-                                    window.start_window_move();
-                                }
-                            }),
-                    ),
+
             )
             .child(self.render_composer(cx))
             .into_any_element()
@@ -1662,6 +1663,10 @@ impl StudioApp {
 
     fn render_composer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = self.chats[self.active].clone();
+        let (work_cwd, ctx_window, (tasks_running, tasks_total)) = {
+            let c = entity.read(cx);
+            (c.work_cwd(), c.ctx_window, c.task_counts())
+        };
         let (agent, blank, running, cwd, mode, model, effort, ctx_tokens, commands) = {
             let c = entity.read(cx);
             (
@@ -1677,7 +1682,7 @@ impl StudioApp {
             )
         };
         let catalog = self.catalogs.get(&agent).cloned().unwrap_or_default();
-        let git = cwd.as_ref().and_then(|cwd| self.git.get(cwd).cloned()).unwrap_or_default();
+        let git = work_cwd.as_ref().and_then(|cwd| self.git.get(cwd).cloned()).unwrap_or_default();
         let menu = self.menu.clone();
         let composer_text = self.composer.read(cx).value().to_string();
 
@@ -1687,7 +1692,6 @@ impl StudioApp {
                 .map(|(id, label)| ModelRow {
                     id: id.to_string(),
                     label: label.to_string(),
-                    resolved: None,
                     context_limit: None,
                     efforts: vec![],
                     default_effort: None,
@@ -1707,7 +1711,11 @@ impl StudioApp {
             .clone()
             .or_else(|| model_row.as_ref().and_then(|m| m.default_effort.clone()))
             .or_else(|| catalog.default_effort.clone().filter(|e| efforts.contains(e)));
-        let limit = context_limit(model_row.as_ref(), current_model.as_deref());
+        // ChatGPT gets its window from the agent; without one there is no ring.
+        let limit = match agent {
+            Agent::Claude => context_limit(model_row.as_ref(), current_model.as_deref()),
+            Agent::Codex => ctx_window.unwrap_or(0),
+        };
         let fraction = if limit > 0 { ctx_tokens as f32 / limit as f32 } else { 0. };
         let modes = modes_for(agent);
         let (mode_bg, mode_fg) = mode_colors(&mode);
@@ -1855,9 +1863,11 @@ impl StudioApp {
                 )
         });
 
-        // The git flap above the box, when the folder has changes.
-        let dirty = git.added + git.removed > 0;
-        let flap = (!blank && dirty).then(|| {
+        // The git bar above the box (panel.css .git-bar): shown once the folder
+        // has changes not on the default branch, or a background task exists.
+        let has_changes = git.is_repo && git.files > 0;
+        let flap = (!blank && (has_changes || tasks_total > 0)).then(|| {
+            let show_branch = git.is_repo && git.branch.is_some();
             div()
                 .flex()
                 .items_center()
@@ -1869,7 +1879,7 @@ impl StudioApp {
                 .rounded_tl(px(14.))
                 .rounded_tr(px(14.))
                 .bg(hex(BG_SECONDARY))
-                .child(if git.branch.is_some() {
+                .child(if show_branch {
                     ph("git-branch", 12., hex(TEXT_TERTIARY))
                 } else {
                     ph("folder", 12., hex(TEXT_TERTIARY))
@@ -1881,22 +1891,50 @@ impl StudioApp {
                         .truncate()
                         .text_size(px(12.))
                         .text_color(hex(TEXT_SECONDARY))
-                        .child(git.branch.clone().unwrap_or_else(|| ui::folder_label(cwd.as_deref()))),
+                        .child(if show_branch {
+                            git.branch.clone().unwrap_or_default()
+                        } else {
+                            ui::folder_label(work_cwd.as_deref())
+                        }),
                 )
-                .child(
-                    div()
+                .when(has_changes, |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .gap(px(6.))
+                            .px(px(10.))
+                            .py(px(4.))
+                            .rounded_full()
+                            .bg(white_a(0.05))
+                            .font_family("Lizard Mono")
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(div().text_color(hex(EMERALD)).child(format!("+{}", git.added)))
+                            .child(div().text_color(hex(RED)).child(format!("-{}", git.removed))),
+                    )
+                })
+                .when(tasks_total > 0, |d| {
+                    let chip = div()
                         .flex()
-                        .gap(px(6.))
+                        .items_center()
+                        .gap(px(8.))
                         .px(px(10.))
                         .py(px(4.))
                         .rounded_full()
                         .bg(white_a(0.05))
-                        .font_family("JetBrains Mono")
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(div().text_color(hex(EMERALD)).child(format!("+{}", git.added)))
-                        .child(div().text_color(hex(RED)).child(format!("-{}", git.removed))),
-                )
+                        .text_color(hex(TEXT_PRIMARY))
+                        .child(ph("stack", 14., hex(TEXT_PRIMARY)))
+                        .when(tasks_running > 0, |d| {
+                            d.child(
+                                div()
+                                    .font_family("Lizard Mono")
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(tasks_running.to_string()),
+                            )
+                        });
+                    d.child(if tasks_running > 0 { pulse("tasks-chip", 2400, chip) } else { chip.into_any_element() })
+                })
         });
 
         let attachments: Vec<(usize, String)> = self.attachments.iter().enumerate().map(|(i, a)| (i, a.name.clone())).collect();
@@ -2101,6 +2139,33 @@ fn toggle_menu(which: Menu, cx: &mut Context<StudioApp>) -> impl Fn(&ClickEvent,
     }
 }
 
+/// A reply or prompt as the panel renders it: file chips open the file,
+/// fenced code gets a copy button.
+fn markdown_view(view: &Entity<gpui_kit::component::text::TextViewState>) -> TextView {
+    TextView::new(view)
+        .on_link_click(|url, _, _, cx| match url.strip_prefix(chat::OPEN_SCHEME) {
+            Some(path) => cx.open_with_system(std::path::Path::new(path)),
+            None => cx.open_url(url),
+        })
+        .code_block_actions(|block, _, _| {
+            let code = block.code();
+            let id = SharedString::from(format!("copy-code-{}", block.span.map(|s| s.start).unwrap_or(0)));
+            div()
+                .id(id)
+                .size(px(22.))
+                .mt(px(-1.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .bg(hex(BG_SECONDARY))
+                .cursor_pointer()
+                .hover(|s| s.bg(white_a(0.1)))
+                .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(code.to_string())))
+                .child(ph("copy", 12., hex(TEXT_TERTIARY)))
+        })
+}
+
 /// The top-level gap: 14px between rows, 8px between blocks of one reply.
 fn row_gap(items: &[Item], ix: usize) -> f32 {
     if ix == 0 {
@@ -2149,7 +2214,7 @@ fn render_row(
             .text_size(px(14.))
             .line_height(relative(1.55))
             .text_color(hex(TEXT_PRIMARY))
-            .child(TextView::new(view))
+            .child(markdown_view(view))
             .into_any_element(),
         Item::Assistant { view, footer, .. } => {
             let group: SharedString = format!("reply-{ix}").into();
@@ -2162,7 +2227,7 @@ fn render_row(
                 .text_size(px(14.))
                 .line_height(relative(1.55))
                 .text_color(hex(TEXT_PRIMARY))
-                .child(TextView::new(view).stream_fade(true))
+                .child(markdown_view(view).stream_fade(true))
                 .when_some(footer, |d, (at, copy)| {
                     d.child(
                         div()
@@ -2265,7 +2330,7 @@ fn code_block(id: impl Into<ElementId>, text: String, error: bool) -> Stateful<D
         .py(px(10.))
         .rounded(px(8.))
         .bg(if error { rgba_hex(RED, 0.1) } else { white_a(0.05) })
-        .font_family("JetBrains Mono")
+        .font_family("Lizard Mono")
         .text_size(px(12.))
         .line_height(relative(1.5))
         .text_color(hex(TEXT_PRIMARY))
@@ -2281,7 +2346,7 @@ fn diff_block(id: impl Into<ElementId>, lines: Vec<(char, String)>) -> Stateful<
         .py(px(8.))
         .rounded(px(8.))
         .bg(white_a(0.05))
-        .font_family("JetBrains Mono")
+        .font_family("Lizard Mono")
         .text_size(px(12.))
         .line_height(relative(1.5))
         .children(lines.into_iter().map(|(sign, line)| {
@@ -2304,7 +2369,7 @@ fn render_detail(id: SharedString, detail: Detail) -> AnyElement {
                     .absolute()
                     .left(px(12.))
                     .top(px(10.))
-                    .font_family("JetBrains Mono")
+                    .font_family("Lizard Mono")
                     .text_size(px(12.))
                     .line_height(relative(1.5))
                     .text_color(hex(TEXT_TERTIARY))
@@ -2356,7 +2421,7 @@ fn render_tool(entity: &Entity<ChatSession>, ix: usize, t: usize, tool: &chat::T
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .font_family("JetBrains Mono")
+                        .font_family("Lizard Mono")
                         .text_size(px(11.5))
                         .text_color(hex(TEXT_SECONDARY))
                         .child(label.summary),
@@ -2587,6 +2652,46 @@ impl Render for StudioApp {
         let main: AnyElement = if blocked { self.render_onboarding(cx) } else { self.render_chat(cx) };
         let sidebar = sidebar_open.then(|| self.render_sidebar(sidebar_w, cx));
 
+        let title = self.chats[self.active].read(cx).meta.title.clone();
+        let titlebar = div()
+            .id("titlebar")
+            .h(px(TITLEBAR_H))
+            .w_full()
+            .flex_none()
+            .relative()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(hex(BG_SECONDARY))
+            .on_mouse_down(MouseButton::Left, |event, window, _| {
+                if event.click_count == 2 {
+                    window.titlebar_double_click();
+                } else {
+                    window.start_window_move();
+                }
+            })
+            .child(
+                div()
+                    .max_w(relative(0.5))
+                    .truncate()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(hex(TEXT_TERTIARY))
+                    .child(title),
+            )
+            .when(!sidebar_open, |d| {
+                d.child(
+                    div().absolute().top_0().left(px(76.)).child(
+                        icon_button("show-sidebar", "side-panel", 16.)
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sidebar_open = true;
+                                cx.notify();
+                            })),
+                    ),
+                )
+            });
+
         div()
             .id("studio")
             .key_context("Studio")
@@ -2595,25 +2700,22 @@ impl Render for StudioApp {
             .on_action(cx.listener(Self::stop))
             .capture_key_down(cx.listener(Self::on_key))
             .size_full()
-            .relative()
             .flex()
+            .flex_col()
             .bg(hex(BG_PRIMARY))
             .text_color(hex(TEXT_PRIMARY))
-            .font_family("Inter")
+            .font_family("Lizard Inter")
             .text_size(px(14.))
-            .children(sidebar)
-            // The chat column's left edge: `box-shadow: -1px 0 0 #2e2e2e`.
-            .when(sidebar_open, |d| d.child(div().w(px(1.)).h_full().flex_none().bg(hex(BORDER))))
-            .child(div().flex_1().min_w_0().h_full().flex().child(main))
-            .when(!sidebar_open, |d| {
-                d.child(
-                    div().absolute().top(px(1.)).left(px(76.)).child(icon_button("show-sidebar", "side-panel", 18.).on_click(cx.listener(
-                        |this, _, _, cx| {
-                            this.sidebar_open = true;
-                            cx.notify();
-                        },
-                    ))),
-                )
-            })
+            // CSS `line-height: normal` for Inter (ascender + descender).
+            .line_height(relative(1.21))
+            .child(titlebar)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .children(sidebar)
+                    .child(div().flex_1().min_w_0().h_full().flex().child(main)),
+            )
     }
 }

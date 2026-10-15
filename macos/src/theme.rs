@@ -47,8 +47,8 @@ const THEME_JSON: &str = r##"{
       "name": "Lizard Dark",
       "mode": "dark",
       "font.size": 14,
-      "font.family": "Inter",
-      "mono_font.family": "JetBrains Mono",
+      "font.family": "Lizard Inter",
+      "mono_font.family": "Lizard Mono",
       "mono_font.size": 12,
       "radius": 8,
       "radius.lg": 12,
@@ -136,10 +136,11 @@ pub fn install_text_style(cx: &mut App) {
         .px(px(12.))
         .py(px(10.))
         .text_size(px(12.))
-        .font_family("JetBrains Mono");
+        .font_family("Lizard Mono");
     let style = TextViewStyle::default()
         .with_foreground(hex(TEXT_PRIMARY))
-        .with_muted_foreground(hex(TEXT_SECONDARY))
+        // List markers use this colour; the panel draws them in the text colour.
+        .with_muted_foreground(hex(TEXT_PRIMARY))
         .with_link(hex(BLUE))
         .with_selection(rgba_hex(BLUE, 0.35))
         .with_code_background(white_a(0.06))

@@ -53,6 +53,10 @@ pub struct SavedChat {
     pub open: bool,
     #[serde(default)]
     pub title_edited: bool,
+    /// Where the agent last said it works (`system/init`), which can be a
+    /// worktree below `cwd`. Only the git bar and file links read it.
+    #[serde(default)]
+    pub work_cwd: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -71,11 +75,10 @@ pub struct Store {
 
 impl Store {
     pub fn load() -> Self {
-        let path = home_dir()
-            .join("Library")
-            .join("Application Support")
-            .join("Lizard Studio")
-            .join("chats.json");
+        // LIZARD_STUDIO_STORE points a visual check at a fixture list.
+        let path = std::env::var_os("LIZARD_STUDIO_STORE").map(PathBuf::from).unwrap_or_else(|| {
+            home_dir().join("Library").join("Application Support").join("Lizard Studio").join("chats.json")
+        });
         let file = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
