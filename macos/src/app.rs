@@ -35,6 +35,7 @@ const MIN_HOST_VERSION: u64 = 40;
 const CLOUD_HOST_VERSION: u64 = 41;
 const CLOUD_LABEL: &str = "Run in a sandbox";
 const TITLEBAR_H: f32 = 28.;
+const SIDEBAR_W: f32 = 260.;
 const BOOKMARKS: &[(&str, u32)] = &[("Violet", 0xb69aff), ("Pink", 0xf18ac5), ("Coral", 0xff927c), ("White", 0xe9edf4)];
 
 #[derive(Clone, Default)]
@@ -3058,7 +3059,9 @@ impl Render for StudioApp {
         self.apply_settings_text(window, cx);
         let viewport = window.viewport_size();
         self.viewport = viewport;
-        let sidebar_w = (viewport.width * 0.35).min(px(400.));
+        // A fixed column like the Claude and Codex apps' sidebars, not the
+        // panel's 35%; a narrow window still keeps most of its width for the chat.
+        let sidebar_w = px(SIDEBAR_W).min(viewport.width * 0.4);
         let sidebar_open = self.sidebar_open;
         let main: AnyElement = if blocked { self.render_onboarding(cx) } else { self.render_chat(cx) };
         let sidebar = sidebar_open.then(|| self.render_sidebar(sidebar_w, cx));
