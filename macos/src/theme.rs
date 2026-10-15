@@ -180,7 +180,7 @@ macro_rules! panel_icons {
 }
 
 // The panel's own icons (src/panel/icons.js), exported as files.
-panel_icons!("asterisk", "bookmark", "bookmark-fill", "brain", "caret-down", "caret-left", "chat", "chats", "check", "claude", "codex", "copy", "cursor", "edit", "file", "file-plus", "folder", "gauge", "gear", "git-branch", "globe", "history", "list", "lizard", "plus", "robot", "search", "selection", "send", "server", "side-panel", "sparkle", "stack", "stop", "terminal", "todo", "trash", "warning", "window-open", "x");
+panel_icons!("asterisk", "cloud", "bookmark", "bookmark-fill", "brain", "caret-down", "caret-left", "chat", "chats", "check", "claude", "codex", "copy", "cursor", "edit", "file", "file-plus", "folder", "gauge", "gear", "git-branch", "globe", "history", "list", "lizard", "plus", "robot", "search", "selection", "send", "server", "side-panel", "sparkle", "stack", "stop", "terminal", "todo", "trash", "warning", "window-open", "x");
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {

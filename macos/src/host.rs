@@ -32,8 +32,13 @@ pub enum HostEvent {
     Disconnected(String),
 }
 
+/// Where the installed host lives. `LIZARD_STUDIO_HOST_DIR` points the app
+/// at another copy (a branch build), which then runs its own daemon there.
 pub fn host_dir() -> PathBuf {
-    home_dir().join(".lizard-studio").join("host")
+    match std::env::var_os("LIZARD_STUDIO_HOST_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => home_dir().join(".lizard-studio").join("host"),
+    }
 }
 
 pub fn home_dir() -> PathBuf {

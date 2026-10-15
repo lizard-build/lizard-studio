@@ -27,6 +27,9 @@ use crate::ui::{self, MenuEntry, caret, lizard, ph, pulse};
 use crate::{NewChat, StopTurn};
 
 const MIN_HOST_VERSION: u64 = 40;
+/// The host learned `cloudStudio` (Lizard Studio in a Lizard sandbox) in v41.
+const CLOUD_HOST_VERSION: u64 = 41;
+const CLOUD_LABEL: &str = "Run in a sandbox";
 const TITLEBAR_H: f32 = 28.;
 const BOOKMARKS: &[(&str, u32)] = &[("Violet", 0xb69aff), ("Pink", 0xf18ac5), ("Coral", 0xff927c), ("White", 0xe9edf4)];
 
@@ -53,6 +56,17 @@ struct HostState {
     version: Option<u64>,
     error: Option<String>,
     restoring: bool,
+    /// This Studio itself runs in a Lizard sandbox (no sandbox button then).
+    in_sandbox: bool,
+}
+
+/// Run in a sandbox: the request in flight, its step, and the note under the
+/// button about how it went (text, is error).
+#[derive(Default)]
+struct CloudState {
+    request: Option<String>,
+    step: Option<String>,
+    note: Option<(String, bool)>,
 }
 
 #[derive(Clone, Default)]
@@ -95,6 +109,7 @@ pub struct StudioApp {
     git: HashMap<String, GitInfo>,
     attachments: Vec<Attachment>,
     menu: Option<Menu>,
+    cloud: CloudState,
     sidebar_open: bool,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -170,6 +185,7 @@ impl StudioApp {
             git: HashMap::new(),
             attachments: Vec::new(),
             menu: None,
+            cloud: CloudState::default(),
             sidebar_open: true,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
@@ -207,7 +223,7 @@ impl StudioApp {
         }
         this.connect(cx);
         this.activated(cx);
-        if std::env::var_os("LIZARD_STUDIO_SNAPSHOT").is_none() {
+        if std::env::var_os("LIZARD_STUDIO_SHOT").is_none() {
             this.composer.update(cx, |state, cx| state.focus(window, cx));
         }
         this
@@ -259,6 +275,27 @@ impl StudioApp {
             "ready" => {
                 self.host_state.claude_ok = msg.get("ok").and_then(Value::as_bool);
                 self.host_state.version = msg.get("version").and_then(Value::as_u64);
+                self.host_state.in_sandbox = msg.get("inSandbox").and_then(Value::as_bool) == Some(true);
+                // A Lizard sandbox names the folder chats start in, so nothing
+                // there asks for one.
+                if let Some(cwd) = msg.get("defaultCwd").and_then(Value::as_str).map(str::to_string) {
+                    for chat in self.chats.clone() {
+                        chat.update(cx, |c, cx| {
+                            if c.meta.cwd.is_none() && !c.started {
+                                c.meta.cwd = Some(cwd.clone());
+                                cx.notify();
+                            }
+                        });
+                    }
+                    if self.store.last_cwd().is_none() {
+                        let agent = self.store.last_agent();
+                        self.store.remember_start(&cwd, agent);
+                    }
+                }
+                #[cfg(feature = "snapshot")]
+                if std::env::var_os("LIZARD_STUDIO_CLOUD_START").is_some() {
+                    self.start_cloud(cx);
+                }
                 let cwd = self.chats[self.active].read(cx).meta.cwd.clone();
                 self.host.send(json!({ "type": "refreshModels", "agent": "claude", "cwd": cwd }));
                 self.chats[self.active].read(cx).request_commands();
@@ -303,6 +340,7 @@ impl StudioApp {
                     }
                 }
             }
+            "cloudStudio" => self.on_cloud(&msg, cx),
             "browser" => {
                 // No browser is attached to this window. Answer at once so the
                 // agent never waits out the tool's timeout.
@@ -330,6 +368,56 @@ impl StudioApp {
                 }
             }
         }
+    }
+
+    // ---- Lizard Studio in a sandbox -------------------------------------------
+    // The host creates a desktop sandbox through the local lizard CLI, opens
+    // Lizard Studio in its Chromium and answers with the desktop's stream URL.
+    // The URL embeds the desktop's password, so it is opened, never shown or kept.
+
+    fn start_cloud(&mut self, cx: &mut Context<Self>) {
+        if self.cloud.request.is_some() {
+            return;
+        }
+        if !self.host.is_connected() {
+            self.cloud.note = Some(("Lizard Studio's host isn't connected.".into(), true));
+            cx.notify();
+            return;
+        }
+        let id = format!("cloud-{}", now_ms());
+        self.host.send(json!({ "type": "cloudStudio", "id": id }));
+        self.cloud = CloudState { request: Some(id), step: Some("create".into()), note: None };
+        cx.notify();
+    }
+
+    fn on_cloud(&mut self, msg: &Value, cx: &mut Context<Self>) {
+        let id = msg.get("id").and_then(Value::as_str);
+        if id.is_none() || id != self.cloud.request.as_deref() {
+            return;
+        }
+        if msg.get("done").and_then(Value::as_bool) != Some(true) {
+            self.cloud.step = msg.get("step").and_then(Value::as_str).map(str::to_string);
+            cx.notify();
+            return;
+        }
+        self.cloud.request = None;
+        self.cloud.step = None;
+        let url = msg.get("url").and_then(Value::as_str).filter(|_| msg.get("ok").and_then(Value::as_bool) == Some(true));
+        match url {
+            Some(url) => {
+                if std::env::var_os("LIZARD_STUDIO_SHOT").is_some() {
+                    eprintln!("cloud studio: stream URL received");
+                } else {
+                    cx.open_url(url);
+                }
+                self.cloud.note = Some(("Opened in a new tab. The sandbox runs for an hour.".into(), false));
+            }
+            None => {
+                let error = msg.get("error").and_then(Value::as_str).unwrap_or("The sandbox didn't start.");
+                self.cloud.note = Some((error.to_string(), true));
+            }
+        }
+        cx.notify();
     }
 
     // ---- chats ---------------------------------------------------------------
@@ -1235,6 +1323,57 @@ impl StudioApp {
         let open_elements: Vec<AnyElement> = open_rows.into_iter().map(|r| self.render_sidebar_row(r, cx)).collect();
         let closed_elements: Vec<AnyElement> = closed_rows.into_iter().map(|r| self.render_sidebar_row(r, cx)).collect();
         let settings_menu = (self.menu == Some(Menu::Settings)).then(|| self.render_settings_menu(cx));
+        let cloud_button = (self.host_state.version.unwrap_or(0) >= CLOUD_HOST_VERSION && !self.host_state.in_sandbox).then(|| {
+            let busy = self.cloud.request.is_some();
+            let label = match self.cloud.step.as_deref() {
+                _ if !busy => CLOUD_LABEL,
+                Some("desktop") => "Starting the desktop…",
+                Some("studio") => "Opening Lizard Studio…",
+                _ => "Creating a sandbox…",
+            };
+            div()
+                .id("cloud")
+                .group("cloud")
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(10.))
+                .py(px(9.))
+                .rounded(px(8.))
+                .text_size(px(12.5))
+                .font_weight(FontWeight::MEDIUM)
+                .when(busy, |d| d.text_color(hex(TEXT_TERTIARY)))
+                .when(!busy, |d| {
+                    d.cursor_pointer()
+                        .text_color(hex(TEXT_SECONDARY))
+                        .hover(|s| s.bg(white_a(0.05)).text_color(hex(TEXT_PRIMARY)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.start_cloud(cx);
+                        }))
+                })
+                .tooltip(|window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new("Open Lizard Studio in a new Lizard sandbox with its own browser")
+                        .build(window, cx)
+                })
+                .child(
+                    ph("cloud", 16., hex(TEXT_TERTIARY))
+                        .when(!busy, |s| s.group_hover("cloud", |s| s.text_color(hex(TEXT_PRIMARY)))),
+                )
+                .child(label)
+        });
+        // Under the button: how it went, indented to the label past the icon.
+        let cloud_note = cloud_button.as_ref().and(self.cloud.note.clone()).map(|(text, error)| {
+            div()
+                .pl(px(36.))
+                .pr(px(10.))
+                .pb(px(8.))
+                .text_size(px(11.5))
+                .line_height(px(16.))
+                .text_color(if error { hex(RED) } else { hex(TEXT_TERTIARY) })
+                .child(text)
+        });
 
         div()
             .w(width)
@@ -1312,6 +1451,8 @@ impl StudioApp {
                     .p(px(6.))
                     .border_t_1()
                     .border_color(hex(BORDER))
+                    .children(cloud_button)
+                    .children(cloud_note)
                     .child(
                         div()
                             .id("settings")

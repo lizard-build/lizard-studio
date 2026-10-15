@@ -101,7 +101,7 @@ fn main() {
             ..Default::default()
         };
         // A snapshot run must never take the user's focus or keystrokes.
-        let headless = std::env::var_os("LIZARD_STUDIO_SNAPSHOT").is_some();
+        let headless = std::env::var_os("LIZARD_STUDIO_SHOT").is_some();
         let options = WindowOptions { focus: !headless, show: !headless, ..options };
         let (_window, _) =
             gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| StudioApp::new(window, cx)))
@@ -120,20 +120,20 @@ fn main() {
     });
 }
 
-/// Save what the window draws to `LIZARD_STUDIO_SNAPSHOT` after a delay, then
-/// quit if `LIZARD_STUDIO_SNAPSHOT_QUIT` is set. `LIZARD_STUDIO_SNAPSHOT_AT`
+/// Save what the window draws to `LIZARD_STUDIO_SHOT` after a delay, then
+/// quit if `LIZARD_STUDIO_SHOT_QUIT` is set. `LIZARD_STUDIO_SHOT_AT`
 /// takes several delays (ms, comma-separated) and numbers the files.
 #[cfg(feature = "snapshot")]
 fn snapshot(window: AnyWindowHandle, cx: &mut App) {
-    let Ok(path) = std::env::var("LIZARD_STUDIO_SNAPSHOT") else { return };
-    let delays: Vec<u64> = std::env::var("LIZARD_STUDIO_SNAPSHOT_AT")
-        .or_else(|_| std::env::var("LIZARD_STUDIO_SNAPSHOT_DELAY"))
+    let Ok(path) = std::env::var("LIZARD_STUDIO_SHOT") else { return };
+    let delays: Vec<u64> = std::env::var("LIZARD_STUDIO_SHOT_AT")
+        .or_else(|_| std::env::var("LIZARD_STUDIO_SHOT_DELAY"))
         .unwrap_or_else(|_| "3000".into())
         .split(',')
         .filter_map(|v| v.trim().parse().ok())
         .collect();
     let numbered = delays.len() > 1;
-    let quit = std::env::var_os("LIZARD_STUDIO_SNAPSHOT_QUIT").is_some();
+    let quit = std::env::var_os("LIZARD_STUDIO_SHOT_QUIT").is_some();
     cx.spawn(async move |cx| {
         let mut waited = 0;
         for (n, at) in delays.into_iter().enumerate() {
