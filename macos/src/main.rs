@@ -3,6 +3,7 @@
 
 mod app;
 mod chat;
+mod cloud;
 mod host;
 mod store;
 mod theme;

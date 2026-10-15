@@ -80,6 +80,7 @@ struct GitInfo {
 
 #[derive(Clone, PartialEq)]
 enum Menu {
+    Place,
     Mode,
     Model,
     Effort,
@@ -467,10 +468,35 @@ impl StudioApp {
         let agent = self.store.last_agent();
         let cwd = self.store.last_cwd();
         let host = self.host.clone();
-        let chat = cx.new(|cx| ChatSession::fresh(agent, cwd, host, cx));
+        let cloud = self.store.last_cloud();
+        let chat = cx.new(|cx| {
+            let mut chat = ChatSession::fresh(agent, cwd, host, cx);
+            chat.meta.cloud = cloud;
+            chat
+        });
         self.watch_chat(&chat, cx);
         self.chats.push(chat);
         self.active = self.chats.len() - 1;
+    }
+
+    /// Local or Cloud for the chat about to start; a chat that already ran
+    /// keeps its place, so the choice opens a new one.
+    fn set_cloud(&mut self, cloud: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.store.remember_cloud(cloud);
+        let chat = self.chats[self.active].clone();
+        if chat.read(cx).meta.cloud == cloud {
+            return;
+        }
+        if !chat.read(cx).is_blank() || chat.read(cx).started {
+            self.new_chat_entity(cx);
+        } else {
+            chat.update(cx, |c, cx| {
+                c.meta.cloud = cloud;
+                c.commands.clear();
+                cx.notify();
+            });
+        }
+        self.after_switch(window, cx);
     }
 
     fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -615,7 +641,8 @@ impl StudioApp {
             return;
         }
         let chat = self.chats[self.active].clone();
-        if chat.read(cx).meta.cwd.is_none() {
+        let cloud = chat.read(cx).meta.cloud;
+        if chat.read(cx).meta.cwd.is_none() && !cloud {
             self.pick_folder(window, cx);
             return;
         }
@@ -623,7 +650,9 @@ impl StudioApp {
             let c = chat.read(cx);
             (c.meta.cwd.clone().unwrap_or_default(), c.meta.agent)
         };
-        self.store.remember_start(&cwd, agent);
+        if !cloud {
+            self.store.remember_start(&cwd, agent);
+        }
         let images: Vec<Value> = self
             .attachments
             .drain(..)
@@ -740,7 +769,12 @@ impl StudioApp {
         if !chat.read(cx).is_blank() || chat.read(cx).started {
             let cwd = chat.read(cx).meta.cwd.clone();
             let host = self.host.clone();
-            let fresh = cx.new(|cx| ChatSession::fresh(agent, cwd, host, cx));
+            let cloud = chat.read(cx).meta.cloud;
+            let fresh = cx.new(|cx| {
+                let mut fresh = ChatSession::fresh(agent, cwd, host, cx);
+                fresh.meta.cloud = cloud;
+                fresh
+            });
             self.watch_chat(&fresh, cx);
             self.chats.push(fresh);
             self.active = self.chats.len() - 1;
@@ -886,6 +920,7 @@ impl StudioApp {
         let mut parts = spec.splitn(3, '|');
         let (Some(cwd), Some(mode), Some(prompt)) = (parts.next(), parts.next(), parts.next()) else { return };
         let host = self.host.clone();
+        let cloud = std::env::var_os("LIZARD_STUDIO_SEND_CLOUD").is_some();
         let agent = match std::env::var("LIZARD_STUDIO_SEND_AGENT").as_deref() {
             Ok("codex") => Agent::Codex,
             _ => Agent::Claude,
@@ -893,6 +928,7 @@ impl StudioApp {
         let chat = cx.new(|cx| ChatSession::fresh(agent, Some(cwd.to_string()), host, cx));
         chat.update(cx, |c, _| {
             c.meta.id = format!("preview-send-{}", now_ms());
+            c.meta.cloud = cloud;
             c.meta.permission_mode = Some(mode.to_string());
             if agent == Agent::Claude {
                 c.meta.effort = Some("low".into());
@@ -942,6 +978,9 @@ impl StudioApp {
             open: true,
             title_edited: true,
             work_cwd: std::env::var("LIZARD_STUDIO_OPEN_WORKDIR").ok(),
+            cloud: false,
+            sandbox_id: None,
+            conversation_id: None,
         };
         let chat = cx.new(|cx| ChatSession::new(meta, host, cx));
         self.watch_chat(&chat, cx);
@@ -1804,9 +1843,9 @@ impl StudioApp {
 
     fn render_composer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = self.chats[self.active].clone();
-        let (work_cwd, ctx_window, (tasks_running, tasks_total)) = {
+        let (work_cwd, ctx_window, (tasks_running, tasks_total), cloud) = {
             let c = entity.read(cx);
-            (c.work_cwd(), c.ctx_window, c.task_counts())
+            (c.work_cwd(), c.ctx_window, c.task_counts(), c.meta.cloud)
         };
         let (agent, blank, running, cwd, mode, model, effort, ctx_tokens, commands) = {
             let c = entity.read(cx);
@@ -1847,6 +1886,12 @@ impl StudioApp {
         let efforts: Vec<String> = match agent {
             Agent::Claude => ["low", "medium", "high", "xhigh", "max", "ultracode"].iter().map(|s| s.to_string()).collect(),
             Agent::Codex => model_row.as_ref().map(|m| m.efforts.clone()).unwrap_or_default(),
+        };
+        // `sandbox prompt --effort` takes minimal..xhigh only.
+        let efforts: Vec<String> = if cloud {
+            efforts.into_iter().filter(|e| ["minimal", "low", "medium", "high", "xhigh"].contains(&e.as_str())).collect()
+        } else {
+            efforts
         };
         let effort_value = effort
             .clone()
@@ -1965,6 +2010,19 @@ impl StudioApp {
                 .hover(|s| s.bg(white_a(0.09)).text_color(hex(TEXT_PRIMARY)))
         };
         let needs_folder = cwd.is_none();
+        // Where the chat runs: on this Mac, or in a Lizard sandbox.
+        let place_menu = (menu == Some(Menu::Place)).then(|| {
+            let entries = [(false, "Local", "Runs on this Mac, in a folder you choose."), (true, "Cloud", "Runs in a new Lizard sandbox, in its /workspace.")]
+                .into_iter()
+                .map(|(value, label, hint)| {
+                    let app = cx.entity();
+                    self.picker_entry(label.to_string(), Some(hint.to_string()), value == cloud, None, cx, move |window, cx| {
+                        app.update(cx, |this, cx| this.set_cloud(value, window, cx))
+                    })
+                })
+                .collect();
+            ui::popup(Anchor::BottomLeft, point(px(0.), px(-8.)), ui::menu_box("place-menu", 260., entries).on_mouse_down_out(close_menu_listener(cx)))
+        });
         let setup = blank.then(|| {
             div()
                 .flex()
@@ -1973,18 +2031,49 @@ impl StudioApp {
                 .px(px(2.))
                 .pb(px(10.))
                 .child(
-                    chip("folder-chip")
-                        .when(needs_folder, |d| {
-                            d.bg(hsla(218. / 360., 1., 0.735, 0.14))
-                                .text_color(hex(TEXT_PRIMARY))
-                                .border_1()
-                                .border_color(hsla(218. / 360., 1., 0.735, 0.35))
-                        })
-                        .on_click(cx.listener(|this, _, window, cx| this.pick_folder(window, cx)))
-                        .child(ph("folder", 14., hex(TEXT_SECONDARY)))
-                        .child(ui::folder_label(cwd.as_deref())),
+                    div()
+                        .relative()
+                        .child(
+                            chip("place-chip")
+                                .on_click(toggle_menu(Menu::Place, cx))
+                                .child(ph(if cloud { "cloud" } else { "laptop" }, 14., hex(TEXT_SECONDARY)))
+                                .child(if cloud { "Cloud" } else { "Local" }),
+                        )
+                        .children(place_menu.map(|m| div().absolute().top_0().left_0().child(m))),
                 )
-                .when_some(git.branch.clone(), |d, branch| {
+                .when(cloud, |d| {
+                    // The sandbox's own folder; nothing on this Mac to pick.
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.))
+                            .px(px(11.))
+                            .py(px(6.))
+                            .rounded_full()
+                            .bg(white_a(0.05))
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(hex(TEXT_SECONDARY))
+                            .child(ph("folder", 14., hex(TEXT_SECONDARY)))
+                            .child("workspace"),
+                    )
+                })
+                .when(!cloud, |d| {
+                    d.child(
+                        chip("folder-chip")
+                            .when(needs_folder, |d| {
+                                d.bg(hsla(218. / 360., 1., 0.735, 0.14))
+                                    .text_color(hex(TEXT_PRIMARY))
+                                    .border_1()
+                                    .border_color(hsla(218. / 360., 1., 0.735, 0.35))
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| this.pick_folder(window, cx)))
+                            .child(ph("folder", 14., hex(TEXT_SECONDARY)))
+                            .child(ui::folder_label(cwd.as_deref())),
+                    )
+                })
+                .when_some(git.branch.clone().filter(|_| !cloud), |d, branch| {
                     d.child(chip("branch-chip").child(ph("git-branch", 13., hex(TEXT_SECONDARY))).child(branch))
                 })
                 .child(
@@ -2168,7 +2257,7 @@ impl StudioApp {
                             .items_center()
                             .gap(px(6.))
                             .pt(px(4.))
-                            .child(
+                            .when(!cloud, |d| d.child(
                                 div()
                                     .id("attach")
                                     .size(px(26.))
@@ -2181,8 +2270,9 @@ impl StudioApp {
                                     .hover(|s| s.bg(white_a(0.08)))
                                     .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx)))
                                     .child(ph("plus", 15., hex(TEXT_TERTIARY))),
-                            )
-                            .child(
+                            ))
+                            // A cloud agent runs without asking, so it has no mode.
+                            .when(!cloud, |d| d.child(
                                 div()
                                     .relative()
                                     .child(
@@ -2201,7 +2291,7 @@ impl StudioApp {
                                             .child(mode_short),
                                     )
                                     .children(mode_menu.map(|m| div().absolute().top_0().left_0().child(m))),
-                            )
+                            ))
                             .child(div().flex_1())
                             .child(
                                 div()
@@ -2286,7 +2376,15 @@ fn markdown_view(view: &Entity<gpui_kit::component::text::TextViewState>) -> Tex
     TextView::new(view)
         .on_link_click(|url, _, _, cx| match url.strip_prefix(chat::OPEN_SCHEME) {
             Some(path) => cx.open_with_system(std::path::Path::new(path)),
-            None => cx.open_url(url),
+            // A web link opens in the browser; a bare path opens only if it is
+            // a file on this Mac (a cloud chat's paths live in its sandbox).
+            None if url.contains("://") || url.starts_with("mailto:") => cx.open_url(url),
+            None => {
+                let path = std::path::Path::new(url.as_ref());
+                if path.is_absolute() && path.exists() {
+                    cx.open_with_system(path);
+                }
+            }
         })
         .code_block_actions(|block, _, _| {
             let code = block.code();

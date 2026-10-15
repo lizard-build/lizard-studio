@@ -57,6 +57,13 @@ pub struct SavedChat {
     /// worktree below `cwd`. Only the git bar and file links read it.
     #[serde(default)]
     pub work_cwd: Option<String>,
+    /// The chat runs in a Lizard sandbox instead of on this Mac.
+    #[serde(default)]
+    pub cloud: bool,
+    #[serde(default)]
+    pub sandbox_id: Option<String>,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -66,6 +73,8 @@ struct StoreFile {
     last_cwd: Option<String>,
     #[serde(default)]
     last_agent: Option<Agent>,
+    #[serde(default)]
+    last_cloud: bool,
 }
 
 pub struct Store {
@@ -96,6 +105,15 @@ impl Store {
 
     pub fn last_agent(&self) -> Agent {
         self.file.last_agent.unwrap_or_default()
+    }
+
+    pub fn last_cloud(&self) -> bool {
+        self.file.last_cloud
+    }
+
+    pub fn remember_cloud(&mut self, cloud: bool) {
+        self.file.last_cloud = cloud;
+        self.save();
     }
 
     pub fn remember_start(&mut self, cwd: &str, agent: Agent) {

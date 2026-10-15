@@ -15,6 +15,7 @@ use gpui_kit::component::text::TextViewState;
 use gpui_kit::*;
 use serde_json::{Value, json};
 
+use crate::cloud::{self, CloudMsg};
 use crate::host::HostLink;
 use crate::store::{Agent, SavedChat, new_chat_id, now_ms};
 
@@ -219,6 +220,9 @@ impl ChatSession {
             open: true,
             title_edited: false,
             work_cwd: None,
+            cloud: false,
+            sandbox_id: None,
+            conversation_id: None,
         };
         Self::new(meta, host, cx)
     }
@@ -314,6 +318,9 @@ impl ChatSession {
 
     /// The folder paths resolve against: the agent's live one, else the chat's.
     pub fn work_cwd(&self) -> Option<String> {
+        if self.meta.cloud {
+            return None;
+        }
         self.live_cwd.clone().or_else(|| self.meta.cwd.clone())
     }
 
@@ -390,7 +397,7 @@ impl ChatSession {
 
     /// Ask the host which slash commands and skills this folder offers.
     pub fn request_commands(&self) {
-        if self.meta.cwd.is_some() && self.meta.agent == Agent::Claude {
+        if !self.meta.cloud && self.meta.cwd.is_some() && self.meta.agent == Agent::Claude {
             self.send(json!({ "type": "listSkills", "cwd": self.meta.cwd }));
         }
     }
@@ -401,7 +408,7 @@ impl ChatSession {
         if text.is_empty() && images.is_empty() {
             return;
         }
-        if self.meta.cwd.is_none() {
+        if self.meta.cwd.is_none() && !self.meta.cloud {
             self.notice(true, "Choose a project folder first.", cx);
             return;
         }
@@ -414,6 +421,9 @@ impl ChatSession {
     }
 
     fn deliver(&mut self, text: String, images: Vec<Value>, cx: &mut Context<Self>) {
+        if self.meta.cloud {
+            return self.deliver_cloud(text, cx);
+        }
         self.ensure_started();
         if self.meta.title == DEFAULT_TITLE && !self.meta.title_edited {
             let title: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -449,6 +459,13 @@ impl ChatSession {
             return;
         }
         self.queued.clear();
+        if self.meta.cloud {
+            if let Some(sandbox) = self.meta.sandbox_id.clone() {
+                cloud::interrupt(sandbox, self.meta.conversation_id.clone());
+            }
+            cx.notify();
+            return;
+        }
         self.send(json!({ "type": "interrupt" }));
         cx.notify();
     }
@@ -883,6 +900,177 @@ impl ChatSession {
         cx.notify();
     }
 
+    // ---- cloud chats ---------------------------------------------------------
+    // The agent runs in a Lizard sandbox (cloud.rs). What the chat shows is kept
+    // in a local log, since the CLI can't read a finished conversation back.
+
+    fn deliver_cloud(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.meta.title == DEFAULT_TITLE && !self.meta.title_edited {
+            let title: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !title.is_empty() {
+                self.meta.title = title.chars().take(40).collect();
+            }
+        }
+        self.history.requested = true;
+        self.user_item(&text, cx);
+        cloud::append_log(&self.meta.id, &json!({ "kind": "user", "text": text, "at": now_ms() }));
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<CloudMsg>();
+        cloud::run_prompt(
+            cloud::PromptJob {
+                sandbox: self.meta.sandbox_id.clone(),
+                agent: self.meta.agent.wire(),
+                conversation: self.meta.conversation_id.clone(),
+                model: self.meta.model.clone(),
+                effort: self.meta.effort.clone(),
+                text,
+            },
+            tx,
+        );
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some(msg) = rx.next().await {
+                if this.update(cx, |chat, cx| chat.on_cloud_msg(msg, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        self.begin_turn();
+        self.touch(cx);
+        self.sync_rows(cx);
+    }
+
+    fn on_cloud_msg(&mut self, msg: CloudMsg, cx: &mut Context<Self>) {
+        match msg {
+            CloudMsg::SandboxReady(id) => {
+                if self.meta.sandbox_id.as_deref() != Some(id.as_str()) {
+                    self.meta.sandbox_id = Some(id);
+                    self.meta.conversation_id = None;
+                    self.touch(cx);
+                }
+            }
+            CloudMsg::Note(text) => {
+                cloud::append_log(&self.meta.id, &json!({ "kind": "note", "text": text }));
+                self.notice(false, text, cx);
+            }
+            CloudMsg::Event(event) => {
+                cloud::append_log(&self.meta.id, &json!({ "kind": "event", "event": event }));
+                self.on_cloud_event(&event, true, cx);
+            }
+            CloudMsg::Done { error } => {
+                if let Some(error) = error {
+                    cloud::append_log(&self.meta.id, &json!({ "kind": "error", "text": error }));
+                    self.notice(true, error, cx);
+                }
+                if self.running {
+                    self.end_turn(cx);
+                }
+            }
+        }
+    }
+
+    fn on_cloud_event(&mut self, event: &Value, live: bool, cx: &mut Context<Self>) {
+        let s = |key: &str| event.get(key).and_then(Value::as_str).map(str::to_string);
+        match event.get("type").and_then(Value::as_str).unwrap_or("") {
+            "prompt" => {
+                if let Some(conversation) = s("conversationId") {
+                    if live && self.meta.conversation_id.as_deref() != Some(conversation.as_str()) {
+                        self.meta.conversation_id = Some(conversation);
+                        self.touch(cx);
+                    }
+                }
+            }
+            "running" => {
+                self.status_word = random_word();
+                cx.notify();
+            }
+            "response" => {
+                if let Some(text) = s("text").filter(|t| !t.trim().is_empty()) {
+                    self.assistant_item(None, text.trim_end(), cx);
+                }
+            }
+            "tool_call" => {
+                let (name, input) = cloud::tool_from_event(event);
+                let id = s("itemId").unwrap_or_else(|| format!("cloud-{}", self.items.len()));
+                if !self.tool_index.contains_key(&id) {
+                    self.push_tool(
+                        ToolCall { id, name, input, status: if live { ToolStatus::Running } else { ToolStatus::Done }, output: None, expanded: false },
+                        cx,
+                    );
+                }
+            }
+            "tool_result" => {
+                let Some(id) = s("itemId") else { return };
+                let Some(&(ix, t)) = self.tool_index.get(&id) else { return };
+                let failed = event.get("exitCode").and_then(Value::as_i64).map_or(false, |c| c != 0)
+                    || matches!(s("status").as_deref(), Some("failed" | "error"));
+                if let Some(Item::Tools(group)) = self.items.get_mut(ix) {
+                    if let Some(tool) = group.tools.get_mut(t) {
+                        tool.status = if failed { ToolStatus::Error } else { ToolStatus::Done };
+                        tool.output = event.get("output").map(|o| o.as_str().map(str::to_string).unwrap_or_else(|| o.to_string()));
+                    }
+                }
+                cx.notify();
+            }
+            "finished" => {
+                if let Some(usage) = event.get("usage") {
+                    let n = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+                    self.turn_tokens = n("output_tokens");
+                    self.ctx_tokens = n("input_tokens") + n("output_tokens");
+                }
+                if live {
+                    self.end_turn(cx);
+                }
+            }
+            "failed" => {
+                let text = s("error").or_else(|| s("text")).or_else(|| s("message")).unwrap_or_else(|| "The agent stopped with an error.".into());
+                self.notice(true, text, cx);
+                if live {
+                    self.end_turn(cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Rebuild a cloud chat from its local log.
+    fn replay_cloud(&mut self, cx: &mut Context<Self>) {
+        let entries = cloud::read_log(&self.meta.id);
+        let mut turn_start = self.items.len();
+        let mut last_at = 0;
+        for entry in entries {
+            match entry.get("kind").and_then(Value::as_str).unwrap_or("") {
+                "user" => {
+                    self.place_footer(turn_start, last_at);
+                    let text = entry.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+                    self.user_item(&text, cx);
+                    turn_start = self.items.len();
+                    last_at = entry.get("at").and_then(Value::as_u64).unwrap_or(last_at);
+                }
+                "note" => {
+                    let text = entry.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+                    self.notice(false, text, cx);
+                }
+                "error" => {
+                    let text = entry.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+                    self.notice(true, text, cx);
+                }
+                "event" => {
+                    if let Some(event) = entry.get("event") {
+                        if let Some(at) = event.get("ts").and_then(Value::as_str).and_then(parse_iso_ms) {
+                            last_at = at;
+                        }
+                        self.on_cloud_event(event, false, cx);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.place_footer(turn_start, last_at);
+        self.tools_open = false;
+        cx.notify();
+    }
+
     // ---- permissions ---------------------------------------------------------
 
     pub fn answer_permission(&mut self, request_id: &str, choice: PermissionChoice, cx: &mut Context<Self>) {
@@ -996,6 +1184,9 @@ impl ChatSession {
             return;
         }
         self.history.requested = true;
+        if self.meta.cloud {
+            return self.replay_cloud(cx);
+        }
         self.request_history_page(None, cx);
     }
 
