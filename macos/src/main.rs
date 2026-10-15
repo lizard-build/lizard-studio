@@ -4,6 +4,7 @@
 mod app;
 mod chat;
 mod cloud;
+mod connect;
 mod host;
 mod pop;
 mod sound;

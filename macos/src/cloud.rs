@@ -29,8 +29,9 @@ pub enum CloudMsg {
     Note(String),
     SandboxReady(String),
     Event(Value),
-    /// The turn's process ended; `error` when it failed without a `failed` event.
-    Done { error: Option<String> },
+    /// The turn's process ended; `error` when it failed without a `failed`
+    /// event, `code` when the platform named the reason (connect.rs).
+    Done { error: Option<String>, code: Option<String> },
 }
 
 pub struct PromptJob {
@@ -44,7 +45,7 @@ pub struct PromptJob {
 
 /// PATH for the CLI: an app opened from Finder gets a bare one, and `lizard`
 /// is usually a `#!/usr/bin/env node` script.
-fn child_path() -> String {
+pub(crate) fn child_path() -> String {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(|| {
         let mut dirs: Vec<String> = Vec::new();
@@ -78,7 +79,29 @@ fn child_path() -> String {
 }
 
 pub fn lizard_bin() -> Option<PathBuf> {
-    child_path().split(':').map(|dir| PathBuf::from(dir).join("lizard")).find(|p| p.exists())
+    find_bin("lizard")
+}
+
+pub(crate) fn find_bin(name: &str) -> Option<PathBuf> {
+    child_path().split(':').map(|dir| PathBuf::from(dir).join(name)).find(|p| p.exists())
+}
+
+/// A refused CLI call: what to show, and the platform's code for it.
+pub struct Refusal {
+    pub message: String,
+    pub code: Option<String>,
+}
+
+impl From<String> for Refusal {
+    fn from(message: String) -> Self {
+        Self { message, code: None }
+    }
+}
+
+impl From<&str> for Refusal {
+    fn from(message: &str) -> Self {
+        Self { message: message.to_string(), code: None }
+    }
 }
 
 fn lizard(bin: &PathBuf) -> Command {
@@ -88,24 +111,30 @@ fn lizard(bin: &PathBuf) -> Command {
 }
 
 /// Run a short `lizard … --json` call and return its JSON (or the error message).
-fn run_json(bin: &PathBuf, args: &[&str]) -> Result<Value, String> {
+fn run_json(bin: &PathBuf, args: &[&str]) -> Result<Value, Refusal> {
     let out = lizard(bin).args(args).arg("--json").output().map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&out.stdout);
     let json = text.find('{').and_then(|at| serde_json::from_str::<Value>(&text[at..]).ok());
-    if out.status.success() {
-        return json.ok_or_else(|| "lizard printed no JSON".to_string());
+    match json {
+        // The CLI exits 0 with `{error: …}` on stdout for a refused request.
+        Some(json) if out.status.success() && json.get("error").is_none() => Ok(json),
+        Some(json) => Err(error_message(Some(&json), out.status.code())),
+        None if out.status.success() => Err("lizard printed no JSON".into()),
+        None => Err(error_message(None, out.status.code())),
     }
-    Err(error_message(json.as_ref(), out.status.code()))
 }
 
-fn error_message(json: Option<&Value>, code: Option<i32>) -> String {
-    if code == Some(2) || json.and_then(|j| j.pointer("/error/code")).and_then(Value::as_str) == Some("NOT_AUTHENTICATED") {
-        return "Sign in to Lizard first: run lizard login in a terminal.".into();
+fn error_message(json: Option<&Value>, code: Option<i32>) -> Refusal {
+    let named = json.and_then(|j| j.pointer("/error/code").or_else(|| j.pointer("/error/body/code"))).and_then(Value::as_str).map(str::to_string);
+    if code == Some(2) || named.as_deref() == Some("NOT_AUTHENTICATED") {
+        return Refusal { message: "Sign in to Lizard first: run lizard login in a terminal.".into(), code: named };
     }
-    json.and_then(|j| j.pointer("/error/message").or_else(|| j.get("error")))
+    let message = json
+        .and_then(|j| j.pointer("/error/message").or_else(|| j.get("error")))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .unwrap_or_else(|| format!("lizard exited with code {}", code.map_or("?".into(), |c| c.to_string())))
+        .unwrap_or_else(|| format!("lizard exited with code {}", code.map_or("?".into(), |c| c.to_string())));
+    Refusal { message, code: named }
 }
 
 fn is_gone(error: &str) -> bool {
@@ -113,7 +142,7 @@ fn is_gone(error: &str) -> bool {
     e.contains("not found") || e.contains("not running") || e.contains("expired") || e.contains("no such sandbox")
 }
 
-fn create(bin: &PathBuf, agent: &str, tx: &UnboundedSender<CloudMsg>) -> Result<String, String> {
+fn create(bin: &PathBuf, agent: &str, tx: &UnboundedSender<CloudMsg>) -> Result<String, Refusal> {
     let created = run_json(bin, &["sandbox", "create", "-t", agent, "--timeout", LIFETIME_MS])?;
     let id = created
         .get("id")
@@ -128,8 +157,9 @@ fn create(bin: &PathBuf, agent: &str, tx: &UnboundedSender<CloudMsg>) -> Result<
 
 pub fn run_prompt(job: PromptJob, tx: UnboundedSender<CloudMsg>) {
     thread::spawn(move || {
-        let done = |error: Option<String>| {
-            let _ = tx.unbounded_send(CloudMsg::Done { error });
+        let done = |error: Option<Refusal>| {
+            let (error, code) = error.map_or((None, None), |r| (Some(r.message), r.code));
+            let _ = tx.unbounded_send(CloudMsg::Done { error, code });
         };
         let Some(bin) = lizard_bin() else {
             return done(Some("Install Lizard CLI first: curl -fsSL https://lizard.build/install.sh | bash".into()));
@@ -139,11 +169,19 @@ pub fn run_prompt(job: PromptJob, tx: UnboundedSender<CloudMsg>) {
         // An existing sandbox gets another hour; a gone one is replaced.
         if let Some(id) = sandbox.clone() {
             if let Err(error) = run_json(&bin, &["sandbox", "timeout", &id, LIFETIME_MS]) {
-                if is_gone(&error) {
+                if is_gone(&error.message) {
                     let _ = tx.unbounded_send(CloudMsg::Note(format!("Sandbox {id} has stopped; starting a new one.")));
                     sandbox = None;
                     conversation = None;
                 }
+            }
+        }
+        // A new sandbox costs money from the first second; don't start one
+        // for an agent the account can't run yet.
+        if sandbox.is_none() {
+            let agent = if job.agent == "codex" { crate::store::Agent::Codex } else { crate::store::Agent::Claude };
+            if let Some((code, message)) = crate::connect::missing_credential(agent) {
+                return done(Some(Refusal { message, code: Some(code.to_string()) }));
             }
         }
         let id = match sandbox {
@@ -160,7 +198,7 @@ pub fn run_prompt(job: PromptJob, tx: UnboundedSender<CloudMsg>) {
     });
 }
 
-fn prompt(bin: &PathBuf, sandbox: &str, job: &PromptJob, conversation: Option<&str>, tx: &UnboundedSender<CloudMsg>) -> Result<(), String> {
+fn prompt(bin: &PathBuf, sandbox: &str, job: &PromptJob, conversation: Option<&str>, tx: &UnboundedSender<CloudMsg>) -> Result<(), Refusal> {
     let mut command = lizard(bin);
     command.args(["sandbox", "prompt", sandbox, "--agent", job.agent, "--json"]);
     match conversation {
@@ -175,7 +213,7 @@ fn prompt(bin: &PathBuf, sandbox: &str, job: &PromptJob, conversation: Option<&s
     }
     command.arg("--").arg(&job.text);
     let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
-    let stdout = child.stdout.take().ok_or("no output from lizard")?;
+    let stdout = child.stdout.take().ok_or(Refusal::from("no output from lizard"))?;
     let mut ended = false;
     let mut rest = String::new();
     for line in BufReader::new(stdout).lines() {
@@ -201,13 +239,15 @@ fn prompt(bin: &PathBuf, sandbox: &str, job: &PromptJob, conversation: Option<&s
         let _ = err.read_to_string(&mut stderr);
     }
     let status = child.wait().map_err(|e| e.to_string())?;
-    if ended || status.success() {
+    let json = rest.find('{').and_then(|at| serde_json::from_str::<Value>(&rest[at..]).ok());
+    // A refused request prints its `{error: …}` and may still exit 0.
+    let refused = json.as_ref().is_some_and(|j| j.get("error").is_some());
+    if ended || (status.success() && !refused) {
         return Ok(());
     }
-    let json = rest.find('{').and_then(|at| serde_json::from_str::<Value>(&rest[at..]).ok());
     let mut error = error_message(json.as_ref(), status.code());
     if json.is_none() && !stderr.trim().is_empty() {
-        error = stderr.trim().lines().last().unwrap_or("").to_string();
+        error.message = stderr.trim().lines().last().unwrap_or("").to_string();
     }
     Err(error)
 }

@@ -152,6 +152,9 @@ pub struct ChatSession {
     pub queued: VecDeque<String>,
     pub restart_pending: bool,
     pub commands: Vec<String>,
+    pub need_connect: Option<NeedConnect>,
+    /// The last message a cloud turn carried, for a retry after connecting.
+    last_cloud_text: Option<String>,
     host: Rc<HostLink>,
     history: History,
     streamed_msg_ids: HashSet<String>,
@@ -199,6 +202,8 @@ impl ChatSession {
             queued: VecDeque::new(),
             restart_pending: false,
             commands: Vec::new(),
+            need_connect: None,
+            last_cloud_text: None,
             host,
             history: History::default(),
             streamed_msg_ids: HashSet::new(),
@@ -256,6 +261,8 @@ impl ChatSession {
             Tail::Permission
         } else if self.running {
             Tail::Running
+        } else if self.need_connect.is_some() {
+            Tail::Connect
         } else {
             Tail::None
         }
@@ -456,6 +463,8 @@ impl ChatSession {
             cx.notify();
             return;
         }
+        // A new message moves on from the one waiting for a credential.
+        self.need_connect = None;
         self.deliver(text, images, cx);
     }
 
@@ -957,6 +966,34 @@ impl ChatSession {
         self.history.requested = true;
         self.user_item(&text, cx);
         cloud::append_log(&self.meta.id, &json!({ "kind": "user", "text": text, "at": now_ms() }));
+        self.run_cloud(text, cx);
+    }
+
+    /// Send the message a refused turn carried, once its agent is connected.
+    pub fn retry_cloud(&mut self, cx: &mut Context<Self>) {
+        let Some(need) = self.need_connect.take() else { return };
+        if self.running {
+            self.sync_rows(cx);
+            return;
+        }
+        self.run_cloud(need.retry, cx);
+    }
+
+    pub fn dismiss_connect(&mut self, cx: &mut Context<Self>) {
+        self.need_connect = None;
+        self.sync_rows(cx);
+    }
+
+    /// The connect card changed height (a code, a status line, an error).
+    pub fn remeasure_tail(&self) {
+        if self.tail_rows > 0 {
+            let start = self.items.len();
+            self.list.remeasure_items(start..start + self.tail_rows);
+        }
+    }
+
+    fn run_cloud(&mut self, text: String, cx: &mut Context<Self>) {
+        self.last_cloud_text = Some(text.clone());
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<CloudMsg>();
         cloud::run_prompt(
             cloud::PromptJob {
@@ -1000,14 +1037,29 @@ impl ChatSession {
                 cloud::append_log(&self.meta.id, &json!({ "kind": "event", "event": event }));
                 self.on_cloud_event(&event, true, cx);
             }
-            CloudMsg::Done { error } => {
-                if let Some(error) = error {
-                    cloud::append_log(&self.meta.id, &json!({ "kind": "error", "text": error }));
-                    self.notice(true, error, cx);
+            CloudMsg::Done { error, code } => {
+                let need = crate::connect::is_credential_error(code.as_deref());
+                match error {
+                    // Not a dead end: the connect card offers the fix and sends
+                    // the message again (it isn't logged, so a relaunch
+                    // doesn't bring back a stale card).
+                    Some(_) if need => {
+                        self.need_connect = Some(NeedConnect {
+                            agent: self.meta.agent,
+                            reauth: code.as_deref() == Some(crate::connect::REAUTH),
+                            retry: self.last_cloud_text.clone().unwrap_or_default(),
+                        });
+                    }
+                    Some(error) => {
+                        cloud::append_log(&self.meta.id, &json!({ "kind": "error", "text": error }));
+                        self.notice(true, error, cx);
+                    }
+                    None => {}
                 }
                 if self.running {
                     self.end_turn(cx);
                 }
+                self.sync_rows(cx);
             }
         }
     }
@@ -1480,6 +1532,17 @@ pub enum Tail {
     None,
     Running,
     Permission,
+    /// The cloud agent has no credential on the account (connect.rs).
+    Connect,
+}
+
+/// A cloud message the platform refused for want of a credential, kept to
+/// send again once the agent is connected.
+#[derive(Clone)]
+pub struct NeedConnect {
+    pub agent: Agent,
+    pub reauth: bool,
+    retry: String,
 }
 
 pub enum PermissionChoice {

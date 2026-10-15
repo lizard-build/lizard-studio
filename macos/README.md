@@ -18,6 +18,8 @@ There is no browser here, so the `browser_*` tools answer "No browser is attache
 
 **Local or Cloud.** The first chip of a new chat picks where it runs. Local is this Mac, in a folder you choose, through the host. Cloud runs the chat's agent in a new Lizard sandbox from its template (`claude` or `codex`) through your `lizard` CLI: `sandbox create`, then `sandbox prompt --json` for each message (the conversation continues with `-c`), `sandbox interrupt` for Stop. The sandbox lives an hour after the last message and is replaced if it has stopped. The agent uses the credentials connected to your Lizard account (`lizard agents`). The CLI can't read a finished conversation back, so the app keeps what a cloud chat showed in `~/Library/Application Support/Lizard Studio/cloud/`.
 
+**Connecting an agent.** A cloud chat runs on a credential connected to your Lizard account. If the agent has none, the app checks before it starts a sandbox, and the chat shows a card instead of an error: Sign in with Claude runs the real `claude setup-token` on this Mac (in a pseudo-terminal, with an empty HOME, so your own Claude Code login is untouched), opens the browser, catches the one-year token on its localhost callback and stores it with `lizard agents add claude`; Sign in with ChatGPT shows the device code from `lizard agents login chatgpt`; or paste a key (Claude token, Anthropic, OpenRouter or OpenAI), which goes to `lizard agents add` on stdin. Once connected, the refused message is sent again.
+
 **Run in a sandbox** (sidebar foot, above Settings) starts Lizard Studio in a new Lizard desktop sandbox through your `lizard` CLI and opens its stream in the browser, as the panel does. It needs host v41 (`cloudStudio`, branch `feat/cloud-studio` until it ships) and stays hidden with an older host or inside a sandbox. To try a branch host without touching the installed one, copy its `src/host` files and `host-config.json` into another folder and start the app with `LIZARD_STUDIO_HOST_DIR=<that folder>`; it runs its own daemon there.
 
 ## Run
@@ -47,6 +49,7 @@ LIZARD_STUDIO_SHOT_QUIT=1 ./target/debug/lizard-studio
 - `LIZARD_STUDIO_SIZE=<w>x<h>` sizes the window; `LIZARD_STUDIO_STORE=<file>` reads a fixture chat list; `LIZARD_STUDIO_RUNNING=<id,id>` shows those chats as running; `LIZARD_STUDIO_OPEN_AT` and `LIZARD_STUDIO_OPEN_WORKDIR` place the opened session in the list and set its working folder.
 - `LIZARD_STUDIO_SEND_CLOUD=1` makes the `LIZARD_STUDIO_SEND` chat a cloud one.
 - `LIZARD_STUDIO_CLOUD_START=1` presses Run in a sandbox once the host is ready; the stream URL is not opened in test runs.
+- `LIZARD_STUDIO_CONNECT=claude|codex` starts that sign-in 4 seconds in (put a fake `open` first in PATH to keep the browser shut).
 - `LIZARD_STUDIO_PICK=<model>,<effort>,<mode>` sets the new chat's settings; `LIZARD_STUDIO_MENU=model|effort|mode|agent|place|settings[:claude|codex|models[:<file>|new]]` opens that picker or Settings tab once the window has drawn. Popovers fade in, so take two shots (`LIZARD_STUDIO_SHOT_AT=3000,4500`) and use the second.
 - `LIZARD_STUDIO_DEBUG=1` logs host messages; with `LIZARD_STUDIO_DUMP=<dir>` it also saves the `models`, `ready`, `agentReady` and `commands` messages there.
 

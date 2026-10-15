@@ -16,6 +16,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{Value, json};
 
+mod connect_card;
 mod pickers;
 mod settings;
 
@@ -132,6 +133,8 @@ pub struct StudioApp {
     viewport: Size<Pixels>,
     effort: pickers::EffortUi,
     settings: settings::SettingsUi,
+    /// Connecting a cloud agent to the Lizard account (connect_card.rs).
+    connect: Entity<connect_card::ConnectUi>,
     cloud: CloudState,
     sidebar_open: bool,
     focus: FocusHandle,
@@ -207,6 +210,22 @@ impl StudioApp {
         cx.set_global(chat::CustomModels(store.custom_models().to_vec()));
         let settings = settings::SettingsUi::new(window, cx);
         subscriptions.extend(settings.subscribe(window, cx));
+        let connect = cx.new(|cx| connect_card::ConnectUi::new(window, cx));
+        // Connected: every chat that was refused for this agent sends again.
+        subscriptions.push(cx.subscribe(&connect, |this, _, event: &connect_card::Connected, cx| {
+            let agent = event.0;
+            for chat in this.chats.clone() {
+                if chat.read(cx).need_connect.as_ref().is_some_and(|n| n.agent == agent) {
+                    chat.update(cx, |c, cx| c.retry_cloud(cx));
+                }
+            }
+            cx.notify();
+        }));
+        // The card grows and shrinks with its state; the list must measure it again.
+        subscriptions.push(cx.observe(&connect, |this, _, cx| {
+            this.chats[this.active].read(cx).remeasure_tail();
+            cx.notify();
+        }));
         let mut this = Self {
             host,
             events,
@@ -226,6 +245,7 @@ impl StudioApp {
             viewport: window.viewport_size(),
             effort: pickers::EffortUi::default(),
             settings,
+            connect,
             cloud: CloudState::default(),
             sidebar_open: true,
             focus: cx.focus_handle(),
@@ -1135,6 +1155,16 @@ impl StudioApp {
                 }
             });
         }
+        // LIZARD_STUDIO_CONNECT=claude|codex starts that sign-in once the window is up.
+        if let Ok(which) = std::env::var("LIZARD_STUDIO_CONNECT") {
+            let agent = if which == "codex" { Agent::Codex } else { Agent::Claude };
+            let connect = self.connect.clone();
+            cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(Duration::from_millis(4000)).await;
+                let _ = connect.update(cx, |ui, cx| ui.sign_in(agent, cx));
+            })
+            .detach();
+        }
         let Ok(spec) = std::env::var("LIZARD_STUDIO_MENU") else { return };
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(1200)).await;
@@ -2018,6 +2048,7 @@ impl StudioApp {
             )
         };
         let other_answer = self.other_answer.clone();
+        let connect = self.connect.clone();
         let renderer_entity = entity.clone();
         let list = div().id(list_id).size_full().relative().child(
             list(list_state.clone(), move |ix, window, cx| {
@@ -2026,7 +2057,7 @@ impl StudioApp {
                     .px(px(12.))
                     .when(ix == 0, |d| d.pt(px(14.)))
                     .when(ix + 1 == renderer_entity.read(cx).row_count(), |d| d.pb(px(14.)))
-                    .child(render_row(&renderer_entity, &other_answer, ix, window, cx))
+                    .child(render_row(&renderer_entity, &other_answer, &connect, ix, window, cx))
                     .into_any_element()
             })
             .size_full(),
@@ -2592,6 +2623,7 @@ fn row_gap(items: &[Item], ix: usize) -> f32 {
 fn render_row(
     entity: &Entity<ChatSession>,
     other_answer: &Entity<InputState>,
+    connect: &Entity<connect_card::ConnectUi>,
     ix: usize,
     window: &mut Window,
     cx: &mut App,
@@ -2606,6 +2638,11 @@ fn render_row(
             Tail::Running => {
                 let gap = if chat.items.is_empty() { 0. } else { row_gap(&chat.items, ix) };
                 div().pt(px(gap)).child(render_running(chat)).into_any_element()
+            }
+            Tail::Connect => {
+                let gap = if chat.items.is_empty() { 0. } else { 14. };
+                let Some(need) = chat.need_connect.clone() else { return div().into_any_element() };
+                div().pt(px(gap)).child(connect_card::render_connect(entity, &need, connect, cx)).into_any_element()
             }
             Tail::None => div().into_any_element(),
         };
