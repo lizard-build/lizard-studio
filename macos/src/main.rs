@@ -5,6 +5,8 @@ mod app;
 mod chat;
 mod cloud;
 mod host;
+mod pop;
+mod sound;
 mod store;
 mod theme;
 mod ui;

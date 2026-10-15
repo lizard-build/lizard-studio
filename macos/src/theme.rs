@@ -64,7 +64,7 @@ const THEME_JSON: &str = r##"{
         "accent.background": "#1b1b1b",
         "accent.foreground": "#e9edf4",
         "muted.background": "#141414",
-        "muted.foreground": "#858b94",
+        "muted.foreground": "#5f646d",
         "primary.background": "#10b981",
         "primary.hover.background": "#059669",
         "primary.active.background": "#047857",
@@ -180,7 +180,7 @@ macro_rules! panel_icons {
 }
 
 // The panel's own icons (src/panel/icons.js), exported as files.
-panel_icons!("asterisk", "cloud", "laptop", "bookmark", "bookmark-fill", "brain", "caret-down", "caret-left", "chat", "chats", "check", "claude", "codex", "copy", "cursor", "edit", "file", "file-plus", "folder", "gauge", "gear", "git-branch", "globe", "history", "list", "lizard", "plus", "robot", "search", "selection", "send", "server", "side-panel", "sparkle", "stack", "stop", "terminal", "todo", "trash", "warning", "window-open", "x");
+panel_icons!("asterisk", "cloud", "laptop", "github", "discord", "x-brand", "question", "bookmark", "bookmark-fill", "brain", "caret-down", "caret-left", "chat", "chats", "check", "claude", "codex", "copy", "cursor", "edit", "file", "file-plus", "folder", "gauge", "gear", "git-branch", "globe", "history", "list", "lizard", "plus", "robot", "search", "selection", "send", "server", "side-panel", "sparkle", "stack", "stop", "terminal", "todo", "trash", "warning", "window-open", "x");
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {

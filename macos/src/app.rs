@@ -16,11 +16,15 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{Value, json};
 
+mod pickers;
+mod settings;
+
 use crate::chat::{
     self, ChatEvent, ChatSession, Detail, Item, Permission, PermissionChoice, Tail, ToolStatus, group_sentence,
     permission_detail, permission_options, permission_subtitle, permission_title, tool_detail, tool_label,
 };
-use crate::host::{HostConnection, HostEvent, HostLink, home_dir, host_dir, host_installed};
+use crate::host::{HostConnection, HostEvent, HostLink, host_installed};
+use crate::pop::{self, BoundsMap};
 use crate::store::{Agent, Store, now_ms};
 use crate::theme::*;
 use crate::ui::{self, MenuEntry, caret, lizard, ph, pulse};
@@ -33,13 +37,19 @@ const CLOUD_LABEL: &str = "Run in a sandbox";
 const TITLEBAR_H: f32 = 28.;
 const BOOKMARKS: &[(&str, u32)] = &[("Violet", 0xb69aff), ("Pink", 0xf18ac5), ("Coral", 0xff927c), ("White", 0xe9edf4)];
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct ModelRow {
     id: String,
     label: String,
+    description: String,
     context_limit: Option<u64>,
     efforts: Vec<String>,
+    /// Codex's own sentence for each rung, shown by the effort tooltip.
+    effort_info: HashMap<String, String>,
     default_effort: Option<String>,
+    /// Settings › Models, not the agent's catalog.
+    custom: bool,
+    upgrade_note: Option<String>,
 }
 
 #[derive(Default, Clone)]
@@ -47,12 +57,19 @@ struct Catalog {
     models: Vec<ModelRow>,
     default_model: Option<String>,
     default_effort: Option<String>,
+    /// A refreshModels is in flight (the menu's "Refreshing…").
+    fetching: bool,
+    /// Bumped per refresh so a stale timeout can't clear a newer one.
+    request: u64,
+    error: Option<String>,
+    at: Option<std::time::Instant>,
 }
 
 #[derive(Default)]
 struct HostState {
     connected: bool,
     claude_ok: Option<bool>,
+    codex_ok: Option<bool>,
     version: Option<u64>,
     error: Option<String>,
     restoring: bool,
@@ -85,7 +102,6 @@ enum Menu {
     Model,
     Effort,
     Agent,
-    Settings,
     Bookmark(String),
 }
 
@@ -110,6 +126,11 @@ pub struct StudioApp {
     git: HashMap<String, GitInfo>,
     attachments: Vec<Attachment>,
     menu: Option<Menu>,
+    /// Where the pickers' buttons were drawn, so a popover can point at one.
+    bounds: BoundsMap,
+    viewport: Size<Pixels>,
+    effort: pickers::EffortUi,
+    settings: settings::SettingsUi,
     cloud: CloudState,
     sidebar_open: bool,
     focus: FocusHandle,
@@ -170,7 +191,21 @@ impl StudioApp {
             }
         }));
 
+        // A chat that started its agent (Settings reads a project's files
+        // through a live session) but was never used is not saved, so its
+        // session would be left running in the daemon.
+        subscriptions.push(cx.on_app_quit(|this, cx| {
+            for chat in this.chats.clone() {
+                if chat.read(cx).is_blank() {
+                    chat.update(cx, |c, _| c.close());
+                }
+            }
+            async {}
+        }));
         let store = Store::load();
+        cx.set_global(chat::CustomModels(store.custom_models().to_vec()));
+        let settings = settings::SettingsUi::new(window, cx);
+        subscriptions.extend(settings.subscribe(window, cx));
         let mut this = Self {
             host,
             events,
@@ -186,6 +221,10 @@ impl StudioApp {
             git: HashMap::new(),
             attachments: Vec::new(),
             menu: None,
+            bounds: BoundsMap::default(),
+            viewport: window.viewport_size(),
+            effort: pickers::EffortUi::default(),
+            settings,
             cloud: CloudState::default(),
             sidebar_open: true,
             focus: cx.focus_handle(),
@@ -213,6 +252,8 @@ impl StudioApp {
                 }
             }
         }
+        #[cfg(feature = "snapshot")]
+        this.preview_menus(window, cx);
         this.connect(cx);
         this.activated(cx);
         if std::env::var_os("LIZARD_STUDIO_SHOT").is_none() {
@@ -262,6 +303,13 @@ impl StudioApp {
             let id = msg.get("id").and_then(Value::as_str).unwrap_or("-");
             let rid = msg.get("requestId").and_then(Value::as_str).unwrap_or("-");
             eprintln!("host -> {kind} id={id} req={rid} len={}", msg.to_string().len());
+            // LIZARD_STUDIO_DUMP=<dir> keeps catalog-type messages for reference.
+            if let Some(dir) = std::env::var_os("LIZARD_STUDIO_DUMP") {
+                if matches!(kind.as_str(), "models" | "ready" | "agentReady" | "commands") {
+                    let agent = msg.get("agent").and_then(Value::as_str).unwrap_or("claude");
+                    let _ = std::fs::write(PathBuf::from(dir).join(format!("{kind}-{agent}.json")), msg.to_string());
+                }
+            }
         }
         match kind.as_str() {
             "ready" => {
@@ -295,17 +343,33 @@ impl StudioApp {
             }
             "agentReady" => {
                 if msg.get("agent").and_then(Value::as_str) == Some("codex") {
+                    self.host_state.codex_ok = msg.get("ok").and_then(Value::as_bool);
                     self.host.send(json!({ "type": "refreshModels", "agent": "codex" }));
                 }
             }
-            "models" => {
+            "models" | "modelsError" => {
                 let agent = match msg.get("agent").and_then(Value::as_str) {
                     Some("codex") => Agent::Codex,
                     _ => Agent::Claude,
                 };
-                self.catalogs.insert(agent, catalog_from(&msg));
+                let previous = self.catalogs.remove(&agent).unwrap_or_default();
+                let fresh = (kind == "models").then(|| catalog_from(&msg, agent));
+                let catalog = match fresh {
+                    // Claude's list must hold at least one row; Codex's may be empty.
+                    Some(fresh) if agent == Agent::Codex || !fresh.models.is_empty() => Catalog { request: previous.request, ..fresh },
+                    _ => Catalog {
+                        fetching: false,
+                        error: Some(msg.get("error").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| match agent {
+                            Agent::Claude => "Couldn’t refresh Claude Code models. Try again.".into(),
+                            Agent::Codex => "Couldn’t refresh models. Try again.".into(),
+                        })),
+                        ..previous
+                    },
+                };
+                self.catalogs.insert(agent, catalog);
                 cx.notify();
             }
+            "configRead" | "configWrite" => self.on_config_reply(&msg, cx),
             "daemonSnapshot" => {
                 self.host_state.restoring = true;
                 for session in msg.get("sessions").and_then(Value::as_array).cloned().unwrap_or_default() {
@@ -354,6 +418,9 @@ impl StudioApp {
                 // A replayed journal repeats output this window already drew.
                 if self.host_state.restoring && kind == "event" {
                     return;
+                }
+                if kind == "commands" {
+                    self.on_commands(&msg, cx);
                 }
                 if let Some(chat) = self.chat_by_id(id, cx) {
                     chat.update(cx, |chat, cx| chat.on_host_message(&msg, cx));
@@ -412,6 +479,49 @@ impl StudioApp {
         cx.notify();
     }
 
+    // ---- model catalogs --------------------------------------------------------
+
+    /// chat.js refreshAgentModels: ask the host for the agent's current list;
+    /// the menu says "Refreshing…" until it answers or 45s pass.
+    fn refresh_models(&mut self, agent: Agent, cx: &mut Context<Self>) {
+        let chat = self.chats[self.active].read(cx);
+        let cwd = (agent == Agent::Claude && chat.meta.agent == Agent::Claude).then(|| chat.meta.cwd.clone()).flatten();
+        let connected = self.host.is_connected();
+        let catalog = self.catalogs.entry(agent).or_default();
+        if catalog.fetching {
+            return;
+        }
+        catalog.error = None;
+        if !connected {
+            catalog.error = Some(match agent {
+                Agent::Claude => "Connect to Claude Code to refresh models.".into(),
+                Agent::Codex => "Connect to ChatGPT to refresh models.".into(),
+            });
+            cx.notify();
+            return;
+        }
+        catalog.fetching = true;
+        catalog.request += 1;
+        let request = catalog.request;
+        let mut message = json!({ "type": "refreshModels", "agent": agent.wire() });
+        if let Some(cwd) = cwd {
+            message["cwd"] = json!(cwd);
+        }
+        self.host.send(message);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(45)).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(catalog) = this.catalogs.get_mut(&agent).filter(|c| c.fetching && c.request == request) {
+                    catalog.fetching = false;
+                    catalog.error = Some("Refresh timed out. Update the local helper and try again.".into());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     // ---- chats ---------------------------------------------------------------
 
     fn chat_by_id(&self, id: &str, cx: &App) -> Option<Entity<ChatSession>> {
@@ -426,7 +536,9 @@ impl StudioApp {
         let sub = cx.subscribe(chat, |this, chat, event: &ChatEvent, cx| {
             match event {
                 ChatEvent::Changed => this.persist(&chat, cx),
+                ChatEvent::Asked => this.chime(),
                 ChatEvent::TurnEnded => {
+                    this.chime();
                     let active = this.chats.get(this.active) == Some(&chat);
                     if !active {
                         chat.update(cx, |c, _| c.unseen = true);
@@ -444,6 +556,37 @@ impl StudioApp {
             cx.notify();
         });
         self._subscriptions.push(sub);
+    }
+
+    /// chat.js playDoneChime: only if the user turned it on, and never for
+    /// what a reconnect replays.
+    fn chime(&self) {
+        if self.store.sound_on_done() && !self.host_state.restoring {
+            crate::sound::play_chime();
+        }
+    }
+
+    /// chat.js applyModel: on ChatGPT a new model lands on its own default
+    /// rung, since ladders differ between models.
+    fn pick_model(&mut self, id: String, cx: &mut Context<Self>) {
+        let p = self.pickers(cx);
+        let switched = p.model.as_deref() != Some(id.as_str());
+        let mut effort = None;
+        if p.agent == Agent::Codex && switched {
+            let row = p.models.iter().find(|m| m.id == id);
+            let rungs = efforts_for(Agent::Codex, row, p.cloud);
+            let has = |e: &str| rungs.iter().any(|r| r.id == e);
+            effort = Some(
+                row.and_then(|r| r.default_effort.clone())
+                    .filter(|e| has(e))
+                    .or_else(|| has("medium").then(|| "medium".to_string()))
+                    .or_else(|| rungs.last().map(|r| r.id.clone())),
+            );
+        }
+        // ChatGPT's placeholder row ("Default", no id) means the agent's own.
+        let model = (!id.is_empty()).then_some(id);
+        let chat = self.chats[self.active].clone();
+        chat.update(cx, |c, cx| c.set_settings(Some(model), effort, None, cx));
     }
 
     fn persist(&mut self, chat: &Entity<ChatSession>, cx: &mut Context<Self>) {
@@ -547,6 +690,11 @@ impl StudioApp {
     /// A blank chat that is not on screen leaves no trace.
     fn prune_blank(&mut self, cx: &mut Context<Self>) {
         let active = self.chats[self.active].clone();
+        for chat in self.chats.clone() {
+            if chat != active && chat.read(cx).is_blank() {
+                chat.update(cx, |c, _| c.close());
+            }
+        }
         self.chats.retain(|c| c == &active || !c.read(cx).is_blank());
         self.active = self.chats.iter().position(|c| c == &active).unwrap_or(0);
     }
@@ -767,7 +915,7 @@ impl StudioApp {
 
     fn set_agent(&mut self, agent: Agent, window: &mut Window, cx: &mut Context<Self>) {
         let chat = self.chats[self.active].clone();
-        if !chat.read(cx).is_blank() || chat.read(cx).started {
+        if !chat.read(cx).is_blank() || chat.read(cx).running {
             let cwd = chat.read(cx).meta.cwd.clone();
             let host = self.host.clone();
             let cloud = chat.read(cx).meta.cloud;
@@ -780,6 +928,8 @@ impl StudioApp {
             self.add_on_top(fresh);
         } else {
             chat.update(cx, |chat, cx| {
+                // chat.js chooseHarness: let the old agent drop the session.
+                chat.close();
                 chat.meta.agent = agent;
                 chat.meta.model = None;
                 chat.meta.effort = chat::default_effort(agent).map(str::to_string);
@@ -836,6 +986,17 @@ impl StudioApp {
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
         let mods = &event.keystroke.modifiers;
+        if self.settings.open {
+            if key == "escape" {
+                self.close_settings(_window, cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if self.menu == Some(Menu::Effort) && !mods.modified() && self.effort_key(key, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if key == "tab" && mods.shift {
             self.cycle_mode(cx);
             cx.stop_propagation();
@@ -955,6 +1116,46 @@ impl StudioApp {
         }
     }
 
+    /// Visual checks of the pickers and Settings:
+    /// `LIZARD_STUDIO_PICK=<model>,<effort>,<mode>` sets the open chat's
+    /// settings; `LIZARD_STUDIO_MENU=model|effort|mode|settings[:tab[:file]]`
+    /// opens one once the window has drawn (also agent, place).
+    #[cfg(feature = "snapshot")]
+    fn preview_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Ok(pick) = std::env::var("LIZARD_STUDIO_PICK") {
+            let mut parts = pick.split(',').map(|p| (!p.is_empty()).then(|| p.to_string()));
+            let (model, effort, mode) = (parts.next().flatten(), parts.next().flatten(), parts.next().flatten());
+            let chat = self.chats[self.active].clone();
+            chat.update(cx, |c, _| {
+                c.meta.model = model;
+                c.meta.effort = effort;
+                if mode.is_some() {
+                    c.meta.permission_mode = mode;
+                }
+            });
+        }
+        let Ok(spec) = std::env::var("LIZARD_STUDIO_MENU") else { return };
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(1200)).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let mut parts = spec.split(':');
+                match parts.next() {
+                    Some("model") => this.toggle_picker(Menu::Model, cx),
+                    Some("effort") => this.toggle_picker(Menu::Effort, cx),
+                    Some("mode") => this.toggle_picker(Menu::Mode, cx),
+                    Some("agent") => this.toggle_picker(Menu::Agent, cx),
+                    Some("place") => this.toggle_picker(Menu::Place, cx),
+                    Some("settings") => {
+                        this.open_settings(window, cx);
+                        this.preview_settings(parts.next(), parts.next(), cx);
+                    }
+                    _ => {}
+                }
+            });
+        })
+        .detach();
+    }
+
     /// `LIZARD_STUDIO_OPEN=<session id>:<folder>` opens that saved Claude
     /// session read-only for a visual check. It is never written to the store.
     #[cfg(feature = "snapshot")]
@@ -1045,35 +1246,196 @@ fn git_info(cwd: &str) -> GitInfo {
     info
 }
 
-fn catalog_from(msg: &Value) -> Catalog {
-    let models = msg
-        .get("models")
-        .and_then(Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| {
-                    let id = row.get("id").and_then(Value::as_str)?.to_string();
-                    let label = row.get("label").and_then(Value::as_str).unwrap_or(&id).to_string();
-                    let efforts = row
-                        .get("efforts")
-                        .and_then(Value::as_array)
-                        .map(|e| e.iter().filter_map(Value::as_str).map(str::to_string).collect())
-                        .unwrap_or_default();
-                    Some(ModelRow {
-                        id,
-                        label,
-                        context_limit: row.get("contextLimit").and_then(Value::as_u64),
-                        efforts,
-                        default_effort: row.get("defaultEffort").and_then(Value::as_str).map(str::to_string),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+fn catalog_from(msg: &Value, agent: Agent) -> Catalog {
+    let mut models: Vec<ModelRow> = Vec::new();
+    for row in msg.get("models").and_then(Value::as_array).cloned().unwrap_or_default() {
+        let Some(id) = row.get("id").and_then(Value::as_str).map(str::trim).filter(|id| !id.is_empty()) else { continue };
+        if models.iter().any(|m| m.id == id) {
+            continue;
+        }
+        let label = row.get("label").and_then(Value::as_str).map(str::trim).filter(|l| !l.is_empty()).unwrap_or(id);
+        let efforts = row
+            .get("efforts")
+            .and_then(Value::as_array)
+            .map(|e| e.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default();
+        let effort_info = row
+            .get("effortInfo")
+            .and_then(Value::as_object)
+            .map(|o| o.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
+            .unwrap_or_default();
+        models.push(ModelRow {
+            id: id.to_string(),
+            label: if agent == Agent::Codex { codex_label(label) } else { label.to_string() },
+            description: row.get("description").and_then(Value::as_str).unwrap_or("").to_string(),
+            context_limit: row.get("contextLimit").or_else(|| row.get("contextWindow")).and_then(Value::as_u64).filter(|n| *n > 0),
+            efforts,
+            effort_info,
+            default_effort: row.get("defaultEffort").and_then(Value::as_str).map(str::to_string),
+            custom: false,
+            upgrade_note: row.pointer("/upgrade/note").and_then(Value::as_str).map(|n| n.trim().to_string()),
+        });
+    }
+    let named = msg.get("defaultModel").and_then(Value::as_str).map(str::to_string);
+    // chat.js normalizeCatalog: the named default if listed, else "default",
+    // else the last row. Codex takes its own word for it.
+    let default_model = match agent {
+        Agent::Codex => named.or_else(|| models.first().map(|m| m.id.clone())),
+        Agent::Claude => named
+            .filter(|d| models.iter().any(|m| &m.id == d))
+            .or_else(|| models.iter().any(|m| m.id == "default").then(|| "default".to_string()))
+            .or_else(|| models.last().map(|m| m.id.clone())),
+    };
     Catalog {
         models,
-        default_model: msg.get("defaultModel").and_then(Value::as_str).map(str::to_string),
+        default_model,
         default_effort: msg.get("defaultEffort").and_then(Value::as_str).map(str::to_string),
+        at: Some(std::time::Instant::now()),
+        ..Default::default()
+    }
+}
+
+/// chat.js normalizeCodexModel: "GPT-6.1-Sol" reads "GPT-6.1 Sol"; other
+/// names stay as Codex wrote them.
+fn codex_label(label: &str) -> String {
+    let lower = label.to_lowercase();
+    for name in ["astra", "sol", "luna", "terra"] {
+        let suffix = format!("-{name}");
+        let Some(head) = lower.strip_suffix(&suffix) else { continue };
+        let Some(version) = head.strip_prefix("gpt-") else { continue };
+        let numeric = !version.is_empty()
+            && version.split('.').count() <= 2
+            && version.split('.').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+        if numeric {
+            let mut title = name.to_string();
+            title[..1].make_ascii_uppercase();
+            return format!("GPT-{version} {title}");
+        }
+    }
+    label.to_string()
+}
+
+/// The rows a chat's model picker lists (chat.js modelsFor).
+fn models_for(agent: Agent, catalog: &Catalog, custom: &[crate::store::CustomModel]) -> Vec<ModelRow> {
+    match agent {
+        Agent::Claude if catalog.models.is_empty() => [("default", "Default"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]
+            .iter()
+            .map(|(id, label)| ModelRow { id: id.to_string(), label: label.to_string(), ..Default::default() })
+            .collect(),
+        Agent::Claude => catalog.models.clone(),
+        Agent::Codex => {
+            let custom: Vec<ModelRow> = custom
+                .iter()
+                .map(|m| ModelRow { id: m.id.clone(), label: m.label.clone(), custom: true, context_limit: m.context_window, ..Default::default() })
+                .collect();
+            if !catalog.models.is_empty() {
+                catalog.models.iter().cloned().chain(custom).collect()
+            } else if !custom.is_empty() {
+                custom
+            } else {
+                vec![ModelRow { label: "Default".into(), ..Default::default() }]
+            }
+        }
+    }
+}
+
+/// chat.js modelGroups: ChatGPT's rows by family, newest first, then other
+/// models, custom ones last. Claude's list is one untitled group.
+fn model_groups(rows: Vec<ModelRow>, agent: Agent) -> Vec<(String, Vec<ModelRow>)> {
+    if agent != Agent::Codex {
+        return vec![(String::new(), rows)];
+    }
+    let mut groups: Vec<(String, Vec<ModelRow>)> = Vec::new();
+    for row in rows {
+        let label = if row.custom {
+            "Custom models".to_string()
+        } else {
+            let lower = row.id.to_lowercase();
+            lower
+                .strip_prefix("gpt-")
+                .map(|rest| rest.split('-').next().unwrap_or(""))
+                .filter(|v| {
+                    !v.is_empty() && v.split('.').count() <= 2 && v.split('.').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+                })
+                .map(|v| format!("GPT-{v}"))
+                .unwrap_or_else(|| "Other models".into())
+        };
+        match groups.iter_mut().find(|(l, _)| *l == label) {
+            Some((_, list)) => list.push(row),
+            None => groups.push((label, vec![row])),
+        }
+    }
+    let version = |label: &str| -> Option<Vec<u64>> {
+        label.strip_prefix("GPT-").map(|v| v.split('.').map(|p| p.parse().unwrap_or(0)).collect())
+    };
+    groups.sort_by(|(a, _), (b, _)| match (version(a), version(b)) {
+        (Some(va), Some(vb)) => vb.cmp(&va),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) if a == "Custom models" => std::cmp::Ordering::Greater,
+        (None, None) if b == "Custom models" => std::cmp::Ordering::Less,
+        _ => std::cmp::Ordering::Equal,
+    });
+    groups
+}
+
+/// One rung of the effort slider: id, label, Codex's sentence for it.
+#[derive(Clone)]
+struct Rung {
+    id: String,
+    label: String,
+    hint: String,
+}
+
+/// chat.js effortsFor: Claude's fixed ladder (Ultracode on top), or the
+/// rungs the chosen ChatGPT model publishes.
+fn efforts_for(agent: Agent, row: Option<&ModelRow>, cloud: bool) -> Vec<Rung> {
+    let rung = |id: &str, label: &str, hint: String| Rung { id: id.into(), label: label.into(), hint };
+    let list: Vec<Rung> = match agent {
+        Agent::Claude => [("low", "Low"), ("medium", "Medium"), ("high", "High"), ("xhigh", "Extra"), ("max", "Max"), ("ultracode", "Ultracode")]
+            .iter()
+            .map(|(id, label)| rung(id, label, String::new()))
+            .collect(),
+        Agent::Codex => row
+            .map(|r| {
+                r.efforts
+                    .iter()
+                    .map(|id| {
+                        let label = match id.as_str() {
+                            "low" => "Low",
+                            "medium" => "Medium",
+                            "high" => "High",
+                            "xhigh" => "Extra High",
+                            "max" => "Max",
+                            "ultra" => "Ultra",
+                            "ultracode" => "Ultracode",
+                            other => other,
+                        };
+                        rung(id, label, r.effort_info.get(id).cloned().unwrap_or_default())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    // `sandbox prompt --effort` takes minimal..xhigh only.
+    if cloud {
+        list.into_iter().filter(|r| ["minimal", "low", "medium", "high", "xhigh"].contains(&r.id.as_str())).collect()
+    } else {
+        list
+    }
+}
+
+fn is_ultra(effort: &str) -> bool {
+    effort == "ultracode" || effort == "ultra"
+}
+
+/// chat.js effortTipFor.
+fn effort_tip(agent: Agent, rung: Option<&Rung>) -> String {
+    match (agent, rung) {
+        (Agent::Claude, _) => "Higher effort buys more thinking before Claude answers. Ultracode runs Extra plus multi-agent workflows.".into(),
+        (Agent::Codex, Some(r)) if r.id == "ultra" => "Maximum reasoning with automatic task delegation.".into(),
+        (Agent::Codex, Some(r)) if !r.hint.is_empty() => r.hint.clone(),
+        _ => "Reasoning levels supported by the selected model. Higher levels allow more time to reason.".into(),
     }
 }
 
@@ -1114,19 +1476,6 @@ fn mode_colors(mode: &str) -> (Hsla, Hsla) {
         "auto" => (rgba_hex(WARN_BRIGHT, 0.18), hex(WARN_BRIGHT)),
         "bypassPermissions" | "full-access" => (rgba_hex(RED, 0.18), hex(RED)),
         _ => (white_a(0.08), hex(TEXT_PRIMARY)),
-    }
-}
-
-fn effort_label(agent: Agent, effort: &str) -> String {
-    match (agent, effort) {
-        (Agent::Claude, "xhigh") => "Extra".into(),
-        (Agent::Codex, "xhigh") => "Extra High".into(),
-        (_, "ultracode") => "Ultracode".into(),
-        (_, "ultra") => "Ultra".into(),
-        (_, e) => {
-            let mut chars = e.chars();
-            chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
-        }
     }
 }
 
@@ -1360,7 +1709,6 @@ impl StudioApp {
         let has_closed = !closed_rows.is_empty();
         let open_elements: Vec<AnyElement> = open_rows.into_iter().map(|r| self.render_sidebar_row(r, cx)).collect();
         let closed_elements: Vec<AnyElement> = closed_rows.into_iter().map(|r| self.render_sidebar_row(r, cx)).collect();
-        let settings_menu = (self.menu == Some(Menu::Settings)).then(|| self.render_settings_menu(cx));
         let cloud_button = (self.host_state.version.unwrap_or(0) >= CLOUD_HOST_VERSION && !self.host_state.in_sandbox).then(|| {
             let busy = self.cloud.request.is_some();
             let label = match self.cloud.step.as_deref() {
@@ -1507,14 +1855,10 @@ impl StudioApp {
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(hex(TEXT_SECONDARY))
                             .hover(|s| s.bg(white_a(0.05)).text_color(hex(TEXT_PRIMARY)))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.menu = if this.menu == Some(Menu::Settings) { None } else { Some(Menu::Settings) };
-                                cx.notify();
-                            }))
+                            .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))
                             .child(ph("gear", 16., hex(TEXT_TERTIARY)).group_hover("settings", |s| s.text_color(hex(TEXT_PRIMARY))))
                             .child("Settings"),
-                    )
-                    .children(settings_menu.map(|m| div().absolute().top_0().left(px(6.)).child(m))),
+                    ),
             )
     }
 
@@ -1582,58 +1926,6 @@ impl StudioApp {
                                 .text_color(color),
                         )
                 })),
-        )
-    }
-
-    fn render_settings_menu(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let open = |path: PathBuf| -> Box<dyn Fn(&mut Window, &mut App)> {
-            Box::new(move |_, cx: &mut App| {
-                if !path.exists() {
-                    if let Some(dir) = path.parent() {
-                        let _ = std::fs::create_dir_all(dir);
-                    }
-                    let _ = std::fs::write(&path, "");
-                }
-                cx.open_with_system(&path);
-            })
-        };
-        let app = cx.entity();
-        let mk = |label: &str, hint: &str, action: Box<dyn Fn(&mut Window, &mut App)>| {
-            let app = app.clone();
-            MenuEntry {
-                label: label.to_string().into(),
-                hint: Some(hint.to_string().into()),
-                current: false,
-                accent: None,
-                on_click: Box::new(move |window, cx| {
-                    action(window, cx);
-                    app.update(cx, |this, cx| {
-                        this.menu = None;
-                        cx.notify();
-                    });
-                }),
-            }
-        };
-        let version = self.host_state.version.map(|v| format!("Helper v{v}")).unwrap_or_else(|| "Helper not connected".into());
-        let entries = vec![
-            mk("Claude Code settings", "~/.claude/settings.json", open(home_dir().join(".claude").join("settings.json"))),
-            mk("ChatGPT settings", "~/.codex/config.toml", open(home_dir().join(".codex").join("config.toml"))),
-            mk("Helper log", &format!("{version} · ~/.lizard-studio/host/host.log"), open(host_dir().join("host.log"))),
-            mk(
-                "Copy helper update command",
-                "npx @lizard-build/lizard-studio-host install",
-                Box::new(|_, cx: &mut App| {
-                    cx.write_to_clipboard(ClipboardItem::new_string("npx @lizard-build/lizard-studio-host install".into()))
-                }),
-            ),
-        ];
-        ui::popup(
-            Anchor::BottomLeft,
-            point(px(0.), px(-6.)),
-            ui::menu_box("settings-menu", 280., entries).on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.menu = None;
-                cx.notify();
-            })),
         )
     }
 
@@ -1815,31 +2107,6 @@ impl StudioApp {
             .into_any_element()
     }
 
-    fn picker_entry(
-        &self,
-        label: String,
-        hint: Option<String>,
-        current: bool,
-        accent: Option<Hsla>,
-        cx: &mut Context<Self>,
-        action: impl Fn(&mut Window, &mut App) + 'static,
-    ) -> MenuEntry {
-        let app = cx.entity();
-        MenuEntry {
-            label: label.into(),
-            hint: hint.map(Into::into),
-            current,
-            accent,
-            on_click: Box::new(move |window, cx| {
-                action(window, cx);
-                app.update(cx, |this, cx| {
-                    this.menu = None;
-                    cx.notify();
-                });
-            }),
-        }
-    }
-
     fn render_composer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = self.chats[self.active].clone();
         let (work_cwd, ctx_window, (tasks_running, tasks_total), cloud) = {
@@ -1860,108 +2127,30 @@ impl StudioApp {
                 c.commands.clone(),
             )
         };
-        let catalog = self.catalogs.get(&agent).cloned().unwrap_or_default();
+        let p = self.pickers(cx);
         let git = work_cwd.as_ref().and_then(|cwd| self.git.get(cwd).cloned()).unwrap_or_default();
         let menu = self.menu.clone();
         let composer_text = self.composer.read(cx).value().to_string();
-
-        let models: Vec<ModelRow> = if catalog.models.is_empty() && agent == Agent::Claude {
-            [("default", "Default"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]
-                .iter()
-                .map(|(id, label)| ModelRow {
-                    id: id.to_string(),
-                    label: label.to_string(),
-                    context_limit: None,
-                    efforts: vec![],
-                    default_effort: None,
-                })
-                .collect()
-        } else {
-            catalog.models.clone()
-        };
-        let current_model = model.clone().or(catalog.default_model.clone()).or_else(|| models.first().map(|m| m.id.clone()));
-        let model_row = current_model.as_ref().and_then(|id| models.iter().find(|m| &m.id == id)).cloned();
-        let model_label = model_row.as_ref().map(|m| m.label.clone()).or(current_model.clone()).unwrap_or_else(|| "Default".into());
-        let efforts: Vec<String> = match agent {
-            Agent::Claude => ["low", "medium", "high", "xhigh", "max", "ultracode"].iter().map(|s| s.to_string()).collect(),
-            Agent::Codex => model_row.as_ref().map(|m| m.efforts.clone()).unwrap_or_default(),
-        };
-        // `sandbox prompt --effort` takes minimal..xhigh only.
-        let efforts: Vec<String> = if cloud {
-            efforts.into_iter().filter(|e| ["minimal", "low", "medium", "high", "xhigh"].contains(&e.as_str())).collect()
-        } else {
-            efforts
-        };
-        let effort_value = effort
-            .clone()
-            .or_else(|| model_row.as_ref().and_then(|m| m.default_effort.clone()))
-            .or_else(|| catalog.default_effort.clone().filter(|e| efforts.contains(e)));
+        let _ = (&model, &effort);
         // ChatGPT gets its window from the agent; without one there is no ring.
         let limit = match agent {
-            Agent::Claude => context_limit(model_row.as_ref(), current_model.as_deref()),
+            Agent::Claude => context_limit(p.model_row.as_ref(), p.model.as_deref()),
             Agent::Codex => ctx_window.unwrap_or(0),
         };
         let fraction = if limit > 0 { ctx_tokens as f32 / limit as f32 } else { 0. };
         let modes = modes_for(agent);
         let (mode_bg, mode_fg) = mode_colors(&mode);
-        let mode_short = modes.iter().find(|m| m.0 == mode).map(|m| m.2).unwrap_or("Ask");
+        let (mode_short, mode_hint) = modes.iter().find(|m| m.0 == mode).map(|m| (m.2, m.3)).unwrap_or(("Ask", ""));
 
-
-        // Pickers.
-        let mode_menu = (menu == Some(Menu::Mode)).then(|| {
-            let entries = modes
-                .iter()
-                .map(|(id, label, _, hint)| {
-                    let entity = entity.clone();
-                    self.picker_entry(label.to_string(), Some(hint.to_string()), *id == mode, None, cx, move |_, cx| {
-                        entity.update(cx, |c, cx| c.set_settings(None, None, Some(id.to_string()), cx))
-                    })
-                })
-                .collect();
-            ui::popup(Anchor::BottomLeft, point(px(0.), px(-8.)), ui::menu_box("mode-menu", 260., entries).on_mouse_down_out(close_menu_listener(cx)))
-        });
-        let model_menu = (menu == Some(Menu::Model)).then(|| {
-            let entries = models
-                .iter()
-                .map(|row| {
-                    let entity = entity.clone();
-                    let id = row.id.clone();
-                    self.picker_entry(row.label.clone(), None, current_model.as_deref() == Some(row.id.as_str()), None, cx, move |_, cx| {
-                        let id = id.clone();
-                        entity.update(cx, |c, cx| c.set_settings(Some(Some(id)), None, None, cx))
-                    })
-                })
-                .collect();
-            ui::popup(Anchor::BottomRight, point(px(0.), px(-8.)), ui::menu_box("model-menu", 220., entries).on_mouse_down_out(close_menu_listener(cx)))
-        });
-        let effort_menu = (menu == Some(Menu::Effort)).then(|| {
-            let entries = efforts
-                .iter()
-                .map(|e| {
-                    let entity = entity.clone();
-                    let value = e.clone();
-                    let accent = e.starts_with("ultra").then(|| hex(EMERALD));
-                    self.picker_entry(effort_label(agent, e), None, effort_value.as_deref() == Some(e.as_str()), accent, cx, move |_, cx| {
-                        let value = value.clone();
-                        entity.update(cx, |c, cx| c.set_settings(None, Some(Some(value)), None, cx))
-                    })
-                })
-                .collect();
-            ui::popup(Anchor::BottomRight, point(px(0.), px(-8.)), ui::menu_box("effort-menu", 170., entries).on_mouse_down_out(close_menu_listener(cx)))
-        });
-        let agent_menu = (menu == Some(Menu::Agent)).then(|| {
-            let entries = [Agent::Claude, Agent::Codex]
-                .into_iter()
-                .map(|a| {
-                    let app = cx.entity();
-                    self.picker_entry(a.label().to_string(), None, a == agent, None, cx, move |window, cx| {
-                        app.update(cx, |this, cx| this.set_agent(a, window, cx))
-                    })
-                })
-                .collect();
-            ui::popup(Anchor::BottomLeft, point(px(0.), px(-8.)), ui::menu_box("agent-menu", 200., entries).on_mouse_down_out(close_menu_listener(cx)))
-        });
-
+        // Pickers: drawn where their buttons were last frame.
+        let viewport = self.viewport;
+        let popover = match menu {
+            Some(Menu::Model) => self.render_model_menu(&p, viewport, cx),
+            Some(Menu::Effort) => self.render_effort_menu(&p, viewport, cx),
+            Some(Menu::Mode) if !cloud => self.render_mode_menu(&p, viewport, cx),
+            Some(which @ (Menu::Agent | Menu::Place)) if blank => self.render_setup_menu(which, &p, cx),
+            _ => None,
+        };
         // Slash commands while the first word is being typed.
         let slash: Vec<String> = if composer_text.starts_with('/') && !composer_text.contains(char::is_whitespace) {
             let prefix = composer_text.trim_start_matches('/').to_lowercase();
@@ -2009,36 +2198,25 @@ impl StudioApp {
                 .hover(|s| s.bg(white_a(0.09)).text_color(hex(TEXT_PRIMARY)))
         };
         let needs_folder = cwd.is_none();
-        // Where the chat runs: on this Mac, or in a Lizard sandbox.
-        let place_menu = (menu == Some(Menu::Place)).then(|| {
-            let entries = [(false, "Local", "Runs on this Mac, in a folder you choose."), (true, "Cloud", "Runs in a new Lizard sandbox, in its /workspace.")]
-                .into_iter()
-                .map(|(value, label, hint)| {
-                    let app = cx.entity();
-                    self.picker_entry(label.to_string(), Some(hint.to_string()), value == cloud, None, cx, move |window, cx| {
-                        app.update(cx, |this, cx| this.set_cloud(value, window, cx))
-                    })
-                })
-                .collect();
-            ui::popup(Anchor::BottomLeft, point(px(0.), px(-8.)), ui::menu_box("place-menu", 260., entries).on_mouse_down_out(close_menu_listener(cx)))
-        });
         let setup = blank.then(|| {
             div()
+                .relative()
                 .flex()
                 .flex_wrap()
                 .gap(px(6.))
                 .px(px(2.))
                 .pb(px(10.))
+                .child(pop::track(&self.bounds, "setup"))
                 .child(
                     div()
                         .relative()
+                        .child(pop::track(&self.bounds, "place-chip"))
                         .child(
                             chip("place-chip")
-                                .on_click(toggle_menu(Menu::Place, cx))
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Menu::Place, cx)))
                                 .child(ph(if cloud { "cloud" } else { "laptop" }, 14., hex(TEXT_SECONDARY)))
                                 .child(if cloud { "Cloud" } else { "Local" }),
-                        )
-                        .children(place_menu.map(|m| div().absolute().top_0().left_0().child(m))),
+                        ),
                 )
                 .when(cloud, |d| {
                     // The sandbox's own folder; nothing on this Mac to pick.
@@ -2078,17 +2256,17 @@ impl StudioApp {
                 .child(
                     div()
                         .relative()
+                        .child(pop::track(&self.bounds, "agent-chip"))
                         .child(
                             chip("agent-chip")
-                                .on_click(toggle_menu(Menu::Agent, cx))
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Menu::Agent, cx)))
                                 .child(if agent == Agent::Claude {
                                     ph("claude", 13., hex(CLAUDE_CLAY))
                                 } else {
                                     ph("codex", 13., hex(TEXT_PRIMARY))
                                 })
                                 .child(agent.label()),
-                        )
-                        .children(agent_menu.map(|m| div().absolute().top_0().left_0().child(m))),
+                        ),
                 )
         });
 
@@ -2167,11 +2345,15 @@ impl StudioApp {
         });
 
         let attachments: Vec<(usize, String)> = self.attachments.iter().enumerate().map(|(i, a)| (i, a.name.clone())).collect();
-        let model_open = menu == Some(Menu::Model);
-        let effort_open = menu == Some(Menu::Effort);
-        let ultra = effort_value.as_deref().map_or(false, |e| e.starts_with("ultra"));
+        let effort = p.effort().cloned();
+        let ultra = effort.as_ref().is_some_and(|r| is_ultra(&r.id));
+        let no_efforts = p.rungs.is_empty();
+        let effort_label = effort.map(|r| r.label).unwrap_or_else(|| "Default".into());
+        let model_label = p.model_label.clone();
+        let tip = |text: &'static str| move |window: &mut Window, cx: &mut App| gpui_kit::component::tooltip::Tooltip::new(text).build(window, cx);
 
-        let quiet_button = |id: &'static str, label: String, open: bool, max_w: f32| {
+        // `.model-btn`: quiet until hovered.
+        let quiet_button = |id: &'static str, label: String, max_w: f32| {
             div()
                 .id(id)
                 .max_w(px(max_w))
@@ -2179,12 +2361,9 @@ impl StudioApp {
                 .px(px(8.))
                 .py(px(5.))
                 .rounded(px(6.))
-                .cursor_pointer()
                 .text_size(px(12.))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(if open { hex(TEXT_PRIMARY) } else { hex(TEXT_SECONDARY) })
-                .when(open, |d| d.bg(white_a(0.05)))
-                .hover(|s| s.bg(white_a(0.05)).text_color(hex(TEXT_PRIMARY)))
+                .text_color(hex(TEXT_SECONDARY))
                 .child(label)
         };
         let ring_tip = format!(
@@ -2195,9 +2374,11 @@ impl StudioApp {
         );
 
         div()
+            .relative()
             .flex_none()
             .px(px(12.))
             .pb(px(14.))
+            .child(pop::track(&self.bounds, "composer"))
             .children(setup)
             .children(flap)
             .child(
@@ -2209,6 +2390,7 @@ impl StudioApp {
                     .border_1()
                     .border_color(hex(BORDER))
                     .rounded(px(14.))
+                    .children(popover)
                     .pt(px(8.))
                     .px(px(8.))
                     .pb(px(6.))
@@ -2274,6 +2456,7 @@ impl StudioApp {
                             .when(!cloud, |d| d.child(
                                 div()
                                     .relative()
+                                    .child(pop::track(&self.bounds, "mode"))
                                     .child(
                                         div()
                                             .id("mode")
@@ -2285,36 +2468,44 @@ impl StudioApp {
                                             .text_size(px(12.))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .cursor_pointer()
-                                            .hover(|s| s.opacity(0.85))
-                                            .on_click(toggle_menu(Menu::Mode, cx))
+                                            // `filter: brightness(1.18)`
+                                            .hover(move |s| s.bg(mode_bg.opacity(1.45)))
+                                            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(mode_hint).build(window, cx))
+                                            .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Menu::Mode, cx)))
                                             .child(mode_short),
-                                    )
-                                    .children(mode_menu.map(|m| div().absolute().top_0().left_0().child(m))),
+                                    ),
                             ))
                             .child(div().flex_1())
                             .child(
                                 div()
                                     .relative()
-                                    .child(quiet_button("model", model_label, model_open, 150.).on_click(toggle_menu(Menu::Model, cx)))
-                                    .children(model_menu.map(|m| div().absolute().top_0().right_0().child(m))),
+                                    .child(pop::track(&self.bounds, "model"))
+                                    .child(
+                                        quiet_button("model", model_label, 150.)
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(white_a(0.05)).text_color(hex(TEXT_PRIMARY)))
+                                            .tooltip(tip("Model"))
+                                            .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Menu::Model, cx))),
+                                    ),
                             )
-                            .when(!efforts.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .relative()
-                                        .child(
-                                            quiet_button(
-                                                "effort",
-                                                effort_value.as_deref().map(|e| effort_label(agent, e)).unwrap_or_else(|| "Medium".into()),
-                                                effort_open,
-                                                90.,
-                                            )
+                            .child(
+                                div()
+                                    .relative()
+                                    .child(pop::track(&self.bounds, "effort"))
+                                    .child(
+                                        quiet_button("effort", effort_label, 90.)
                                             .when(ultra, |d| d.text_color(hex(EMERALD)))
-                                            .on_click(toggle_menu(Menu::Effort, cx)),
-                                        )
-                                        .children(effort_menu.map(|m| div().absolute().top_0().right_0().child(m))),
-                                )
-                            })
+                                            .when(no_efforts, |d| {
+                                                d.opacity(0.5).tooltip(tip("This model has not provided reasoning levels. It uses its default."))
+                                            })
+                                            .when(!no_efforts, |d| {
+                                                d.cursor_pointer()
+                                                    .hover(move |s| s.bg(white_a(0.05)).text_color(if ultra { hex(EMERALD) } else { hex(TEXT_PRIMARY) }))
+                                                    .tooltip(tip("Reasoning effort"))
+                                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Menu::Effort, cx)))
+                                            }),
+                                    ),
+                            )
                             .child(
                                 div()
                                     .id("context-ring")
@@ -2346,26 +2537,6 @@ impl StudioApp {
                             ),
                     ),
             )
-    }
-}
-
-fn close_menu_listener(cx: &mut Context<StudioApp>) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static + use<> {
-    let app = cx.weak_entity();
-    move |_: &MouseDownEvent, _: &mut Window, cx: &mut App| {
-        let _ = app.update(cx, |this, cx| {
-            this.menu = None;
-            cx.notify();
-        });
-    }
-}
-
-fn toggle_menu(which: Menu, cx: &mut Context<StudioApp>) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static + use<> {
-    let app = cx.weak_entity();
-    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-        let _ = app.update(cx, |this, cx| {
-            this.menu = if this.menu.as_ref() == Some(&which) { None } else { Some(which.clone()) };
-            cx.notify();
-        });
     }
 }
 
@@ -2884,7 +3055,9 @@ impl Render for StudioApp {
         let blocked = !host_installed()
             || self.host_state.claude_ok == Some(false)
             || self.host_state.version.map_or(false, |v| v < MIN_HOST_VERSION);
+        self.apply_settings_text(window, cx);
         let viewport = window.viewport_size();
+        self.viewport = viewport;
         let sidebar_w = (viewport.width * 0.35).min(px(400.));
         let sidebar_open = self.sidebar_open;
         let main: AnyElement = if blocked { self.render_onboarding(cx) } else { self.render_chat(cx) };
@@ -2955,5 +3128,6 @@ impl Render for StudioApp {
                     .children(sidebar)
                     .child(div().flex_1().min_w_0().h_full().flex().child(main)),
             )
+            .when(self.settings.open, |d| d.child(deferred(self.render_settings(window, cx)).with_priority(2)))
     }
 }

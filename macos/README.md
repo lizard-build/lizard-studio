@@ -8,7 +8,8 @@ The app has no agent code of its own. It starts the same local host as the Chrom
 
 - Claude Code and ChatGPT chats: streaming replies, markdown, tool groups ("Ran 3 commands, read a file"), expandable tool cards with diffs and output.
 - Permission cards and AskUserQuestion, with the panel's keys (1-9, ↑↓, enter, esc).
-- Model, effort and permission mode pickers, shift+tab to cycle modes, the context ring.
+- The panel's pickers: models with their descriptions (ChatGPT's grouped by family, Refresh asks the agent again), the effort slider with Ultracode's green field, permission modes, shift+tab to cycle modes, the context ring.
+- Settings, as the panel's modal: General (completion sound, host status, links), Claude and ChatGPT (CLAUDE.md or AGENTS.md, hooks, MCP, config.toml, plugin switches, skills) read and written through the host, and Models for your own OpenAI-compatible endpoints, which then show up in the ChatGPT picker. The host only edits a project's files for a folder a session has opened, so opening one starts the chat's agent, as the panel does when it shows a chat.
 - Chat list with Active and History, search, rename, bookmarks, status dots.
 - History from the agent's own transcript, paged in as you scroll up.
 - Image attachments; other files go in as paths.
@@ -28,7 +29,7 @@ cargo run                 # debug
 ./scripts/bundle.sh       # dist/Lizard Studio.app
 ```
 
-Chats are saved in `~/Library/Application Support/Lizard Studio/chats.json`.
+Chats are saved in `~/Library/Application Support/Lizard Studio/chats.json`, with your own models and the sound setting. The file is readable only by you, since custom models carry API keys.
 
 ## Visual checks
 
@@ -46,6 +47,7 @@ LIZARD_STUDIO_SHOT_QUIT=1 ./target/debug/lizard-studio
 - `LIZARD_STUDIO_SIZE=<w>x<h>` sizes the window; `LIZARD_STUDIO_STORE=<file>` reads a fixture chat list; `LIZARD_STUDIO_RUNNING=<id,id>` shows those chats as running; `LIZARD_STUDIO_OPEN_AT` and `LIZARD_STUDIO_OPEN_WORKDIR` place the opened session in the list and set its working folder.
 - `LIZARD_STUDIO_SEND_CLOUD=1` makes the `LIZARD_STUDIO_SEND` chat a cloud one.
 - `LIZARD_STUDIO_CLOUD_START=1` presses Run in a sandbox once the host is ready; the stream URL is not opened in test runs.
-- `LIZARD_STUDIO_DEBUG=1` logs host messages.
+- `LIZARD_STUDIO_PICK=<model>,<effort>,<mode>` sets the new chat's settings; `LIZARD_STUDIO_MENU=model|effort|mode|agent|place|settings[:claude|codex|models[:<file>|new]]` opens that picker or Settings tab once the window has drawn. Popovers fade in, so take two shots (`LIZARD_STUDIO_SHOT_AT=3000,4500`) and use the second.
+- `LIZARD_STUDIO_DEBUG=1` logs host messages; with `LIZARD_STUDIO_DUMP=<dir>` it also saves the `models`, `ready`, `agentReady` and `commands` messages there.
 
 Neither kind of test chat is saved.

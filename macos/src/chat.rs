@@ -17,7 +17,14 @@ use serde_json::{Value, json};
 
 use crate::cloud::{self, CloudMsg};
 use crate::host::HostLink;
-use crate::store::{Agent, SavedChat, new_chat_id, now_ms};
+use crate::store::{Agent, CustomModel, SavedChat, new_chat_id, now_ms};
+
+/// The user's own OpenAI-compatible models (Settings › Models), shared with
+/// every chat so a ChatGPT session can declare the picked one's provider.
+#[derive(Default)]
+pub struct CustomModels(pub Vec<CustomModel>);
+
+impl Global for CustomModels {}
 
 pub const DEFAULT_TITLE: &str = "New chat";
 
@@ -116,6 +123,8 @@ pub enum ChatEvent {
     TurnEnded,
     /// The agent reported its working folder.
     CwdChanged,
+    /// A permission or question started waiting on the user.
+    Asked,
 }
 
 impl EventEmitter<ChatEvent> for ChatSession {}
@@ -375,24 +384,54 @@ impl ChatSession {
 
     // ---- lifecycle -----------------------------------------------------------
 
-    fn start_message(&self) -> Value {
+    /// chat.js providerFor: what the host needs to declare a custom model's
+    /// provider on thread/start; none for a stock model.
+    fn provider(&self, cx: &App) -> Value {
+        if self.meta.agent != Agent::Codex {
+            return Value::Null;
+        }
+        let Some(models) = cx.try_global::<CustomModels>() else { return Value::Null };
+        match models.0.iter().find(|m| Some(&m.id) == self.meta.model.as_ref()) {
+            Some(m) => json!({
+                "id": m.id,
+                "model": m.model,
+                "baseUrl": m.base_url,
+                "apiKey": m.api_key,
+                "wireApi": m.wire_api,
+                "contextWindow": m.context_window,
+            }),
+            None => Value::Null,
+        }
+    }
+
+    fn start_message(&self, cx: &App) -> Value {
         json!({
             "type": "start",
             "cwd": self.meta.cwd,
             "model": self.meta.model,
+            "provider": self.provider(cx),
             "effort": self.meta.effort,
             "permissionMode": self.meta.permission_mode.clone().unwrap_or_else(|| default_mode(self.meta.agent).into()),
             "resume": self.meta.session_id,
         })
     }
 
-    fn ensure_started(&mut self) {
+    fn ensure_started(&mut self, cx: &App) {
         if self.started {
             return;
         }
-        self.send(self.start_message());
+        self.send(self.start_message(cx));
         self.started = true;
         self.context_sent = false;
+    }
+
+    /// Start the agent now, as the panel does when a chat is shown. The host
+    /// only reads or writes a project's settings for a folder a session has
+    /// opened.
+    pub fn warm_up(&mut self, cx: &mut Context<Self>) {
+        if !self.meta.cloud && self.meta.cwd.is_some() {
+            self.ensure_started(cx);
+        }
     }
 
     /// Ask the host which slash commands and skills this folder offers.
@@ -424,7 +463,7 @@ impl ChatSession {
         if self.meta.cloud {
             return self.deliver_cloud(text, cx);
         }
-        self.ensure_started();
+        self.ensure_started(cx);
         if self.meta.title == DEFAULT_TITLE && !self.meta.title_edited {
             let title: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
             if !title.is_empty() {
@@ -499,18 +538,19 @@ impl ChatSession {
             if self.running {
                 self.restart_pending = true;
             } else {
-                self.restart();
+                self.restart(cx);
             }
         }
         self.touch(cx);
         cx.notify();
     }
 
-    fn restart(&mut self) {
+    fn restart(&mut self, cx: &App) {
         self.restart_pending = false;
         self.send(json!({
             "type": "restartSession",
             "model": self.meta.model,
+            "provider": self.provider(cx),
             "effort": self.meta.effort,
             "permissionMode": self.meta.permission_mode,
         }));
@@ -533,7 +573,7 @@ impl ChatSession {
         }
         self.place_footer(self.turn_first_item, now_ms());
         if self.restart_pending {
-            self.restart();
+            self.restart(cx);
         }
         cx.emit(ChatEvent::TurnEnded);
         self.sync_rows(cx);
@@ -601,6 +641,9 @@ impl ChatSession {
                 cx.notify();
             }
             "permission" => {
+                if self.permissions.is_empty() {
+                    cx.emit(ChatEvent::Asked);
+                }
                 self.permissions.push(permission_from(msg));
                 self.sync_rows(cx);
             }

@@ -66,6 +66,28 @@ pub struct SavedChat {
     pub conversation_id: Option<String>,
 }
 
+/// An OpenAI-compatible endpoint for ChatGPT chats (Settings › Models). The
+/// host declares it as the session's provider, so nothing lands in
+/// ~/.codex/config.toml.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomModel {
+    pub id: String,
+    pub label: String,
+    pub model: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "responses")]
+    pub wire_api: String,
+    #[serde(default)]
+    pub context_window: Option<u64>,
+}
+
+fn responses() -> String {
+    "responses".into()
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct StoreFile {
     chats: Vec<SavedChat>,
@@ -75,6 +97,10 @@ struct StoreFile {
     last_agent: Option<Agent>,
     #[serde(default)]
     last_cloud: bool,
+    #[serde(default)]
+    custom_models: Vec<CustomModel>,
+    #[serde(default)]
+    sound_on_done: bool,
 }
 
 pub struct Store {
@@ -122,6 +148,24 @@ impl Store {
         self.save();
     }
 
+    pub fn custom_models(&self) -> &[CustomModel] {
+        &self.file.custom_models
+    }
+
+    pub fn set_custom_models(&mut self, models: Vec<CustomModel>) {
+        self.file.custom_models = models;
+        self.save();
+    }
+
+    pub fn sound_on_done(&self) -> bool {
+        self.file.sound_on_done
+    }
+
+    pub fn set_sound_on_done(&mut self, on: bool) {
+        self.file.sound_on_done = on;
+        self.save();
+    }
+
     pub fn upsert(&mut self, chat: SavedChat) {
         match self.file.chats.iter_mut().find(|c| c.id == chat.id) {
             Some(existing) => *existing = chat,
@@ -152,6 +196,12 @@ impl Store {
         if let Ok(text) = serde_json::to_string_pretty(&self.file) {
             let tmp = self.path.with_extension("json.tmp");
             if std::fs::write(&tmp, text).is_ok() {
+                // Custom models carry API keys.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+                }
                 let _ = std::fs::rename(&tmp, &self.path);
             }
         }
