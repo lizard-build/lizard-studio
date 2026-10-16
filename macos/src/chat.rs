@@ -28,6 +28,8 @@ pub use questions::{AsyncQuestion, Elicitation, FieldKind};
 pub mod agent_events;
 mod rewind;
 pub use rewind::UserPrompt;
+mod tool_details;
+pub use tool_details::{Detail, ask_record, permission_detail, tool_detail};
 
 use crate::cloud::{self, CloudMsg};
 use crate::host::HostLink;
@@ -434,6 +436,8 @@ impl ChatSession {
     /// A tool call joins the open group, or starts one.
     fn push_tool(&mut self, tool: ToolCall, cx: &mut Context<Self>) {
         let id = tool.id.clone();
+        let ask = ask_record(&tool).is_some();
+        if ask { self.tools_open = false; }
         if self.tools_open {
             let ix = self.items.len().saturating_sub(1);
             if let Some(Item::Tools(group)) = self.items.last_mut() {
@@ -448,7 +452,7 @@ impl ChatSession {
         let expanded = std::env::var_os("LIZARD_STUDIO_EXPAND").is_some();
         let ix = self.push(Item::Tools(ToolGroup { tools: vec![tool], expanded }), cx);
         self.tool_index.insert(id, (ix, 0));
-        self.tools_open = true;
+        self.tools_open = !ask;
     }
 
     pub fn toggle_group(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -1062,6 +1066,9 @@ impl ChatSession {
                 tool.status = if is_error { ToolStatus::Error } else { ToolStatus::Done };
                 tool.output = Some(result_text(block.get("content")));
                 note_task_result(&mut self.tasks, &tool.id, &tool.name, &tool.input, tool.output.as_deref().unwrap_or(""), is_error, now_ms());
+                if tool.name == "AskUserQuestion" {
+                    self.list.remeasure_items(ix..ix + 1);
+                }
             }
         }
         cx.notify();
@@ -1606,6 +1613,8 @@ impl ChatSession {
                                     output: None,
                                     expanded: false,
                                 };
+                                let ask = ask_record(&tool).is_some();
+                                if ask { open_group = false; }
                                 if open_group {
                                     let last = items.len().saturating_sub(1);
                                     if let Some(Item::Tools(group)) = items.last_mut() {
@@ -1616,7 +1625,7 @@ impl ChatSession {
                                 }
                                 items.push(Item::Tools(ToolGroup { tools: vec![tool], expanded: false }));
                                 tools.insert(id, (items.len() - 1, 0));
-                                open_group = true;
+                                open_group = !ask;
                             }
                             _ => {}
                         }
@@ -2011,37 +2020,6 @@ fn compact_json(value: &Value, max: usize) -> String {
     truncate(&value.to_string(), max)
 }
 
-pub enum Detail {
-    Command(String),
-    Diff(Vec<(char, String)>),
-    Code(String),
-}
-
-/// What an open tool card shows above its result.
-pub fn tool_detail(tool: &ToolCall) -> Option<Detail> {
-    let s = |key: &str| tool.input.get(key).and_then(Value::as_str).map(str::to_string);
-    match tool.name.as_str() {
-        "Bash" => s("command").map(|c| Detail::Command(truncate(&c, 6000))),
-        "Edit" => match (s("old_string"), s("new_string")) {
-            (Some(old), Some(new)) => Some(Detail::Diff(line_diff(&old, &new))),
-            _ => None,
-        },
-        "Write" => s("content").map(|c| Detail::Code(truncate(&c, 6000))),
-        _ => None,
-    }
-}
-
-pub fn line_diff(old: &str, new: &str) -> Vec<(char, String)> {
-    let mut out: Vec<(char, String)> = Vec::new();
-    for line in old.lines().take(200) {
-        out.push(('-', line.to_string()));
-    }
-    for line in new.lines().take(200) {
-        out.push(('+', line.to_string()));
-    }
-    out
-}
-
 pub fn permission_title(tool: &str) -> String {
     match tool {
         "Bash" => "Bash command".into(),
@@ -2068,22 +2046,6 @@ pub fn permission_subtitle(perm: &Permission, cwd: Option<&str>) -> Option<Strin
             Some(format!("{} · {} (MCP)", parts.next().unwrap_or(""), parts.next().unwrap_or("")))
         }
         _ => perm.description.clone(),
-    }
-}
-
-pub fn permission_detail(perm: &Permission) -> Option<Detail> {
-    let s = |key: &str| perm.input.get(key).and_then(Value::as_str).map(str::to_string);
-    match perm.tool_name.as_str() {
-        "Bash" => s("command").map(Detail::Command),
-        "ExitPlanMode" => None,
-        "Edit" => match (s("old_string"), s("new_string")) {
-            (Some(old), Some(new)) => Some(Detail::Diff(line_diff(&old, &new))),
-            _ => None,
-        },
-        "Write" => s("content").map(|c| Detail::Code(truncate(&c, 2000))),
-        _ => s("expression")
-            .or_else(|| serde_json::to_string_pretty(&perm.input).ok())
-            .map(|t| Detail::Code(truncate(&t, 2000))),
     }
 }
 

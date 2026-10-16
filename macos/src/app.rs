@@ -34,9 +34,12 @@ mod settings;
 mod tasks;
 mod slash;
 mod usage;
+mod tool_details;
+
+use tool_details::{code_block, render_detail};
 
 use crate::chat::{
-    self, ChatEvent, ChatSession, Detail, Item, Permission, PermissionChoice, Tail, ToolStatus, group_sentence,
+    self, ChatEvent, ChatSession, Item, Permission, PermissionChoice, Tail, ToolStatus, group_sentence,
     permission_detail, permission_options, permission_subtitle, permission_title, tool_detail, tool_label,
 };
 use crate::host::{HostConnection, HostEvent, HostLink, host_installed};
@@ -2729,6 +2732,9 @@ fn render_row(
                     .child(text.clone()),
             )
             .into_any_element(),
+        Item::Tools(group) if group.tools.len() == 1 && chat::ask_record(&group.tools[0]).is_some() => {
+            tool_details::render_ask(&group.tools[0])
+        }
         Item::Tools(group) => {
             let sentence = group_sentence(&group.tools);
             let expanded = group.expanded;
@@ -2772,67 +2778,6 @@ fn render_row(
         }
     };
     div().w_full().pt(px(gap)).child(body).into_any_element()
-}
-
-fn code_block(id: impl Into<ElementId>, text: String, error: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .w_full()
-        .max_h(px(320.))
-        .overflow_y_scroll()
-        .px(px(12.))
-        .py(px(10.))
-        .rounded(px(8.))
-        .bg(if error { rgba_hex(RED, 0.1) } else { white_a(0.05) })
-        .font_family("Lizard Mono")
-        .text_size(px(12.))
-        .line_height(relative(1.5))
-        .text_color(hex(TEXT_PRIMARY))
-        .child(text)
-}
-
-fn diff_block(id: impl Into<ElementId>, lines: Vec<(char, String)>) -> Stateful<Div> {
-    div()
-        .id(id)
-        .w_full()
-        .max_h(px(320.))
-        .overflow_y_scroll()
-        .py(px(8.))
-        .rounded(px(8.))
-        .bg(white_a(0.05))
-        .font_family("Lizard Mono")
-        .text_size(px(12.))
-        .line_height(relative(1.5))
-        .children(lines.into_iter().map(|(sign, line)| {
-            let (bg, fg) = match sign {
-                '+' => (rgba_hex(EMERALD, 0.12), hex(0xb9f6ca)),
-                '-' => (rgba_hex(RED, 0.12), hex(0xffcdd2)),
-                _ => (hsla(0., 0., 0., 0.), hex(TEXT_SECONDARY)),
-            };
-            div().px(px(10.)).bg(bg).text_color(fg).child(format!("{sign} {line}"))
-        }))
-}
-
-fn render_detail(id: SharedString, detail: Detail) -> AnyElement {
-    match detail {
-        Detail::Command(command) => div()
-            .relative()
-            .child(code_block(id, command, false).pl(px(24.)))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(12.))
-                    .top(px(10.))
-                    .font_family("Lizard Mono")
-                    .text_size(px(12.))
-                    .line_height(relative(1.5))
-                    .text_color(hex(TEXT_TERTIARY))
-                    .child("$"),
-            )
-            .into_any_element(),
-        Detail::Code(code) => code_block(id, code, false).into_any_element(),
-        Detail::Diff(lines) => diff_block(id, lines).into_any_element(),
-    }
 }
 
 fn render_tool(entity: &Entity<ChatSession>, ix: usize, t: usize, tool: &chat::ToolCall, cwd: Option<&str>) -> AnyElement {
