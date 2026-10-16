@@ -125,6 +125,11 @@ impl StudioApp {
         self.recovery.snapshots.clear();
         for snapshot in msg.get("sessions").and_then(Value::as_array).into_iter().flatten() {
             let Some(id) = snapshot.get("id").and_then(Value::as_str) else { continue };
+            // Snapshot runs' chats are never saved, so there is nothing to recover.
+            if self.chat_by_id(id, cx).is_none() && id.starts_with("preview-") {
+                self.host.send(json!({ "type": "close", "id": id, "agent": snapshot.get("agent") }));
+                continue;
+            }
             if self.chat_by_id(id, cx).is_none()
                 && snapshot.get("submitted").and_then(Value::as_bool) != Some(true)
                 && snapshot.get("running").and_then(Value::as_bool) != Some(true)
