@@ -16,6 +16,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{Value, json};
 
+mod agent_events;
 mod attach;
 mod bash;
 mod connect_card;
@@ -154,6 +155,7 @@ pub struct StudioApp {
     effort: pickers::EffortUi,
     settings: settings::SettingsUi,
     slash: slash::SlashUi,
+    plan: Option<agent_events::PlanView>,
     /// Connecting a cloud agent to the Lizard account (connect_card.rs).
     connect: Entity<connect_card::ConnectUi>,
     cloud: CloudState,
@@ -287,6 +289,7 @@ impl StudioApp {
             effort: pickers::EffortUi::default(),
             settings,
             slash: slash::SlashUi::default(),
+            plan: None,
             connect,
             cloud: CloudState::default(),
             tasks_ui: tasks::TasksUi::default(),
@@ -614,6 +617,7 @@ impl StudioApp {
             match event {
                 ChatEvent::Changed => this.persist(&chat, cx),
                 ChatEvent::Asked | ChatEvent::Result => this.chime(),
+                ChatEvent::ViewPlan(plan) => this.open_plan(plan, cx),
                 ChatEvent::TurnEnded => {
                     let active = this.chats.get(this.active) == Some(&chat);
                     if !active || !this.recovery.focused {
@@ -1041,6 +1045,13 @@ impl StudioApp {
                 cx.notify();
             }
             cx.stop_propagation();
+            return;
+        }
+        if self.plan.is_some() {
+            if key == "escape" {
+                self.close_plan(_window, cx);
+                cx.stop_propagation();
+            }
             return;
         }
         if self.settings.open {
@@ -2643,6 +2654,9 @@ fn render_row(
             Tail::None => div().into_any_element(),
         };
     }
+    if matches!(&chat.items[ix], Item::AgentEvent(event) if event.hidden()) {
+        return div().into_any_element();
+    }
     let gap = row_gap(&chat.items, ix);
     let cwd = chat.meta.cwd.clone();
     let body: AnyElement = match &chat.items[ix] {
@@ -2701,6 +2715,7 @@ fn render_row(
                 })
                 .into_any_element()
         }
+        Item::AgentEvent(event) => agent_events::render_event(entity, event),
         Item::Notice { warn, text } => div()
             .w_full()
             .flex()
@@ -2984,6 +2999,7 @@ fn render_permission(entity: &Entity<ChatSession>, other_answer: &Entity<InputSt
     )
     .when_some(subtitle, |d, s| d.child(div().mt(px(3.)).pl(px(21.)).truncate().text_size(px(11.5)).text_color(hex(TEXT_SECONDARY)).child(s)))
     .when_some(detail, |d, detail| d.child(div().mt(px(8.)).child(render_detail("perm-detail".into(), detail))))
+    .when_some(agent_events::render_plan_hint(entity, perm), |d, hint| d.child(hint))
     .child(div().mt(px(12.)).mb(px(6.)).text_size(px(13.)).font_weight(FontWeight::MEDIUM).child("Do you want to proceed?"))
     .child(div().flex().flex_col().gap(px(1.)).mx(px(-6.)).children(options.into_iter().enumerate().map(|(i, label)| {
         let entity = entity.clone();
@@ -3172,5 +3188,6 @@ impl Render for StudioApp {
             )
             .when(self.settings.open, |d| d.child(deferred(self.render_settings(window, cx)).with_priority(2)))
             .children(self.render_image_viewer(cx).map(|viewer| deferred(viewer).with_priority(3)))
+            .when(self.plan.is_some(), |d| d.child(deferred(self.render_plan(window, cx)).with_priority(3)))
     }
 }

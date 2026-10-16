@@ -251,6 +251,7 @@ impl ChatSession {
             self.context_sent = true;
             format!("{CTX_START}{app_context}\n\n{bash_context}{CTX_END}\n\n{text}")
         };
+        self.reset_agent_events();
         self.send(json!({ "type": "prompt", "text": wire, "images": images }));
         self.begin_turn();
         self.touch(cx);

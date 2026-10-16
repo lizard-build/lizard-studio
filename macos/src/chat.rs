@@ -24,6 +24,8 @@ pub use tasks::{Task, TaskKind};
 use tasks::{note_task_result, note_task_start, scan_task_notice};
 mod questions;
 pub use questions::{AsyncQuestion, Elicitation, FieldKind};
+#[path = "agent_events.rs"]
+pub mod agent_events;
 
 use crate::cloud::{self, CloudMsg};
 use crate::host::HostLink;
@@ -113,6 +115,7 @@ pub enum Item {
     Tools(ToolGroup),
     Bash(bash::BashRun),
     Question(Permission),
+    AgentEvent(agent_events::EventItem),
     Notice { warn: bool, text: SharedString },
 }
 
@@ -164,6 +167,8 @@ pub enum ChatEvent {
     CwdChanged,
     /// A permission or question started waiting on the user.
     Asked,
+    /// Read a plan without answering its permission card.
+    ViewPlan(String),
 }
 
 impl EventEmitter<ChatEvent> for ChatSession {}
@@ -193,6 +198,7 @@ pub struct ChatSession {
     pub live_cwd: Option<String>,
     pub tasks: Vec<Task>,
     ctx_base: u64,
+    agent_events: agent_events::AgentEvents,
     pub status_word: &'static str,
     pub permissions: Vec<Permission>,
     pub queued: VecDeque<QueuedPrompt>,
@@ -256,6 +262,7 @@ impl ChatSession {
             ctx_window: None,
             live_cwd,
             tasks: Vec::new(),
+            agent_events: Default::default(),
             status_word: "Deploy on Lizard",
             permissions: Vec::new(),
             queued: VecDeque::new(),
@@ -633,6 +640,7 @@ impl ChatSession {
     fn end_turn(&mut self, cx: &mut Context<Self>) {
         if !self.running { return; }
         self.running = false;
+        self.finish_compaction();
         self.turn_started_at = None;
         self.permissions.clear();
         self.stream_blocks.clear();
@@ -814,6 +822,7 @@ impl ChatSession {
         if self.on_local_event(data, cx) {
             return;
         }
+        self.on_agent_event(data, cx);
         match data.get("type").and_then(Value::as_str).unwrap_or("") {
             "async_question" => self.show_async_question(data, cx),
             "system" => {
@@ -864,13 +873,18 @@ impl ChatSession {
                             match block.get("type").and_then(Value::as_str) {
                                 Some("tool_result") => self.fill_tool_result(block, cx),
                                 Some("text") => {
-                                    scan_task_notice(&mut self.tasks, block.get("text").and_then(Value::as_str).unwrap_or(""), now_ms())
+                                    let text = block.get("text").and_then(Value::as_str).unwrap_or("");
+                                    scan_task_notice(&mut self.tasks, text, now_ms());
+                                    self.local_command_output(text, false, cx);
                                 }
                                 _ => {}
                             }
                         }
                     }
-                    Some(Value::String(text)) => scan_task_notice(&mut self.tasks, text, now_ms()),
+                    Some(Value::String(text)) => {
+                        scan_task_notice(&mut self.tasks, text, now_ms());
+                        self.local_command_output(text, false, cx);
+                    }
                     _ => {}
                 }
                 cx.notify();
@@ -910,7 +924,7 @@ impl ChatSession {
                 self.note_ctx_usage(event.pointer("/message/usage"));
                 self.stream_blocks.clear();
                 self.msg_tokens = 0;
-                self.status_word = random_word();
+                if !self.agent_events.compacting { self.status_word = random_word(); }
                 cx.notify();
             }
             "content_block_start" => {
@@ -971,6 +985,7 @@ impl ChatSession {
                     if text.trim().is_empty() || text == "No response requested." {
                         continue;
                     }
+                    if self.take_usage_reply(text, id.as_deref(), cx) { continue; }
                     if streamed {
                         self.repaint_streamed(id.as_deref(), text, cx);
                     } else {
@@ -1444,6 +1459,7 @@ impl ChatSession {
         let mut open_group = false;
         let mut turn_start = 0usize;
         let mut last_at = 0u64;
+        let mut last_usage = None;
         let cwd = self.work_cwd();
         let mut bash_runs = self.bash_replay(events).into_iter().peekable();
 
@@ -1523,6 +1539,12 @@ impl ChatSession {
                     let reply_id = event.get("questionReplyId").and_then(Value::as_str);
                     let answered = questions::merge_history_answer(&mut items, &text, reply_id)
                         || questions::merge_history_answer(&mut self.items, &text, reply_id);
+                    if !text.is_empty() { last_usage = None; }
+                    let output = Self::command_items(&raw, false, &mut last_usage, cx);
+                    if !output.is_empty() {
+                        items.extend(output);
+                        open_group = false;
+                    }
                     if !answered && (!text.is_empty() || !images.is_empty()) && !text.starts_with("/usage") {
                         footer(&mut items, turn_start, last_at);
                         let shown = link_paths(&text, cwd.as_deref());
@@ -1543,6 +1565,11 @@ impl ChatSession {
                             "text" => {
                                 let text = block.get("text").and_then(Value::as_str).unwrap_or("");
                                 if text.trim().is_empty() || text == "No response requested." {
+                                    continue;
+                                }
+                                if let Some(output) = Self::replay_usage_items(text, &mut last_usage) {
+                                    items.extend(output);
+                                    open_group = false;
                                     continue;
                                 }
                                 let shown = link_paths(text, cwd.as_deref());
@@ -1581,13 +1608,10 @@ impl ChatSession {
                     }
                     last_at = at;
                 }
-                "local_command" => {
+                "local_command" | "system" => {
                     let text = event.get("content").and_then(Value::as_str).unwrap_or("");
-                    let text = strip_tags(text);
-                    if !text.trim().is_empty() {
-                        items.push(Item::Notice { warn: false, text: text.trim().to_string().into() });
-                        open_group = false;
-                    }
+                    items.extend(Self::command_items(text, true, &mut last_usage, cx));
+                    open_group = false;
                 }
                 _ => {}
             }
@@ -1850,20 +1874,6 @@ fn tag_value(text: &str, tag: &str) -> Option<String> {
     Some(text[start..end].to_string())
 }
 
-fn strip_tags(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_tag = false;
-    for ch in text.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
-    }
-    out
-}
-
 // ---- tool presentation (chat.js TOOL_META, toolSummary, group sentence) -------
 
 pub struct ToolLabel {
@@ -2050,7 +2060,7 @@ pub fn permission_detail(perm: &Permission) -> Option<Detail> {
     let s = |key: &str| perm.input.get(key).and_then(Value::as_str).map(str::to_string);
     match perm.tool_name.as_str() {
         "Bash" => s("command").map(Detail::Command),
-        "ExitPlanMode" => s("plan").map(|p| Detail::Code(truncate(&p, 2000))),
+        "ExitPlanMode" => None,
         "Edit" => match (s("old_string"), s("new_string")) {
             (Some(old), Some(new)) => Some(Detail::Diff(line_diff(&old, &new))),
             _ => None,
