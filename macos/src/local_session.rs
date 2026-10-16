@@ -218,7 +218,7 @@ impl ChatSession {
     pub(super) fn deliver_local(&mut self, message: Message, silent: bool, cx: &mut Context<Self>) {
         let idle = self.local.last_event.map(|at| at.elapsed());
         if stale(self.started, idle, self.tasks.iter().any(|t| t.running)) {
-            self.queued.push_front(message);
+            self.queued.push_front(super::QueuedPrompt::new(message));
             self.local.waiting_start = true;
             self.restart(cx);
             cx.notify();
@@ -340,10 +340,8 @@ impl ChatSession {
         }
         if let Some(message) = self.local.take_retry() {
             self.deliver_local(message, true, cx);
-        } else if !self.local.blocked() {
-            if let Some(message) = self.queued.pop_front() {
-                self.deliver(message, cx);
-            }
+        } else {
+            self.flush_queued(cx);
         }
     }
 

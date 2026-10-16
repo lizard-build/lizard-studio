@@ -153,9 +153,7 @@ impl ChatSession {
     }
 
     pub(super) fn dispatch_queued(&mut self, cx: &mut Context<Self>) {
-        if !self.running && !self.start_pending && self.failure.is_none() && !self.restoring && !self.local.blocked() {
-            if let Some(next) = self.queued.pop_front() { self.deliver(next, cx); }
-        }
+        self.flush_queued(cx);
     }
 
     pub(super) fn watch_session_start(&mut self, cx: &mut Context<Self>) {

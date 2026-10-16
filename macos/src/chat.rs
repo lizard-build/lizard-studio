@@ -33,6 +33,8 @@ pub mod bash;
 #[path = "local_session.rs"]
 mod local_session;
 pub use local_session::{LocalCommand, LocalSession, LoginPhase, local_command};
+mod queued;
+pub use queued::{QueuedEdit, QueuedPrompt};
 
 /// The snapshot cloud chats start their sandboxes from, if the user set one.
 #[derive(Default)]
@@ -191,7 +193,8 @@ pub struct ChatSession {
     ctx_base: u64,
     pub status_word: &'static str,
     pub permissions: Vec<Permission>,
-    pub queued: VecDeque<Message>,
+    pub queued: VecDeque<QueuedPrompt>,
+    pub queued_edit: Option<QueuedEdit>,
     pub restart_pending: bool,
     pub commands: Vec<String>,
     pub bash_mode: bool,
@@ -252,6 +255,7 @@ impl ChatSession {
             status_word: "Deploy on Lizard",
             permissions: Vec::new(),
             queued: VecDeque::new(),
+            queued_edit: None,
             restart_pending: false,
             commands: Vec::new(),
             bash_mode: false,
@@ -362,9 +366,9 @@ impl ChatSession {
 
     // ---- rows ----------------------------------------------------------------
 
-    /// Keep the virtual list's row count equal to items plus the tail row.
+    /// Include waiting prompts in the tail so each bubble gets measured.
     fn sync_rows(&mut self, cx: &mut Context<Self>) {
-        let tail = usize::from(self.tail() != Tail::None);
+        let tail = usize::from(self.tail() != Tail::None) + self.queued.len();
         if tail != self.tail_rows {
             let start = self.items.len();
             let old = self.tail_rows;
@@ -517,9 +521,10 @@ impl ChatSession {
             self.notice(true, "Choose a project folder first.", cx);
             return;
         }
-        if self.running || self.local.blocked() || self.start_pending || self.failure.is_some() || self.restoring {
-            self.queued.push_back(message);
-            cx.notify();
+        if self.running || self.local.blocked() || self.start_pending || self.failure.is_some() || self.restoring || !self.queued.is_empty() {
+            self.queued.push_back(QueuedPrompt::new(message));
+            self.sync_rows(cx);
+            self.flush_queued(cx);
             return;
         }
         // A new message moves on from the one waiting for a credential.
@@ -532,7 +537,7 @@ impl ChatSession {
             return self.deliver_cloud(message, cx);
         }
         if !self.started || self.start_pending {
-            self.queued.push_front(message);
+            self.queued.push_front(QueuedPrompt::new(message));
             self.ensure_started(cx);
             cx.notify();
             return;
@@ -555,7 +560,6 @@ impl ChatSession {
         if !self.running {
             return;
         }
-        self.queued.clear();
         self.stopping = true;
         if self.meta.cloud {
             if let Some(sandbox) = self.meta.sandbox_id.clone() {
@@ -645,7 +649,7 @@ impl ChatSession {
         self.sync_rows(cx);
         if !self.local.blocked() {
             self.local.last_prompt = None;
-            self.dispatch_queued(cx);
+            self.flush_queued(cx);
         }
     }
 
@@ -737,7 +741,9 @@ impl ChatSession {
             "interrupted" => {
                 self.finish_agents(now_ms());
                 self.close_async_questions("Closed", cx);
-                if self.running {
+                // Codex follows this acknowledgement with the turn's result;
+                // draining here would let that result end the next prompt.
+                if self.running && queued::interruption_ends_turn(msg) {
                     self.end_turn(cx);
                 }
                 self.stopping = false;

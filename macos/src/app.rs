@@ -27,6 +27,7 @@ mod local_session;
 mod pickers;
 mod questions;
 mod recovery;
+mod queued;
 mod settings;
 mod tasks;
 mod usage;
@@ -1044,6 +1045,9 @@ impl StudioApp {
             }
             return;
         }
+        if self.queued_key(event, _window, cx) {
+            return;
+        }
         if !mods.modified() && self.picker_key(key, _window, cx) {
             cx.stop_propagation();
             return;
@@ -2036,6 +2040,7 @@ impl StudioApp {
         let (center_recovery, footer_recovery) = if failed_empty { (recovery, None) } else { (None, recovery) };
         let other_answer = self.other_answer.clone();
         let connect = self.connect.clone();
+        let composer_focus = self.composer.read(cx).focus_handle(cx);
         let renderer_entity = entity.clone();
         let image_app = cx.entity().downgrade();
         let list = div().id(list_id).size_full().relative().child(
@@ -2045,7 +2050,7 @@ impl StudioApp {
                     .px(px(12.))
                     .when(ix == 0, |d| d.pt(px(14.)))
                     .when(ix + 1 == renderer_entity.read(cx).row_count(), |d| d.pb(px(14.)))
-                    .child(render_row(&renderer_entity, &other_answer, &connect, &image_app, ix, window, cx))
+                    .child(render_row(&renderer_entity, &other_answer, &connect, &image_app, &composer_focus, ix, window, cx))
                     .into_any_element()
             })
             .size_full(),
@@ -2626,12 +2631,18 @@ fn render_row(
     other_answer: &Entity<InputState>,
     connect: &Entity<connect_card::ConnectUi>,
     image_app: &WeakEntity<StudioApp>,
+    composer_focus: &FocusHandle,
     ix: usize,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let chat = entity.read(cx);
     if ix >= chat.items.len() {
+        let status_rows = usize::from(chat.tail() != Tail::None);
+        let offset = ix - chat.items.len();
+        if offset >= status_rows {
+            return queued::render_queued(entity, offset - status_rows, composer_focus, cx);
+        }
         return match chat.tail() {
             Tail::Permission => {
                 let gap = if chat.items.is_empty() { 0. } else { 14. };
