@@ -101,6 +101,9 @@ struct StoreFile {
     custom_models: Vec<CustomModel>,
     #[serde(default)]
     sound_on_done: bool,
+    /// Snapshot ID cloud chats start from; none means the agent's template.
+    #[serde(default)]
+    cloud_snapshot: Option<String>,
 }
 
 pub struct Store {
@@ -154,6 +157,15 @@ impl Store {
 
     pub fn set_custom_models(&mut self, models: Vec<CustomModel>) {
         self.file.custom_models = models;
+        self.save();
+    }
+
+    pub fn cloud_snapshot(&self) -> Option<String> {
+        self.file.cloud_snapshot.clone()
+    }
+
+    pub fn set_cloud_snapshot(&mut self, snapshot: Option<String>) {
+        self.file.cloud_snapshot = snapshot;
         self.save();
     }
 

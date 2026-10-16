@@ -209,6 +209,7 @@ impl StudioApp {
         }));
         let store = Store::load();
         cx.set_global(chat::CustomModels(store.custom_models().to_vec()));
+        cx.set_global(chat::CloudTemplate(store.cloud_snapshot()));
         let settings = settings::SettingsUi::new(window, cx);
         subscriptions.extend(settings.subscribe(window, cx));
         let connect = cx.new(|cx| connect_card::ConnectUi::new(window, cx));

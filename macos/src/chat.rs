@@ -20,6 +20,12 @@ use crate::cloud::{self, CloudMsg};
 use crate::host::HostLink;
 use crate::store::{Agent, CustomModel, SavedChat, new_chat_id, now_ms};
 
+/// The snapshot cloud chats start their sandboxes from, if the user set one.
+#[derive(Default)]
+pub struct CloudTemplate(pub Option<String>);
+
+impl Global for CloudTemplate {}
+
 /// The user's own OpenAI-compatible models (Settings › Models), shared with
 /// every chat so a ChatGPT session can declare the picked one's provider.
 #[derive(Default)]
@@ -1014,6 +1020,7 @@ impl ChatSession {
                 effort: self.meta.effort.clone(),
                 text,
                 files,
+                snapshot: cx.try_global::<CloudTemplate>().and_then(|t| t.0.clone()),
             },
             tx,
         );

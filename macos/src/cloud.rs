@@ -43,6 +43,8 @@ pub struct PromptJob {
     pub text: String,
     /// Files on this Mac to put in the sandbox and name in the prompt.
     pub files: Vec<PathBuf>,
+    /// A snapshot to start a new sandbox from (Settings › General).
+    pub snapshot: Option<String>,
 }
 
 /// PATH for the CLI: an app opened from Finder gets a bare one, and `lizard`
@@ -116,7 +118,8 @@ fn lizard(bin: &PathBuf) -> Command {
 fn run_json(bin: &PathBuf, args: &[&str]) -> Result<Value, Refusal> {
     let out = lizard(bin).args(args).arg("--json").output().map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(&out.stdout);
-    let json = text.find('{').and_then(|at| serde_json::from_str::<Value>(&text[at..]).ok());
+    // An object, or a list (`workspace list`, `project list`).
+    let json = text.find(['{', '[']).and_then(|at| serde_json::from_str::<Value>(&text[at..]).ok());
     match json {
         // The CLI exits 0 with `{error: …}` on stdout for a refused request.
         Some(json) if out.status.success() && json.get("error").is_none() => Ok(json),
@@ -144,8 +147,70 @@ fn is_gone(error: &str) -> bool {
     e.contains("not found") || e.contains("not running") || e.contains("expired") || e.contains("no such sandbox")
 }
 
-fn create(bin: &PathBuf, agent: &str, tx: &UnboundedSender<CloudMsg>) -> Result<String, Refusal> {
-    let created = run_json(bin, &["sandbox", "create", "-t", agent, "--timeout", LIFETIME_MS])?;
+/// Every sandbox the app makes goes to one project, in the personal workspace
+/// the user owns.
+pub const PROJECT_NAME: &str = "Lizard Desktop";
+
+fn rows(value: Value, key: &str) -> Vec<Value> {
+    match value {
+        Value::Array(rows) => rows,
+        Value::Object(mut map) => map.remove(key).and_then(|v| v.as_array().cloned()).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// The Lizard Desktop project: found, or created on first use. Kept for the
+/// app's life once known.
+pub fn desktop_project(bin: &PathBuf) -> Result<String, Refusal> {
+    static PROJECT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let mut cached = PROJECT.lock().map_err(|_| Refusal::from("project lookup failed"))?;
+    if let Some(id) = cached.clone() {
+        return Ok(id);
+    }
+    let workspaces = rows(run_json(bin, &["workspace", "list"])?, "workspaces");
+    let personal = |owned: bool| {
+        workspaces.iter().find(|w| {
+            w.get("isPersonal").and_then(Value::as_bool) == Some(true)
+                && (!owned || w.get("role").and_then(Value::as_str) == Some("owner"))
+        })
+    };
+    let workspace = personal(true)
+        .or_else(|| personal(false))
+        .and_then(|w| w.get("id").and_then(Value::as_str))
+        .ok_or("Lizard found no personal workspace on this account.")?
+        .to_string();
+    let projects = rows(run_json(bin, &["project", "list"])?, "projects");
+    let found = projects.iter().find(|p| {
+        p.get("workspaceId").and_then(Value::as_str) == Some(workspace.as_str())
+            && p.get("name").and_then(Value::as_str).is_some_and(|n| n.eq_ignore_ascii_case(PROJECT_NAME))
+    });
+    let id = match found.and_then(|p| p.get("id").and_then(Value::as_str)) {
+        Some(id) => id.to_string(),
+        None => {
+            let created = run_json(bin, &["project", "create", PROJECT_NAME, "-w", &workspace])?;
+            created.get("id").and_then(Value::as_str).ok_or("lizard created no project id")?.to_string()
+        }
+    };
+    *cached = Some(id.clone());
+    Ok(id)
+}
+
+fn create(bin: &PathBuf, agent: &str, snapshot: Option<&str>, tx: &UnboundedSender<CloudMsg>) -> Result<String, Refusal> {
+    let project = desktop_project(bin)?;
+    let mut created = None;
+    // The user's own template (a snapshot with both agents), else the agent's.
+    if let Some(snapshot) = snapshot {
+        match run_json(bin, &["sandbox", "create", "--snapshot", snapshot, "-p", &project, "--timeout", LIFETIME_MS]) {
+            Ok(value) => created = Some(value),
+            Err(e) => {
+                let _ = tx.unbounded_send(CloudMsg::Note(format!("Template {snapshot} didn't start ({}); using the {agent} template.", e.message)));
+            }
+        }
+    }
+    let created = match created {
+        Some(value) => value,
+        None => run_json(bin, &["sandbox", "create", "-t", agent, "-p", &project, "--timeout", LIFETIME_MS])?,
+    };
     let id = created
         .get("id")
         .or_else(|| created.get("sandboxId"))
@@ -188,7 +253,7 @@ pub fn run_prompt(job: PromptJob, tx: UnboundedSender<CloudMsg>) {
         }
         let id = match sandbox {
             Some(id) => id,
-            None => match create(&bin, job.agent, &tx) {
+            None => match create(&bin, job.agent, job.snapshot.as_deref(), &tx) {
                 Ok(id) => id,
                 Err(error) => return done(Some(error)),
             },

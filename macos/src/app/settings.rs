@@ -210,6 +210,8 @@ pub(super) struct SettingsUi {
     remove_armed: Option<String>,
     /// Name, base URL, model id, API key, context window.
     fields: [Entity<InputState>; 5],
+    /// The snapshot cloud chats start from (General › Cloud chats).
+    template: Entity<InputState>,
     focus: FocusHandle,
 }
 
@@ -220,6 +222,7 @@ impl SettingsUi {
         let field = |placeholder: &'static str, masked: bool, window: &mut Window, cx: &mut Context<StudioApp>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).masked(masked))
         };
+        let template = cx.new(|cx| InputState::new(window, cx).placeholder("The agent's own template"));
         let fields = [
             field("GPU box", false, window, cx),
             field("http://1.2.3.4:8080/v1", false, window, cx),
@@ -244,6 +247,7 @@ impl SettingsUi {
             pending_fields: None,
             remove_armed: None,
             fields,
+            template,
             focus: cx.focus_handle(),
         }
     }
@@ -266,6 +270,18 @@ impl SettingsUi {
         })];
         subs.push(cx.subscribe(&self.filter, |_, _, event: &InputEvent, cx| {
             if let InputEvent::Change = event {
+                cx.notify();
+            }
+        }));
+        // A snapshot ID, saved as typed; empty goes back to the agent's template.
+        subs.push(cx.subscribe(&self.template, |this, input, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                let value = input.read(cx).value().trim().to_string();
+                let snapshot = (!value.is_empty()).then_some(value);
+                if snapshot != this.store.cloud_snapshot() {
+                    this.store.set_cloud_snapshot(snapshot.clone());
+                    cx.set_global(crate::chat::CloudTemplate(snapshot));
+                }
                 cx.notify();
             }
         }));
@@ -302,6 +318,9 @@ impl StudioApp {
         self.menu = None;
         let filter = s.filter.clone();
         filter.update(cx, |f, cx| f.set_value("", window, cx));
+        let template = s.template.clone();
+        let snapshot = self.store.cloud_snapshot().unwrap_or_default();
+        template.update(cx, |t, cx| t.set_value(snapshot, window, cx));
         window.focus(&self.settings.focus, cx);
         cx.notify();
     }
@@ -878,6 +897,49 @@ impl StudioApp {
                     .child(kv_row("Host version", self.host_state.version.map(|v| v.to_string()).unwrap_or_else(|| "—".into())))
                     .child(kv_row("Required version", MIN_HOST_VERSION.to_string())),
             )
+            .child({
+                let snapshot = self.store.cloud_snapshot();
+                let looks_wrong = snapshot.as_deref().is_some_and(|s| !s.starts_with("snap-"));
+                section("Cloud chats")
+                    .child(kv_row("Project", format!("{}, in your personal workspace", crate::cloud::PROJECT_NAME)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(12.))
+                            .py(px(7.))
+                            .border_t_1()
+                            .border_color(white_a(0.08))
+                            .text_size(px(12.))
+                            .child(div().flex_none().text_color(hex(TEXT_SECONDARY)).child("Template"))
+                            .child(
+                                div()
+                                    .w(px(230.))
+                                    .h(px(28.))
+                                    .px(px(6.))
+                                    .flex()
+                                    .items_center()
+                                    .bg(hex(BG_PRIMARY))
+                                    .border_1()
+                                    .border_color(if looks_wrong { rgba_hex(RED, 0.6) } else { hex(BORDER) })
+                                    .rounded(px(7.))
+                                    .when(snapshot.is_some(), |d| d.font_family("Lizard Mono"))
+                                    .child(Input::new(&self.settings.template).appearance(false).xsmall().text_size(px(12.)).h(px(16.))),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .line_height(relative(1.45))
+                            .text_color(if looks_wrong { hex(RED_SOFT) } else { hex(TEXT_TERTIARY) })
+                            .child(if looks_wrong {
+                                "A template is a snapshot ID, like snap-…".to_string()
+                            } else {
+                                "A snapshot ID (snap-…) new cloud sandboxes start from; lizard sandbox snapshots --mine lists yours. Empty uses the claude or codex template.".to_string()
+                            }),
+                    )
+            })
             .child(
                 section("Community").mb_0().child(
                     div()
