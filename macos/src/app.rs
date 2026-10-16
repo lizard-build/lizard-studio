@@ -30,6 +30,7 @@ mod recovery;
 mod queued;
 mod settings;
 mod tasks;
+mod slash;
 mod usage;
 
 use crate::chat::{
@@ -40,7 +41,7 @@ use crate::host::{HostConnection, HostEvent, HostLink, host_installed};
 use crate::pop::{self, BoundsMap};
 use crate::store::{Agent, Store, now_ms};
 use crate::theme::*;
-use crate::ui::{self, MenuEntry, caret, lizard, ph, pulse};
+use crate::ui::{self, caret, lizard, ph, pulse};
 use crate::{NewChat, StopTurn};
 
 /// Live agent checks keep onboarding from replaying the daemon’s stale cache.
@@ -152,6 +153,7 @@ pub struct StudioApp {
     viewport: Size<Pixels>,
     effort: pickers::EffortUi,
     settings: settings::SettingsUi,
+    slash: slash::SlashUi,
     /// Connecting a cloud agent to the Lizard account (connect_card.rs).
     connect: Entity<connect_card::ConnectUi>,
     cloud: CloudState,
@@ -196,6 +198,7 @@ impl StudioApp {
         let other_answer = cx.new(|cx| InputState::new(window, cx).placeholder("Type your answer…"));
 
         let mut subscriptions = Vec::new();
+        subscriptions.push(cx.on_blur(&composer.read(cx).focus_handle(cx), window, Self::slash_blur));
         subscriptions.push(cx.subscribe_in(&composer, window, |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::PressEnter { shift: false, .. } => this.submit(window, cx),
             InputEvent::Change => this.composer_changed(window, cx),
@@ -283,6 +286,7 @@ impl StudioApp {
             viewport: window.viewport_size(),
             effort: pickers::EffortUi::default(),
             settings,
+            slash: slash::SlashUi::default(),
             connect,
             cloud: CloudState::default(),
             tasks_ui: tasks::TasksUi::default(),
@@ -866,6 +870,7 @@ impl StudioApp {
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.submit_bash(window, cx) { return; }
         let text = self.composer.read(cx).value().to_string();
+        if self.clear_command(&text, window, cx) { return; }
         if text.trim().is_empty() && self.attachments.is_empty() {
             return;
         }
@@ -1046,6 +1051,10 @@ impl StudioApp {
             return;
         }
         if self.queued_key(event, _window, cx) {
+            return;
+        }
+        if self.slash_key(event, _window, cx) {
+            cx.stop_propagation();
             return;
         }
         if !mods.modified() && self.picker_key(key, _window, cx) {
@@ -2145,7 +2154,7 @@ impl StudioApp {
             let c = entity.read(cx);
             (c.work_cwd(), c.ctx_window, c.task_counts(), c.meta.cloud)
         };
-        let (agent, blank, running, cwd, mode, model, effort, ctx_tokens, commands) = {
+        let (agent, blank, running, cwd, mode, model, effort, ctx_tokens) = {
             let c = entity.read(cx);
             (
                 c.meta.agent,
@@ -2156,7 +2165,6 @@ impl StudioApp {
                 c.meta.model.clone(),
                 c.meta.effort.clone(),
                 c.ctx_tokens,
-                c.commands.clone(),
             )
         };
         let p = self.pickers(cx);
@@ -2164,7 +2172,6 @@ impl StudioApp {
         let diff_open = self.diff_open(cx);
         let diff_visible = self.diff_visible(cx);
         let menu = self.menu.clone();
-        let composer_text = self.composer.read(cx).value().to_string();
         let _ = (&model, &effort);
         // ChatGPT gets its window from the agent; without one there is no ring.
         let limit = match agent {
@@ -2187,35 +2194,8 @@ impl StudioApp {
             Some(Menu::Branch) if !cloud => self.render_branch_menu(blank, cx),
             _ => None,
         };
-        // Slash commands while the first word is being typed.
-        let slash: Vec<String> = if !bash_mode && composer_text.starts_with('/') && !composer_text.contains(char::is_whitespace) {
-            let prefix = composer_text.trim_start_matches('/').to_lowercase();
-            commands.iter().filter(|c| c.to_lowercase().starts_with(&prefix)).take(8).cloned().collect()
-        } else {
-            Vec::new()
-        };
-        let slash_menu = (!slash.is_empty()).then(|| {
-            let entries = slash
-                .into_iter()
-                .map(|name| {
-                    let composer = self.composer.clone();
-                    MenuEntry {
-                        label: format!("/{name}").into(),
-                        hint: None,
-                        current: false,
-                        accent: None,
-                        on_click: Box::new(move |window, cx| {
-                            let value = format!("/{name} ");
-                            composer.update(cx, |s, cx| {
-                                s.set_value(value, window, cx);
-                                s.focus(window, cx);
-                            });
-                        }),
-                    }
-                })
-                .collect();
-            ui::popup(Anchor::BottomLeft, point(px(0.), px(-8.)), ui::menu_box("slash-menu", 280., entries))
-        });
+        let slash_menu = self.render_slash_menu(cx);
+        let slash_ghost = self.render_slash_ghost();
 
         let chip = |id: &'static str| {
             div()
@@ -2445,21 +2425,23 @@ impl StudioApp {
                     .pt(px(8.))
                     .px(px(8.))
                     .pb(px(6.))
-                    .children(slash_menu.map(|m| div().absolute().top_0().left_0().child(m)))
+                    .children(slash_menu)
                     // Files dropped on the box attach, as in the panel.
                     .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(hex(EMERALD)))
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach_paths(paths.paths().to_vec(), cx)))
                     .children(attachments)
                     .child(
                         div().relative().px(px(2.)).pt(px(4.)).pb(px(2.)).when(bash_mode, |d| d.pl(px(56.))).children(bash_pill).child(
-                            Textarea::new(&self.composer)
-                                .appearance(false)
-                                .bordered(false)
-                                .xsmall()
-                                .text_size(px(14.))
-                                .line_height(relative(1.45))
-                                // An image or files copied in Finder attach; text pastes as text.
-                                .on_paste(move |item, _, cx| paste_app.update(cx, |this, cx| this.attach_clipboard(item, cx)).unwrap_or(false)),
+                            div().relative().children(slash_ghost).child(
+                                Textarea::new(&self.composer)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .xsmall()
+                                    .text_size(px(14.))
+                                    .line_height(relative(1.45))
+                                    // An image or files copied in Finder attach; text pastes as text.
+                                    .on_paste(move |item, _, cx| paste_app.update(cx, |this, cx| this.attach_clipboard(item, cx)).unwrap_or(false)),
+                            ),
                         ),
                     )
                     .child(

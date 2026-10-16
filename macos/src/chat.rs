@@ -35,6 +35,8 @@ mod local_session;
 pub use local_session::{LocalCommand, LocalSession, LoginPhase, local_command};
 mod queued;
 pub use queued::{QueuedEdit, QueuedPrompt};
+mod slash;
+pub use slash::{SlashCommand, parse_commands};
 
 /// The snapshot cloud chats start their sandboxes from, if the user set one.
 #[derive(Default)]
@@ -196,12 +198,14 @@ pub struct ChatSession {
     pub queued: VecDeque<QueuedPrompt>,
     pub queued_edit: Option<QueuedEdit>,
     pub restart_pending: bool,
-    pub commands: Vec<String>,
+    pub commands: Vec<SlashCommand>,
     pub bash_mode: bool,
     pub need_connect: Option<NeedConnect>,
     pub local: LocalSession,
     /// The last message a cloud turn carried, for a retry after connecting.
     last_cloud: Option<(String, Vec<PathBuf>)>,
+    /// Ignore cloud output still draining after /clear.
+    session_generation: u64,
     host: Rc<HostLink>,
     history: History,
     streamed_msg_ids: HashSet<String>,
@@ -262,6 +266,7 @@ impl ChatSession {
             need_connect: None,
             local: LocalSession::default(),
             last_cloud: None,
+            session_generation: 0,
             host,
             history: History::default(),
             streamed_msg_ids: HashSet::new(),
@@ -701,24 +706,11 @@ impl ChatSession {
                 cx.notify();
             }
             "commands" => {
-                let mut list: Vec<String> = Vec::new();
-                for key in ["list", "skills"] {
-                    if let Some(items) = msg.get(key).and_then(Value::as_array) {
-                        for item in items {
-                            let name = item
-                                .as_str()
-                                .map(str::to_string)
-                                .or_else(|| item.get("name").and_then(Value::as_str).map(str::to_string));
-                            if let Some(name) = name {
-                                let name = name.trim_start_matches('/').to_string();
-                                if !list.contains(&name) {
-                                    list.push(name);
-                                }
-                            }
-                        }
-                    }
-                }
-                self.commands = list;
+                self.commands = parse_commands(
+                    ["list", "skills"].into_iter()
+                        .filter_map(|key| msg.get(key).and_then(Value::as_array)).flatten(),
+                    &self.commands,
+                );
                 cx.notify();
             }
             "async_question" => self.show_async_question(msg, cx),
@@ -837,7 +829,7 @@ impl ChatSession {
                     }
                     self.apply_init_settings(data, cx);
                     if let Some(list) = data.get("slash_commands").and_then(Value::as_array) {
-                        self.commands = list.iter().filter_map(Value::as_str).map(str::to_string).collect();
+                        self.commands = parse_commands(list, &self.commands);
                     }
                     if let Some(cwd) = data.get("cwd").and_then(Value::as_str) {
                         let cwd = cwd.trim_end_matches('/').to_string();
@@ -1107,10 +1099,15 @@ impl ChatSession {
             },
             tx,
         );
+        let generation = self.session_generation;
         cx.spawn(async move |this, cx| {
             use futures::StreamExt as _;
             while let Some(msg) = rx.next().await {
-                if this.update(cx, |chat, cx| chat.on_cloud_msg(msg, cx)).is_err() {
+                if !this.update(cx, |chat, cx| {
+                    if chat.session_generation != generation { return false; }
+                    chat.on_cloud_msg(msg, cx);
+                    true
+                }).unwrap_or(false) {
                     break;
                 }
             }
@@ -1232,7 +1229,7 @@ impl ChatSession {
 
     /// Rebuild a cloud chat from its local log.
     fn replay_cloud(&mut self, cx: &mut Context<Self>) {
-        let entries = cloud::read_log(&self.meta.id);
+        let entries = slash::cloud_log_since_clear(cloud::read_log(&self.meta.id));
         let mut turn_start = self.items.len();
         let mut last_at = 0;
         for entry in entries {
