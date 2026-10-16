@@ -64,6 +64,11 @@ pub struct SavedChat {
     pub sandbox_id: Option<String>,
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// Local shell runs are absent from the agent's transcript.
+    #[serde(default)]
+    pub bash_history: Vec<crate::chat::bash::BashEntry>,
+    #[serde(default)]
+    pub bash_pending: Vec<crate::chat::bash::BashEntry>,
 }
 
 /// An OpenAI-compatible endpoint for ChatGPT chats (Settings › Models). The

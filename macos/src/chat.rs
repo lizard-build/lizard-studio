@@ -27,6 +27,8 @@ use crate::cloud::{self, CloudMsg};
 use crate::host::HostLink;
 use crate::store::{Agent, CustomModel, SavedChat, new_chat_id, now_ms};
 
+pub mod bash;
+
 /// The snapshot cloud chats start their sandboxes from, if the user set one.
 #[derive(Default)]
 pub struct CloudTemplate(pub Option<String>);
@@ -97,6 +99,7 @@ pub enum Item {
     User { view: Entity<TextViewState>, images: Vec<std::sync::Arc<Image>> },
     Assistant { msg_id: Option<String>, text: String, view: Entity<TextViewState>, footer: Option<Footer> },
     Tools(ToolGroup),
+    Bash(bash::BashRun),
     Notice { warn: bool, text: SharedString },
 }
 
@@ -166,6 +169,7 @@ pub struct ChatSession {
     pub queued: VecDeque<Message>,
     pub restart_pending: bool,
     pub commands: Vec<String>,
+    pub bash_mode: bool,
     pub need_connect: Option<NeedConnect>,
     /// The last message a cloud turn carried, for a retry after connecting.
     last_cloud: Option<(String, Vec<PathBuf>)>,
@@ -216,6 +220,7 @@ impl ChatSession {
             queued: VecDeque::new(),
             restart_pending: false,
             commands: Vec::new(),
+            bash_mode: false,
             need_connect: None,
             last_cloud: None,
             host,
@@ -251,6 +256,8 @@ impl ChatSession {
             cloud: false,
             sandbox_id: None,
             conversation_id: None,
+            bash_history: Vec::new(),
+            bash_pending: Vec::new(),
         };
         Self::new(meta, host, cx)
     }
@@ -260,7 +267,7 @@ impl ChatSession {
     }
 
     pub fn is_blank(&self) -> bool {
-        self.items.is_empty() && self.meta.session_id.is_none()
+        self.items.is_empty() && self.meta.session_id.is_none() && self.meta.bash_history.is_empty()
     }
 
 
@@ -498,11 +505,13 @@ impl ChatSession {
             }
         }
         self.user_item(&text, images::sent_images(&images), cx);
-        let wire = if self.context_sent || text.starts_with('/') {
+        let bash_context = if text.starts_with('/') { String::new() } else { self.take_bash_context() };
+        let wire = if (self.context_sent && bash_context.is_empty()) || text.starts_with('/') {
             text
         } else {
+            let app_context = if self.context_sent { "" } else { APP_CONTEXT };
             self.context_sent = true;
-            format!("{CTX_START}{APP_CONTEXT}{CTX_END}\n\n{text}")
+            format!("{CTX_START}{app_context}\n\n{bash_context}{CTX_END}\n\n{text}")
         };
         self.send(json!({ "type": "prompt", "text": wire, "images": images }));
         self.begin_turn();
@@ -536,6 +545,11 @@ impl ChatSession {
     }
 
     pub fn close(&mut self) {
+        for item in &self.items {
+            if let Item::Bash(run) = item {
+                if run.running { self.stop_bash(&run.entry.id); }
+            }
+        }
         if self.started {
             self.send(json!({ "type": "close" }));
             self.started = false;
@@ -630,6 +644,7 @@ impl ChatSession {
     pub fn on_host_message(&mut self, msg: &Value, cx: &mut Context<Self>) {
         let kind = msg.get("type").and_then(Value::as_str).unwrap_or("");
         match kind {
+            "bashStart" | "bashOut" | "bashExit" => self.on_bash_message(msg, cx),
             "event" => {
                 if let Some(data) = msg.get("data") {
                     self.on_event(data, cx);
@@ -1320,6 +1335,9 @@ impl ChatSession {
         if self.meta.cloud {
             return self.replay_cloud(cx);
         }
+        if self.meta.session_id.is_none() {
+            self.restore_bash(cx);
+        }
         self.request_history_page(None, cx);
     }
 
@@ -1392,6 +1410,7 @@ impl ChatSession {
         self.history.request_id = None;
         self.history.next_cursor = msg.get("nextCursor").filter(|c| !c.is_null()).cloned();
         if msg.get("missing").and_then(Value::as_bool).unwrap_or(false) {
+            self.restore_bash(cx);
             cx.notify();
             return;
         }
@@ -1433,6 +1452,7 @@ impl ChatSession {
         let mut turn_start = 0usize;
         let mut last_at = 0u64;
         let cwd = self.work_cwd();
+        let mut bash_runs = self.bash_replay(events).into_iter().peekable();
 
         fn footer(items: &mut [Item], from: usize, at: u64) {
             let mut copy = Vec::new();
@@ -1453,6 +1473,9 @@ impl ChatSession {
         for event in events {
             let message = event.get("message");
             let at = event.get("timestamp").and_then(Value::as_str).and_then(parse_iso_ms).unwrap_or(last_at);
+            if bash::drain_until(&mut bash_runs, at, &mut items) {
+                open_group = false;
+            }
             if let Some(parent) = event.get("parent_tool_use_id").and_then(Value::as_str) {
                 self.note_agent_activity(parent, event);
                 continue;
@@ -1570,6 +1593,7 @@ impl ChatSession {
         if matches!(items.last(), Some(Item::Assistant { .. })) {
             footer(&mut items, turn_start, last_at);
         }
+        bash::drain_until(&mut bash_runs, u64::MAX, &mut items);
         items
     }
 }

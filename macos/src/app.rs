@@ -17,6 +17,7 @@ use gpui_kit::*;
 use serde_json::{Value, json};
 
 mod attach;
+mod bash;
 mod connect_card;
 mod branches;
 mod drafts;
@@ -190,7 +191,7 @@ impl StudioApp {
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe_in(&composer, window, |this, _, event: &InputEvent, window, cx| match event {
             InputEvent::PressEnter { shift: false, .. } => this.submit(window, cx),
-            InputEvent::Change => cx.notify(),
+            InputEvent::Change => this.composer_changed(window, cx),
             _ => {}
         }));
         subscriptions.push(cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
@@ -437,6 +438,9 @@ impl StudioApp {
                     _ => Agent::Claude,
                 };
                 for chat in self.chats.clone() {
+                    if agent == Agent::Claude {
+                        chat.update(cx, |chat, cx| chat.bash_host_exit(cx));
+                    }
                     if chat.read(cx).meta.agent == agent {
                         chat.update(cx, |chat, cx| chat.on_agent_exit(cx));
                     }
@@ -737,6 +741,7 @@ impl StudioApp {
         self.composer.update(cx, |state, cx| {
             state.focus(window, cx);
         });
+        self.sync_bash_mode(window, cx);
         cx.notify();
     }
 
@@ -840,6 +845,7 @@ impl StudioApp {
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.submit_bash(window, cx) { return; }
         let text = self.composer.read(cx).value().to_string();
         if text.trim().is_empty() && self.attachments.is_empty() {
             return;
@@ -1016,6 +1022,10 @@ impl StudioApp {
                 self.close_settings(_window, cx);
                 cx.stop_propagation();
             }
+            return;
+        }
+        if self.bash_key(key, _window, cx) {
+            cx.stop_propagation();
             return;
         }
         if self.menu == Some(Menu::Effort) && !mods.modified() && self.effort_key(key, cx) {
@@ -1234,6 +1244,8 @@ impl StudioApp {
             cloud: false,
             sandbox_id: None,
             conversation_id: None,
+            bash_history: Vec::new(),
+            bash_pending: Vec::new(),
         };
         let chat = cx.new(|cx| ChatSession::new(meta, host, cx));
         self.watch_chat(&chat, cx);
@@ -2165,6 +2177,8 @@ impl StudioApp {
     }
 
     fn render_composer(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let bash_mode = self.bash_mode(cx);
+        let bash_pill = self.bash_pill(cx);
         let entity = self.chats[self.active].clone();
         let (work_cwd, ctx_window, (tasks_running, tasks_total), cloud) = {
             let c = entity.read(cx);
@@ -2213,7 +2227,7 @@ impl StudioApp {
             _ => None,
         };
         // Slash commands while the first word is being typed.
-        let slash: Vec<String> = if composer_text.starts_with('/') && !composer_text.contains(char::is_whitespace) {
+        let slash: Vec<String> = if !bash_mode && composer_text.starts_with('/') && !composer_text.contains(char::is_whitespace) {
             let prefix = composer_text.trim_start_matches('/').to_lowercase();
             commands.iter().filter(|c| c.to_lowercase().starts_with(&prefix)).take(8).cloned().collect()
         } else {
@@ -2464,6 +2478,7 @@ impl StudioApp {
                     .bg(hex(BG_SECONDARY))
                     .border_1()
                     .border_color(hex(BORDER))
+                    .when(bash_mode, |d| d.border_color(hex(EMERALD)))
                     .rounded(px(14.))
                     .children(popover)
                     .pt(px(8.))
@@ -2475,7 +2490,7 @@ impl StudioApp {
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach_paths(paths.paths().to_vec(), cx)))
                     .children(attachments)
                     .child(
-                        div().px(px(2.)).pt(px(4.)).pb(px(2.)).child(
+                        div().relative().px(px(2.)).pt(px(4.)).pb(px(2.)).when(bash_mode, |d| d.pl(px(56.))).children(bash_pill).child(
                             Textarea::new(&self.composer)
                                 .appearance(false)
                                 .bordered(false)
@@ -2589,13 +2604,13 @@ impl StudioApp {
                                     .hover(|s| s.bg(hex(0xe6e6e6)))
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        if running {
+                                        if running && !bash_mode {
                                             this.stop(&StopTurn, window, cx);
                                         } else {
                                             this.submit(window, cx);
                                         }
                                     }))
-                                    .child(if running { ph("stop", 14., hex(0x0a0a0a)) } else { ph("send", 16., hex(0x0a0a0a)) }),
+                                    .child(if running && !bash_mode { ph("stop", 14., hex(0x0a0a0a)) } else { ph("send", 16., hex(0x0a0a0a)) }),
                             ),
                     ),
             )
@@ -2681,6 +2696,7 @@ fn render_row(
     let gap = row_gap(&chat.items, ix);
     let cwd = chat.meta.cwd.clone();
     let body: AnyElement = match &chat.items[ix] {
+        Item::Bash(run) => bash::render_bash(entity, run, ix),
         Item::User { view, images } => div()
             .w_full()
             .px(px(12.))
