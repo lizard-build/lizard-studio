@@ -20,6 +20,7 @@ mod attach;
 mod connect_card;
 mod branches;
 mod drafts;
+mod git_diff;
 mod images;
 mod pickers;
 mod settings;
@@ -128,6 +129,7 @@ pub struct StudioApp {
     host_state: HostState,
     catalogs: HashMap<Agent, Catalog>,
     git: HashMap<String, GitInfo>,
+    diffs: git_diff::Drawers,
     attachments: Vec<attach::Attachment>,
     attachment_seq: u64,
     drafts: drafts::Drafts,
@@ -251,6 +253,7 @@ impl StudioApp {
             host_state: HostState::default(),
             catalogs: HashMap::new(),
             git: HashMap::new(),
+            diffs: HashMap::new(),
             attachments: Vec::new(),
             attachment_seq: 0,
             drafts: drafts::Drafts::default(),
@@ -411,6 +414,7 @@ impl StudioApp {
                 cx.notify();
             }
             "configRead" | "configWrite" => self.on_config_reply(&msg, cx),
+            "gitDiff" => self.on_git_diff(&msg, cx),
             "planUsage" if msg.get("agent").and_then(Value::as_str) == Some("codex") => self.on_plan_usage(&msg, cx),
             "daemonSnapshot" => {
                 self.host_state.restoring = true;
@@ -979,6 +983,7 @@ impl StudioApp {
     }
 
     fn refresh_git(&mut self, cwd: String, cx: &mut Context<Self>) {
+        self.refresh_diff_drawers(&cwd, cx);
         let task = cx.background_executor().spawn({
             let cwd = cwd.clone();
             async move { git_info(&cwd) }
@@ -1031,6 +1036,11 @@ impl StudioApp {
         if key == "escape" && self.menu.is_some() {
             self.menu = None;
             cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+        if key == "escape" && self.diff_open(cx) {
+            self.close_diff(cx);
             cx.stop_propagation();
             return;
         }
@@ -2091,6 +2101,7 @@ impl StudioApp {
                     linear_color_stop(rgba_hex(BG_PRIMARY, 0.), 1.),
                 ))
         };
+        let diff_drawer = self.render_diff_drawer(cx);
 
         div()
             .flex_1()
@@ -2147,7 +2158,7 @@ impl StudioApp {
                         )
                     })
                     .when(self.tasks_open(cx), |d| d.child(self.render_tasks_drawer(cx)))
-
+                    .children(diff_drawer)
             )
             .child(self.render_composer(cx))
             .into_any_element()
@@ -2175,6 +2186,8 @@ impl StudioApp {
         };
         let p = self.pickers(cx);
         let git = work_cwd.as_ref().and_then(|cwd| self.git.get(cwd).cloned()).unwrap_or_default();
+        let diff_open = self.diff_open(cx);
+        let diff_visible = self.diff_visible(cx);
         let menu = self.menu.clone();
         let composer_text = self.composer.read(cx).value().to_string();
         let _ = (&model, &effort);
@@ -2246,7 +2259,7 @@ impl StudioApp {
                 .hover(|s| s.bg(white_a(0.09)).text_color(hex(TEXT_PRIMARY)))
         };
         let needs_folder = cwd.is_none();
-        let setup = blank.then(|| {
+        let setup = (blank && !diff_visible).then(|| {
             div()
                 .relative()
                 .flex()
@@ -2323,7 +2336,7 @@ impl StudioApp {
         // The git bar above the box (panel.css .git-bar): shown once the folder
         // has changes not on the default branch, or a background task exists.
         let has_changes = git.is_repo && git.files > 0;
-        let flap = (!blank && (has_changes || tasks_total > 0)).then(|| {
+        let flap = (!blank && (has_changes || tasks_total > 0 || diff_visible)).then(|| {
             let show_branch = git.is_repo && git.branch.is_some();
             div()
                 .flex()
@@ -2335,7 +2348,7 @@ impl StudioApp {
                 .mb(px(-14.))
                 .rounded_tl(px(14.))
                 .rounded_tr(px(14.))
-                .when(self.tasks_open(cx), |d| d.rounded_tl(px(0.)).rounded_tr(px(0.)))
+                .when(self.tasks_open(cx) || diff_open, |d| d.rounded_tl(px(0.)).rounded_tr(px(0.)))
                 .bg(hex(BG_SECONDARY))
                 .relative()
                 .child(pop::track(&self.bounds, "git-flap"))
@@ -2362,6 +2375,7 @@ impl StudioApp {
                 .when(has_changes, |d| {
                     d.child(
                         div()
+                            .id("git-diff-badge")
                             .flex()
                             .gap(px(6.))
                             .px(px(10.))
@@ -2371,6 +2385,9 @@ impl StudioApp {
                             .font_family("Lizard Mono")
                             .text_size(px(12.))
                             .font_weight(FontWeight::SEMIBOLD)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(white_a(0.09)))
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_diff(cx)))
                             .child(div().text_color(hex(EMERALD)).child(format!("+{}", git.added)))
                             .child(div().text_color(hex(RED)).child(format!("-{}", git.removed))),
                     )
