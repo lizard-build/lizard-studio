@@ -16,6 +16,9 @@ use gpui_kit::component::text::TextViewState;
 use gpui_kit::*;
 use serde_json::{Value, json};
 
+#[path = "chat_images.rs"]
+mod images;
+
 use crate::cloud::{self, CloudMsg};
 use crate::host::HostLink;
 use crate::store::{Agent, CustomModel, SavedChat, new_chat_id, now_ms};
@@ -87,7 +90,7 @@ pub struct Footer {
 }
 
 pub enum Item {
-    User { view: Entity<TextViewState> },
+    User { view: Entity<TextViewState>, images: Vec<std::sync::Arc<Image>> },
     Assistant { msg_id: Option<String>, text: String, view: Entity<TextViewState>, footer: Option<Footer> },
     Tools(ToolGroup),
     Notice { warn: bool, text: SharedString },
@@ -354,10 +357,10 @@ impl ChatSession {
         self.push(Item::Assistant { msg_id, text: text.to_string(), view, footer: None }, cx)
     }
 
-    fn user_item(&mut self, text: &str, cx: &mut Context<Self>) {
+    fn user_item(&mut self, text: &str, images: Vec<std::sync::Arc<Image>>, cx: &mut Context<Self>) {
         let shown = link_paths(text, self.work_cwd().as_deref());
         let view = cx.new(|cx| TextViewState::markdown(&shown, cx).selectable(true));
-        self.push(Item::User { view }, cx);
+        self.push(Item::User { view, images }, cx);
     }
 
     /// A tool call joins the open group, or starts one.
@@ -490,8 +493,7 @@ impl ChatSession {
                 self.meta.title = title.chars().take(40).collect();
             }
         }
-        let shown = if images.is_empty() { text.clone() } else { format!("{text}\n\n_{} image(s) attached_", images.len()) };
-        self.user_item(&shown, cx);
+        self.user_item(&text, images::sent_images(&images), cx);
         let wire = if self.context_sent || text.starts_with('/') {
             text
         } else {
@@ -685,6 +687,13 @@ impl ChatSession {
                     self.end_turn(cx);
                 }
                 cx.notify();
+            }
+            "gitBranches" => {
+                if msg.get("checkedOut").and_then(Value::as_bool) == Some(true) {
+                    if let Some(branch) = msg.get("current").and_then(Value::as_str).filter(|b| !b.is_empty()) {
+                        self.notice(false, format!("Switched to branch {branch}"), cx);
+                    }
+                }
             }
             "error" => {
                 let text = msg.get("message").and_then(Value::as_str).unwrap_or("Something went wrong.");
@@ -968,7 +977,7 @@ impl ChatSession {
     // in a local log, since the CLI can't read a finished conversation back.
 
     fn deliver_cloud(&mut self, message: Message, cx: &mut Context<Self>) {
-        let Message { text, files, .. } = message;
+        let Message { text, images, files } = message;
         if self.meta.title == DEFAULT_TITLE && !self.meta.title_edited {
             let title: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
             if !title.is_empty() {
@@ -979,8 +988,8 @@ impl ChatSession {
         // The bubble names the files; the sandbox paths are added on upload.
         let names: Vec<String> = files.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).collect();
         let shown = join_note(&text, &files_note(&names));
-        self.user_item(&shown, cx);
-        cloud::append_log(&self.meta.id, &json!({ "kind": "user", "text": shown, "at": now_ms() }));
+        self.user_item(&shown, images::sent_images(&images), cx);
+        cloud::append_log(&self.meta.id, &json!({ "kind": "user", "text": shown, "images": images, "at": now_ms() }));
         self.run_cloud(text, files, cx);
     }
 
@@ -1156,7 +1165,8 @@ impl ChatSession {
                 "user" => {
                     self.place_footer(turn_start, last_at);
                     let text = entry.get("text").and_then(Value::as_str).unwrap_or("").to_string();
-                    self.user_item(&text, cx);
+                    let images = entry.get("images").and_then(Value::as_array).map(|images| images::sent_images(images)).unwrap_or_default();
+                    self.user_item(&text, images, cx);
                     turn_start = self.items.len();
                     last_at = entry.get("at").and_then(Value::as_u64).unwrap_or(last_at);
                 }
@@ -1437,13 +1447,18 @@ impl ChatSession {
                 "user" => {
                     let content = message.and_then(|m| m.get("content"));
                     let mut texts = Vec::new();
+                    let mut images = images::replay_attachments(event);
                     match content {
                         Some(Value::String(s)) => texts.push(s.clone()),
                         Some(Value::Array(blocks)) => {
                             for block in blocks {
                                 match block.get("type").and_then(Value::as_str).unwrap_or("") {
                                     "text" => texts.push(block.get("text").and_then(Value::as_str).unwrap_or("").to_string()),
-                                    "image" => texts.push("_image attached_".into()),
+                                    "image" => {
+                                        if let Some(image) = block.get("source").and_then(images::user_image) {
+                                            images.push(image);
+                                        }
+                                    }
                                     "tool_result" => {
                                         let id = block.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
                                         if let Some(&(ix, t)) = tools.get(id) {
@@ -1467,11 +1482,11 @@ impl ChatSession {
                     let raw = texts.join("\n");
                     scan_task_notice(&mut self.tasks, &raw);
                     let text = clean_user_text(&raw);
-                    if !text.is_empty() && !text.starts_with("/usage") {
+                    if (!text.is_empty() || !images.is_empty()) && !text.starts_with("/usage") {
                         footer(&mut items, turn_start, last_at);
                         let shown = link_paths(&text, cwd.as_deref());
                         let view = cx.new(|cx| TextViewState::markdown(&shown, cx).selectable(true));
-                        items.push(Item::User { view });
+                        items.push(Item::User { view, images });
                         open_group = false;
                         turn_start = items.len();
                     }
@@ -1554,8 +1569,8 @@ pub enum Tail {
     Connect,
 }
 
-/// What the user sends: text, inline images (local chats) and files on this
-/// Mac (named by path locally, uploaded to the sandbox in a cloud chat).
+/// What the user sends: text, images and files on this Mac. Cloud images
+/// travel as files; their inline bytes stay with the bubble and local log.
 #[derive(Clone, Default)]
 pub struct Message {
     pub text: String,

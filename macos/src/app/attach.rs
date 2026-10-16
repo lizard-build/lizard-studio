@@ -42,7 +42,7 @@ pub(super) struct Attachment {
 
 /// What a message carries once sent.
 pub(super) struct Outgoing {
-    /// `{mediaType, data}` for the host's `prompt`.
+    /// `{mediaType, data}` for local prompts and the sent bubble (also cloud).
     pub images: Vec<Value>,
     /// Files on this Mac: named by path (local) or uploaded (cloud). Pasted
     /// images are written out first so a cloud chat can upload them too.
@@ -150,6 +150,7 @@ impl StudioApp {
                     out.images.push(json!({ "mediaType": media_type, "data": base64_encode(&data) }));
                 }
                 AttachKind::Image { media_type, data, .. } => {
+                    out.images.push(json!({ "mediaType": media_type, "data": base64_encode(&data) }));
                     // A cloud chat uploads files, so the image goes to disk first.
                     let ext = if media_type == "image/png" { "png" } else { "jpg" };
                     let stem = Path::new(&a.name).file_stem().map(|s| s.to_string_lossy().replace(' ', "-")).unwrap_or_else(|| "image".into());
@@ -200,6 +201,11 @@ impl StudioApp {
                     .border_1()
                     .border_color(hex(BORDER))
                     .bg(hex(BG_PRIMARY))
+                    .cursor_pointer()
+                    .on_click(cx.listener({
+                        let preview = preview.clone();
+                        move |this, _, _, cx| this.open_image(preview.clone(), cx)
+                    }))
                     .child(img(preview).size_full().rounded(px(8.)).object_fit(ObjectFit::Cover))
                     .child(
                         div()
@@ -217,7 +223,10 @@ impl StudioApp {
                             .invisible()
                             .group_hover(group, |s| s.visible())
                             .hover(|s| s.bg(hsla(0., 0., 0., 0.85)))
-                            .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(id, cx)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.remove_attachment(id, cx);
+                            }))
                             .child(ph("x", 10., hsla(0., 0., 1., 1.))),
                     )
             }))

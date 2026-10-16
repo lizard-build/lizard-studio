@@ -18,6 +18,9 @@ use serde_json::{Value, json};
 
 mod attach;
 mod connect_card;
+mod branches;
+mod drafts;
+mod images;
 mod pickers;
 mod settings;
 mod usage;
@@ -107,6 +110,7 @@ enum Menu {
     Effort,
     Agent,
     Usage,
+    Branch,
     Bookmark(String),
 }
 
@@ -125,6 +129,9 @@ pub struct StudioApp {
     git: HashMap<String, GitInfo>,
     attachments: Vec<attach::Attachment>,
     attachment_seq: u64,
+    drafts: drafts::Drafts,
+    branches: HashMap<String, branches::Branches>,
+    image_viewer: Option<std::sync::Arc<Image>>,
     /// Plan limits behind the usage popover (usage.rs).
     claude_usage: usage::PlanUsage,
     codex_usage: usage::PlanUsage,
@@ -243,6 +250,9 @@ impl StudioApp {
             git: HashMap::new(),
             attachments: Vec::new(),
             attachment_seq: 0,
+            drafts: drafts::Drafts::default(),
+            branches: HashMap::new(),
+            image_viewer: None,
             claude_usage: Default::default(),
             codex_usage: Default::default(),
             menu: None,
@@ -280,6 +290,7 @@ impl StudioApp {
         }
         #[cfg(feature = "snapshot")]
         this.preview_menus(window, cx);
+        this.drafts.chat = Some(this.chats[this.active].read(cx).id().to_string());
         this.connect(cx);
         this.activated(cx);
         if std::env::var_os("LIZARD_STUDIO_SHOT").is_none() {
@@ -424,6 +435,7 @@ impl StudioApp {
                 }
             }
             "cloudStudio" => self.on_cloud(&msg, cx),
+            "gitBranches" => self.on_branches(&msg, cx),
             "browser" => {
                 // No browser is attached to this window. Answer at once so the
                 // agent never waits out the tool's timeout.
@@ -677,7 +689,7 @@ impl StudioApp {
     fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ix) = self.chats.iter().position(|c| {
             let c = c.read(cx);
-            c.meta.open && c.is_blank()
+            c.meta.open && c.is_blank() && !self.has_draft(c.id(), cx)
         }) {
             self.active = ix;
         } else {
@@ -707,25 +719,26 @@ impl StudioApp {
 
     fn after_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
-        self.attachments.clear();
+        self.switch_draft(window, cx);
+        self.image_viewer = None;
         self.prune_blank(cx);
         self.activated(cx);
         self.composer.update(cx, |state, cx| {
-            state.set_value("", window, cx);
             state.focus(window, cx);
         });
         cx.notify();
     }
 
-    /// A blank chat that is not on screen leaves no trace.
+    /// Unused blank chats leave no trace; drafts keep their chat in the list.
     fn prune_blank(&mut self, cx: &mut Context<Self>) {
         let active = self.chats[self.active].clone();
         for chat in self.chats.clone() {
-            if chat != active && chat.read(cx).is_blank() {
+            if chat != active && chat.read(cx).is_blank() && !self.has_draft(chat.read(cx).id(), cx) {
                 chat.update(cx, |c, _| c.close());
             }
         }
-        self.chats.retain(|c| c == &active || !c.read(cx).is_blank());
+        let keep: Vec<_> = self.chats.iter().filter(|c| *c == &active || !c.read(cx).is_blank() || self.has_draft(c.read(cx).id(), cx)).cloned().collect();
+        self.chats = keep;
         self.active = self.chats.iter().position(|c| c == &active).unwrap_or(0);
     }
 
@@ -774,7 +787,7 @@ impl StudioApp {
         cx.notify();
     }
 
-    fn delete_chat(&mut self, ix: usize, cx: &mut Context<Self>) {
+    fn delete_chat(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(chat) = self.chats.get(ix).cloned() else { return };
         let id = chat.read(cx).id().to_string();
         chat.update(cx, |c, _| c.close());
@@ -786,7 +799,7 @@ impl StudioApp {
                 Some(next) => self.active = next,
                 None => self.new_chat_entity(cx),
             }
-            self.activated(cx);
+            self.after_switch(window, cx);
         } else {
             self.active = self.chats.iter().position(|c| c == &active).unwrap_or(0);
         }
@@ -978,6 +991,14 @@ impl StudioApp {
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
         let mods = &event.keystroke.modifiers;
+        if self.image_viewer.is_some() {
+            if key == "escape" {
+                self.image_viewer = None;
+                cx.notify();
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self.settings.open {
             if key == "escape" {
                 self.close_settings(_window, cx);
@@ -1655,7 +1676,7 @@ impl StudioApp {
                                 if open {
                                     this.close_chat(ix, window, cx);
                                 } else {
-                                    this.delete_chat(ix, cx);
+                                    this.delete_chat(ix, window, cx);
                                 }
                             }))
                             .child(if open { ph("x", 13., hex(TEXT_TERTIARY)) } else { ph("trash", 14., hex(TEXT_TERTIARY)) }),
@@ -2028,6 +2049,7 @@ impl StudioApp {
         let other_answer = self.other_answer.clone();
         let connect = self.connect.clone();
         let renderer_entity = entity.clone();
+        let image_app = cx.entity().downgrade();
         let list = div().id(list_id).size_full().relative().child(
             list(list_state.clone(), move |ix, window, cx| {
                 div()
@@ -2035,7 +2057,7 @@ impl StudioApp {
                     .px(px(12.))
                     .when(ix == 0, |d| d.pt(px(14.)))
                     .when(ix + 1 == renderer_entity.read(cx).row_count(), |d| d.pb(px(14.)))
-                    .child(render_row(&renderer_entity, &other_answer, &connect, ix, window, cx))
+                    .child(render_row(&renderer_entity, &other_answer, &connect, &image_app, ix, window, cx))
                     .into_any_element()
             })
             .size_full(),
@@ -2160,6 +2182,7 @@ impl StudioApp {
             Some(Menu::Mode) if !cloud => self.render_mode_menu(&p, viewport, cx),
             Some(which @ (Menu::Agent | Menu::Place)) if blank => self.render_setup_menu(which, &p, cx),
             Some(Menu::Usage) => self.render_usage_menu(&p, ctx_tokens, limit, viewport, cx),
+            Some(Menu::Branch) if !cloud => self.render_branch_menu(blank, cx),
             _ => None,
         };
         // Slash commands while the first word is being typed.
@@ -2262,7 +2285,9 @@ impl StudioApp {
                     )
                 })
                 .when_some(git.branch.clone().filter(|_| !cloud), |d, branch| {
-                    d.child(chip("branch-chip").child(ph("git-branch", 13., hex(TEXT_SECONDARY))).child(branch))
+                    d.child(div().relative().child(pop::track(&self.bounds, "branch-chip")).child(
+                        chip("branch-chip").on_click(cx.listener(|this, _, _, cx| this.toggle_branches(cx)))
+                            .child(ph("git-branch", 13., hex(TEXT_SECONDARY))).child(branch)))
                 })
                 .child(
                     div()
@@ -2297,6 +2322,8 @@ impl StudioApp {
                 .rounded_tl(px(14.))
                 .rounded_tr(px(14.))
                 .bg(hex(BG_SECONDARY))
+                .relative()
+                .child(pop::track(&self.bounds, "git-flap"))
                 .child(if show_branch {
                     ph("git-branch", 12., hex(TEXT_TERTIARY))
                 } else {
@@ -2304,11 +2331,13 @@ impl StudioApp {
                 })
                 .child(
                     div()
+                        .id("git-branch-label")
                         .flex_1()
                         .min_w_0()
                         .truncate()
                         .text_size(px(12.))
                         .text_color(hex(TEXT_SECONDARY))
+                        .when(show_branch && !cloud, |d| d.cursor_pointer().on_click(cx.listener(|this, _, _, cx| this.toggle_branches(cx))))
                         .child(if show_branch {
                             git.branch.clone().unwrap_or_default()
                         } else {
@@ -2590,6 +2619,7 @@ fn render_row(
     entity: &Entity<ChatSession>,
     other_answer: &Entity<InputState>,
     connect: &Entity<connect_card::ConnectUi>,
+    image_app: &WeakEntity<StudioApp>,
     ix: usize,
     window: &mut Window,
     cx: &mut App,
@@ -2616,7 +2646,7 @@ fn render_row(
     let gap = row_gap(&chat.items, ix);
     let cwd = chat.meta.cwd.clone();
     let body: AnyElement = match &chat.items[ix] {
-        Item::User { view } => div()
+        Item::User { view, images } => div()
             .w_full()
             .px(px(12.))
             .py(px(8.))
@@ -2627,6 +2657,7 @@ fn render_row(
             .text_size(px(14.))
             .line_height(relative(1.55))
             .text_color(hex(TEXT_PRIMARY))
+            .children(images::bubble_thumbs(images, image_app, ix))
             .child(markdown_view(view))
             .into_any_element(),
         Item::Assistant { view, footer, .. } => {
@@ -3135,5 +3166,6 @@ impl Render for StudioApp {
                     .child(div().flex_1().min_w_0().h_full().flex().child(main)),
             )
             .when(self.settings.open, |d| d.child(deferred(self.render_settings(window, cx)).with_priority(2)))
+            .children(self.render_image_viewer(cx).map(|viewer| deferred(viewer).with_priority(3)))
     }
 }
