@@ -52,6 +52,26 @@ pub(super) struct EffortUi {
     pub swapped: Option<(Instant, bool)>,
 }
 
+/// Keyboard selection is separate from the setting until Enter commits it.
+#[derive(Default)]
+pub(super) struct PickerNavigation {
+    menu: Option<Menu>,
+    index: usize,
+    model_scroll: ScrollHandle,
+}
+
+fn next_row(key: &str, index: usize, count: usize) -> Option<usize> {
+    if count == 0 { return None; }
+    let last = count - 1;
+    Some(match key {
+        "up" | "left" => index.saturating_sub(1),
+        "down" | "right" => (index + 1).min(last),
+        "home" => 0,
+        "end" => last,
+        _ => return None,
+    }.min(last))
+}
+
 const THUMB_W: f32 = 22.;
 const THUMB_H: f32 = 24.;
 const TRACK_PAD: f32 = 1.;
@@ -134,8 +154,64 @@ impl StudioApp {
             }
             _ => {}
         }
+        let p = self.pickers(cx);
+        let index = match which {
+            Menu::Model => model_groups(p.models, p.agent).into_iter().flat_map(|(_, rows)| rows).position(|r| Some(r.id.as_str()) == p.model.as_deref()).unwrap_or(0),
+            Menu::Mode => modes_for(p.agent).iter().position(|r| r.0 == p.mode).unwrap_or(0),
+            Menu::Agent => usize::from(p.agent == Agent::Codex),
+            _ => 0,
+        };
+        self.picker_nav.menu = Some(which.clone());
+        self.picker_nav.index = index;
         self.menu = Some(which);
         cx.notify();
+    }
+
+    pub(super) fn picker_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(menu @ (Menu::Model | Menu::Mode | Menu::Agent)) = self.menu.clone() else { return false };
+        let p = self.pickers(cx);
+        let rows: Vec<ModelRow> = model_groups(p.models, p.agent).into_iter().flat_map(|(_, rows)| rows).collect();
+        let count = match menu { Menu::Model => rows.len(), Menu::Mode => modes_for(p.agent).len(), _ => 2 };
+        if count == 0 { return false; }
+        if self.picker_nav.menu.as_ref() != Some(&menu) {
+            self.picker_nav.menu = Some(menu.clone());
+            self.picker_nav.index = 0;
+        }
+        if let Some(index) = next_row(key, self.picker_nav.index, count) {
+            self.picker_nav.index = index;
+            if menu == Menu::Model {
+                let p = self.pickers(cx);
+                let mut row = 0;
+                let mut child = 0;
+                for (label, rows) in model_groups(p.models, p.agent) {
+                    if !label.is_empty() { child += 1; }
+                    if index < row + rows.len() { child += index - row; break; }
+                    row += rows.len();
+                    child += rows.len();
+                }
+                self.picker_nav.model_scroll.scroll_to_item(child);
+            }
+            cx.notify();
+            return true;
+        }
+        if key != "enter" { return false; }
+        let index = self.picker_nav.index.min(count - 1);
+        self.menu = None;
+        match menu {
+            Menu::Model => self.pick_model(rows[index].id.clone(), cx),
+            Menu::Mode => { self.chats[self.active].update(cx, |c, cx| c.set_settings(None, None, Some(modes_for(p.agent)[index].0.into()), cx)); }
+            Menu::Agent => {
+                let agent = if index == 0 { Agent::Claude } else { Agent::Codex };
+                if agent != p.agent { self.set_agent(agent, window, cx); }
+            }
+            _ => {}
+        }
+        cx.notify();
+        true
+    }
+
+    fn picker_highlight(&self, menu: Menu, index: usize) -> bool {
+        self.menu.as_ref() == Some(&menu) && self.picker_nav.menu.as_ref() == Some(&menu) && self.picker_nav.index == index
     }
 
     /// A mouse-down outside the open picker closes it, unless it lands on
@@ -179,7 +255,7 @@ impl StudioApp {
             })
             .child(if catalog.fetching { "Refreshing…" } else { "Refresh" });
 
-        let mut list = div().id("model-list").flex().flex_col().max_h(px(list_h)).overflow_y_scroll();
+        let mut list = div().id("model-list").flex().flex_col().max_h(px(list_h)).overflow_y_scroll().track_scroll(&self.picker_nav.model_scroll);
         let mut row_ix = 0usize;
         for (gi, (label, rows)) in model_groups(p.models.clone(), agent).into_iter().enumerate() {
             if !label.is_empty() {
@@ -196,6 +272,8 @@ impl StudioApp {
             }
             for (i, row) in rows.into_iter().enumerate() {
                 let current = p.model.as_deref() == Some(row.id.as_str());
+                let highlighted = self.picker_highlight(Menu::Model, row_ix);
+                let hover_ix = row_ix;
                 let logo_color = if current { hex(EMERALD) } else { hex(TEXT_SECONDARY) };
                 let logo = if row.custom {
                     ph("sparkle", 15., logo_color)
@@ -219,6 +297,10 @@ impl StudioApp {
                         .rounded(px(8.))
                         .cursor_pointer()
                         .when(current, |d| d.bg(rgba_hex(EMERALD, 0.09)))
+                        .when(highlighted, |d| d.bg(white_a(0.08)))
+                        .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                            if this.picker_nav.index != hover_ix { this.picker_nav.index = hover_ix; cx.notify(); }
+                        }))
                         .when(!current, |d| d.hover(|s| s.bg(white_a(0.06))))
                         .when_some(note, |d, note| {
                             d.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(note.clone()).build(window, cx))
@@ -326,6 +408,7 @@ impl StudioApp {
         };
         let close = self.close_picker_listener(trigger, cx);
         let rows = items.into_iter().enumerate().map(|(i, (icon, label, current, note))| {
+            let highlighted = self.picker_highlight(which.clone(), i);
             let pick = which.clone();
             div()
                 .id(("setup-item", i))
@@ -338,6 +421,10 @@ impl StudioApp {
                 .rounded(px(7.))
                 .cursor_pointer()
                 .when(current, |d| d.bg(white_a(0.08)))
+                .when(highlighted, |d| d.bg(white_a(0.08)))
+                .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                    if this.picker_nav.index != i { this.picker_nav.index = i; cx.notify(); }
+                }))
                 .hover(|s| s.bg(white_a(0.06)))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.menu = None;
@@ -405,6 +492,7 @@ impl StudioApp {
         let close = self.close_picker_listener("mode", cx);
         let items = modes_for(p.agent).iter().enumerate().map(|(i, (id, label, _, _))| {
             let current = *id == p.mode;
+            let highlighted = self.picker_highlight(Menu::Mode, i);
             let tone = match *id {
                 "bypassPermissions" | "full-access" => hex(RED),
                 "auto" => hex(WARN_BRIGHT),
@@ -421,6 +509,10 @@ impl StudioApp {
                 .rounded(px(8.))
                 .cursor_pointer()
                 .when(current, |d| d.bg(white_a(0.04)))
+                .when(highlighted, |d| d.bg(white_a(0.08)))
+                .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                    if this.picker_nav.index != i { this.picker_nav.index = i; cx.notify(); }
+                }))
                 .hover(|s| s.bg(white_a(0.06)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.menu = None;
@@ -1053,4 +1145,20 @@ fn rounded_strip(x0: f32, x1: f32, ox: f32, oy: f32, width: f32, height: f32, ra
         pts.push(p(x, edge(x, false)));
     }
     pts
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::next_row;
+
+    #[test]
+    fn menu_keys_stay_in_bounds() {
+        assert_eq!(next_row("up", 0, 3), Some(0));
+        assert_eq!(next_row("down", 2, 3), Some(2));
+        assert_eq!(next_row("home", 2, 3), Some(0));
+        assert_eq!(next_row("end", 0, 3), Some(2));
+        assert_eq!(next_row("right", 0, 3), Some(1));
+        assert_eq!(next_row("down", 0, 0), None);
+        assert_eq!(next_row("enter", 0, 3), None);
+    }
 }

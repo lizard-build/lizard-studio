@@ -2203,6 +2203,10 @@ function replayItem(s, item) {
 
 function handle(msg) {
   switch (msg.type) {
+    case "checkAgent":
+      CODEX = resolveCodex();
+      announce();
+      break;
     case "start": startSession(msg); break;
     case "prompt": sendPrompt(msg); break;
     case "interrupt": interrupt(msg); break;

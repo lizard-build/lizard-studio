@@ -26,6 +26,7 @@ mod images;
 mod local_session;
 mod pickers;
 mod questions;
+mod recovery;
 mod settings;
 mod tasks;
 mod usage;
@@ -41,7 +42,8 @@ use crate::theme::*;
 use crate::ui::{self, MenuEntry, caret, lizard, ph, pulse};
 use crate::{NewChat, StopTurn};
 
-const MIN_HOST_VERSION: u64 = 40;
+/// Live agent checks keep onboarding from replaying the daemon’s stale cache.
+const MIN_HOST_VERSION: u64 = 41;
 /// The host learned `cloudStudio` (Lizard Studio in a Lizard sandbox) in v41.
 const CLOUD_HOST_VERSION: u64 = 41;
 const CLOUD_LABEL: &str = "Run in a sandbox";
@@ -130,6 +132,7 @@ pub struct StudioApp {
     other_answer: Entity<InputState>,
     rename: Option<(String, Entity<InputState>)>,
     host_state: HostState,
+    recovery: recovery::RecoveryUi,
     catalogs: HashMap<Agent, Catalog>,
     git: HashMap<String, GitInfo>,
     diffs: git_diff::Drawers,
@@ -142,6 +145,7 @@ pub struct StudioApp {
     claude_usage: usage::PlanUsage,
     codex_usage: usage::PlanUsage,
     menu: Option<Menu>,
+    picker_nav: pickers::PickerNavigation,
     /// Where the pickers' buttons were drawn, so a popover can point at one.
     bounds: BoundsMap,
     viewport: Size<Pixels>,
@@ -222,6 +226,13 @@ impl StudioApp {
             }
             async {}
         }));
+        subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
+            this.recovery.focused = window.is_window_active();
+            if this.recovery.focused {
+                this.chats[this.active].update(cx, |chat, _| chat.unseen = false);
+            }
+            cx.notify();
+        }));
         let store = Store::load();
         cx.set_global(chat::CustomModels(store.custom_models().to_vec()));
         cx.set_global(chat::CloudTemplate(store.cloud_snapshot()));
@@ -254,6 +265,7 @@ impl StudioApp {
             other_answer,
             rename: None,
             host_state: HostState::default(),
+            recovery: recovery::RecoveryUi::new(window),
             catalogs: HashMap::new(),
             git: HashMap::new(),
             diffs: HashMap::new(),
@@ -265,6 +277,7 @@ impl StudioApp {
             claude_usage: Default::default(),
             codex_usage: Default::default(),
             menu: None,
+            picker_nav: pickers::PickerNavigation::default(),
             bounds: BoundsMap::default(),
             viewport: window.viewport_size(),
             effort: pickers::EffortUi::default(),
@@ -301,6 +314,7 @@ impl StudioApp {
         #[cfg(feature = "snapshot")]
         this.preview_menus(window, cx);
         this.drafts.chat = Some(this.chats[this.active].read(cx).id().to_string());
+        this.start_recovery_poll(cx);
         this.connect(cx);
         this.activated(cx);
         if std::env::var_os("LIZARD_STUDIO_SHOT").is_none() {
@@ -336,6 +350,7 @@ impl StudioApp {
                     chat.update(cx, |c, cx| c.fail_question_sends(cx));
                 }
                 self.host_state.connected = false;
+                for chat in self.chats.clone() { chat.update(cx, |c, cx| c.fail_history(cx)); }
                 eprintln!("host disconnected: {reason}");
                 cx.notify();
                 cx.spawn(async move |this, cx| {
@@ -367,7 +382,11 @@ impl StudioApp {
         match kind.as_str() {
             "ready" => {
                 self.host_state.claude_ok = msg.get("ok").and_then(Value::as_bool);
-                self.host_state.version = msg.get("version").and_then(Value::as_u64);
+                self.host_state.version = Some(msg.get("version").and_then(Value::as_u64).unwrap_or(0));
+                self.check_helper_version(cx);
+                if self.host_state.codex_ok.is_none() {
+                    self.host.send(json!({ "type": "checkAgent", "agent": "codex" }));
+                }
                 self.host_state.in_sandbox = msg.get("inSandbox").and_then(Value::as_bool) == Some(true);
                 // A Lizard sandbox names the folder chats start in, so nothing
                 // there asks for one.
@@ -392,13 +411,16 @@ impl StudioApp {
                 let cwd = self.chats[self.active].read(cx).meta.cwd.clone();
                 self.host.send(json!({ "type": "refreshModels", "agent": "claude", "cwd": cwd }));
                 self.chats[self.active].read(cx).request_commands();
+                self.finish_agent_check(cx);
                 cx.notify();
             }
             "agentReady" => {
                 if msg.get("agent").and_then(Value::as_str) == Some("codex") {
                     self.host_state.codex_ok = msg.get("ok").and_then(Value::as_bool);
                     self.host.send(json!({ "type": "refreshModels", "agent": "codex" }));
+                    self.finish_agent_check(cx);
                 }
+                cx.notify();
             }
             "models" | "modelsError" => {
                 let agent = match msg.get("agent").and_then(Value::as_str) {
@@ -425,21 +447,9 @@ impl StudioApp {
             "configRead" | "configWrite" => self.on_config_reply(&msg, cx),
             "gitDiff" => self.on_git_diff(&msg, cx),
             "planUsage" if msg.get("agent").and_then(Value::as_str) == Some("codex") => self.on_plan_usage(&msg, cx),
-            "daemonSnapshot" => {
-                self.host_state.restoring = true;
-                for session in msg.get("sessions").and_then(Value::as_array).cloned().unwrap_or_default() {
-                    let id = session.get("id").and_then(Value::as_str).unwrap_or("");
-                    if let Some(chat) = self.chat_by_id(id, cx) {
-                        let started = session.get("started").and_then(Value::as_bool).unwrap_or(false);
-                        let running = session.get("running").and_then(Value::as_bool).unwrap_or(false);
-                        chat.update(cx, |chat, cx| chat.restore_from_daemon(started, running, cx));
-                    }
-                }
-            }
-            "daemonRestoreDone" => {
-                self.host_state.restoring = false;
-                cx.notify();
-            }
+            "daemonSnapshot" => self.begin_daemon_restore(&msg, cx),
+            "daemonRestoreDone" => self.finish_daemon_restore(cx),
+            "selfUpdate" => self.on_helper_update(&msg, cx),
             "agentExit" => {
                 let agent = match msg.get("agent").and_then(Value::as_str) {
                     Some("codex") => Agent::Codex,
@@ -475,7 +485,7 @@ impl StudioApp {
                     return;
                 };
                 // A replayed journal repeats output this window already drew.
-                if self.host_state.restoring && kind == "event" {
+                if self.host_state.restoring && !self.recovery.replay.contains(id) {
                     return;
                 }
                 if kind == "commands" {
@@ -598,11 +608,10 @@ impl StudioApp {
         let sub = cx.subscribe(chat, |this, chat, event: &ChatEvent, cx| {
             match event {
                 ChatEvent::Changed => this.persist(&chat, cx),
-                ChatEvent::Asked => this.chime(),
+                ChatEvent::Asked | ChatEvent::Result => this.chime(),
                 ChatEvent::TurnEnded => {
-                    this.chime();
                     let active = this.chats.get(this.active) == Some(&chat);
-                    if !active {
+                    if !active || !this.recovery.focused {
                         chat.update(cx, |c, _| c.unseen = true);
                     }
                     if let Some(cwd) = chat.read(cx).work_cwd() {
@@ -769,8 +778,8 @@ impl StudioApp {
     fn activated(&mut self, cx: &mut Context<Self>) {
         let chat = self.chats[self.active].clone();
         chat.update(cx, |c, cx| {
-            c.unseen = false;
-            c.load_history(cx);
+            c.unseen = !self.recovery.focused && c.unseen;
+            if self.host_state.version.is_some() && !self.host_state.restoring { c.load_history(cx); }
         });
         let (cwd, agent) = {
             let c = chat.read(cx);
@@ -782,6 +791,7 @@ impl StudioApp {
         if chat.read(cx).commands.is_empty() {
             chat.read(cx).request_commands();
         }
+        self.warm_active_chat(cx);
         if agent == Agent::Claude {
             self.host.send(json!({ "type": "refreshModels", "agent": "claude", "cwd": cwd }));
         }
@@ -1032,6 +1042,10 @@ impl StudioApp {
                 self.close_settings(_window, cx);
                 cx.stop_propagation();
             }
+            return;
+        }
+        if !mods.modified() && self.picker_key(key, _window, cx) {
+            cx.stop_propagation();
             return;
         }
         if self.bash_key(key, _window, cx) {
@@ -2005,81 +2019,6 @@ impl StudioApp {
         )
     }
 
-    fn render_onboarding(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let (title, body, command) = if !host_installed() {
-            (
-                "Connect your agent",
-                "Lizard Studio talks to Claude Code and ChatGPT through the same local helper as the Chrome extension. Install it once:",
-                "npx @lizard-build/lizard-studio-host install",
-            )
-        } else if self.host_state.claude_ok == Some(false) {
-            (
-                "Install Claude Code",
-                "The helper is running, but it can't find the claude command. Install it, then check again:",
-                "npm i -g @anthropic-ai/claude-code",
-            )
-        } else {
-            (
-                "Update the helper",
-                "This app needs a newer local helper. Update it, then check again:",
-                "npx @lizard-build/lizard-studio-host@latest install",
-            )
-        };
-        let error = self.host_state.error.clone();
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(14.))
-            .px(px(32.))
-            .child(lizard(48., hex(EMERALD)))
-            .child(div().text_size(px(24.)).line_height(px(32.)).font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(div().max_w(px(460.)).text_size(px(14.)).line_height(px(20.)).text_color(hex(TEXT_SECONDARY)).text_center().child(body))
-            .child(
-                div()
-                    .id("copy-command")
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .rounded(px(8.))
-                    .bg(hex(BG_SECONDARY))
-                    .border_1()
-                    .border_color(hex(BORDER))
-                    .cursor_pointer()
-                    .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(command.into())))
-                    .child(div().font_family("Lizard Mono").text_size(px(12.)).child(command))
-                    .child(ph("copy", 13., hex(TEXT_TERTIARY))),
-            )
-            .child(
-                div()
-                    .id("check-again")
-                    .h(px(32.))
-                    .px(px(12.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(hex(EMERALD))
-                    .bg(rgba_hex(EMERALD, 0.5))
-                    .hover(|s| s.bg(hex(EMERALD)))
-                    .cursor_pointer()
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Check again")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.host.detach();
-                        this.host_state = HostState::default();
-                        this.connect(cx);
-                    })),
-            )
-            .when_some(error, |d, e| d.child(div().text_size(px(12.)).text_color(hex(RED_SOFT)).child(e)))
-            .into_any_element()
-    }
-
     fn render_chat(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let entity = self.chats[self.active].clone();
         let (blank, loading, paging, list_state, list_id) = {
@@ -2092,6 +2031,9 @@ impl StudioApp {
                 SharedString::from(format!("messages-{}", c.id())),
             )
         };
+        let failed_empty = entity.read(cx).failure.is_some() && entity.read(cx).items.is_empty();
+        let recovery = self.render_recovery(cx);
+        let (center_recovery, footer_recovery) = if failed_empty { (recovery, None) } else { (None, recovery) };
         let other_answer = self.other_answer.clone();
         let connect = self.connect.clone();
         let renderer_entity = entity.clone();
@@ -2133,12 +2075,13 @@ impl StudioApp {
             .flex()
             .flex_col()
             .bg(hex(BG_PRIMARY))
+            .children(self.render_history_retry(cx))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .when(blank, |d| {
+                    .when(blank && !failed_empty, |d| {
                         d.child(
                             div()
                                 .absolute()
@@ -2149,6 +2092,7 @@ impl StudioApp {
                                 .child(lizard(64., hex(EMPTY_MARK))),
                         )
                     })
+                    .children(center_recovery.map(|card| div().size_full().flex().flex_col().justify_center().child(card)))
                     .when(loading, |d| {
                         d.child(
                             div()
@@ -2183,6 +2127,7 @@ impl StudioApp {
                     .when(self.tasks_open(cx), |d| d.child(self.render_tasks_drawer(cx)))
                     .children(diff_drawer)
             )
+            .children(footer_recovery)
             .child(self.render_composer(cx))
             .into_any_element()
     }
@@ -2632,15 +2577,15 @@ impl StudioApp {
 /// fenced code gets a copy button.
 fn markdown_view(view: &Entity<gpui_kit::component::text::TextViewState>) -> TextView {
     TextView::new(view)
-        .on_link_click(|url, _, _, cx| match url.strip_prefix(chat::OPEN_SCHEME) {
-            Some(path) => cx.open_with_system(std::path::Path::new(path)),
+        .on_link_click(|url, event, _, cx| match url.strip_prefix(chat::OPEN_SCHEME) {
+            Some(path) => recovery::open_file_link(path, event.modifiers().alt, cx),
             // A web link opens in the browser; a bare path opens only if it is
             // a file on this Mac (a cloud chat's paths live in its sandbox).
             None if url.contains("://") || url.starts_with("mailto:") => cx.open_url(url),
             None => {
                 let path = std::path::Path::new(url.as_ref());
                 if path.is_absolute() && path.exists() {
-                    cx.open_with_system(path);
+                    recovery::open_file_link(path.to_string_lossy().as_ref(), event.modifiers().alt, cx);
                 }
             }
         })
@@ -3156,9 +3101,7 @@ fn render_question(
 
 impl Render for StudioApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let blocked = !host_installed()
-            || self.host_state.claude_ok == Some(false)
-            || self.host_state.version.map_or(false, |v| v < MIN_HOST_VERSION);
+        let blocked = self.onboarding_blocked();
         self.apply_settings_text(window, cx);
         let viewport = window.viewport_size();
         self.viewport = viewport;

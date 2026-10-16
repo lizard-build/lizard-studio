@@ -47,6 +47,9 @@ pub struct CustomModels(pub Vec<CustomModel>);
 
 impl Global for CustomModels {}
 
+mod recovery;
+pub use recovery::{FailureKind, SessionFailure};
+
 pub const DEFAULT_TITLE: &str = "New chat";
 
 /// Wraps context the user did not type, so a transcript replay can strip it
@@ -139,7 +142,11 @@ struct History {
     loading: bool,
     request_id: Option<String>,
     parts: Vec<Option<String>>,
+    total: Option<u64>,
     next_cursor: Option<Value>,
+    cursor: Option<Value>,
+    error: bool,
+    sequence: u64,
 }
 
 pub enum ChatEvent {
@@ -147,6 +154,8 @@ pub enum ChatEvent {
     Changed,
     /// A turn ended (for the sidebar's "finished while away" dot).
     TurnEnded,
+    /// A real result arrived, rather than an interruption or process exit.
+    Result,
     /// The agent reported its working folder.
     CwdChanged,
     /// A permission or question started waiting on the user.
@@ -161,6 +170,13 @@ pub struct ChatSession {
     pub list: ListState,
     pub started: bool,
     pub running: bool,
+    pub failure: Option<SessionFailure>,
+    restoring: bool,
+    stopping: bool,
+    start_pending: bool,
+    start_sequence: u64,
+    submitted: bool,
+    last_host_error: Option<String>,
     pub unseen: bool,
     pub turn_started_at: Option<Instant>,
     pub turn_tokens: u64,
@@ -198,6 +214,7 @@ pub struct ChatSession {
 impl ChatSession {
     pub fn new(meta: SavedChat, host: Rc<HostLink>, cx: &mut Context<Self>) -> Self {
         let live_cwd = meta.work_cwd.clone();
+        let submitted = meta.session_id.is_some();
         let list = ListState::new(0, ListAlignment::Top, px(400.));
         list.set_follow_mode(FollowMode::Tail);
         // Reaching the top pages in older history, like the panel does.
@@ -216,6 +233,13 @@ impl ChatSession {
             list,
             started: false,
             running: false,
+            failure: None,
+            restoring: false,
+            stopping: false,
+            start_pending: false,
+            start_sequence: 0,
+            submitted,
+            last_host_error: None,
             unseen: false,
             turn_started_at: None,
             turn_tokens: 0,
@@ -278,7 +302,7 @@ impl ChatSession {
     }
 
     pub fn is_blank(&self) -> bool {
-        self.items.is_empty() && self.meta.session_id.is_none() && self.meta.bash_history.is_empty()
+        self.items.is_empty() && !self.submitted && self.queued.is_empty() && self.failure.is_none() && self.meta.bash_history.is_empty()
     }
 
 
@@ -453,16 +477,17 @@ impl ChatSession {
             "provider": self.provider(cx),
             "effort": self.meta.effort,
             "permissionMode": self.meta.permission_mode.clone().unwrap_or_else(|| default_mode(self.meta.agent).into()),
-            "resume": self.meta.session_id,
+            "resume": if self.submitted { self.meta.session_id.clone() } else { None },
         })
     }
 
-    fn ensure_started(&mut self, cx: &App) {
+    fn ensure_started(&mut self, cx: &mut Context<Self>) {
         if self.started {
             return;
         }
         self.send(self.start_message(cx));
         self.started = true;
+        self.watch_session_start(cx);
         self.context_sent = false;
     }
 
@@ -470,7 +495,7 @@ impl ChatSession {
     /// only reads or writes a project's settings for a folder a session has
     /// opened.
     pub fn warm_up(&mut self, cx: &mut Context<Self>) {
-        if !self.meta.cloud && self.meta.cwd.is_some() {
+        if !self.meta.cloud && self.meta.cwd.is_some() && self.failure.is_none() {
             self.ensure_started(cx);
         }
     }
@@ -492,7 +517,7 @@ impl ChatSession {
             self.notice(true, "Choose a project folder first.", cx);
             return;
         }
-        if self.running || self.local.blocked() {
+        if self.running || self.local.blocked() || self.start_pending || self.failure.is_some() || self.restoring {
             self.queued.push_back(message);
             cx.notify();
             return;
@@ -506,11 +531,19 @@ impl ChatSession {
         if self.meta.cloud {
             return self.deliver_cloud(message, cx);
         }
+        if !self.started || self.start_pending {
+            self.queued.push_front(message);
+            self.ensure_started(cx);
+            cx.notify();
+            return;
+        }
         self.deliver_local(message, false, cx);
     }
 
     fn begin_turn(&mut self) {
         self.running = true;
+        self.submitted = true;
+        self.stopping = false;
         self.turn_started_at = Some(Instant::now());
         self.turn_tokens = 0;
         self.msg_tokens = 0;
@@ -523,6 +556,7 @@ impl ChatSession {
             return;
         }
         self.queued.clear();
+        self.stopping = true;
         if self.meta.cloud {
             if let Some(sandbox) = self.meta.sandbox_id.clone() {
                 cloud::interrupt(sandbox, self.meta.conversation_id.clone());
@@ -535,6 +569,7 @@ impl ChatSession {
     }
 
     pub fn close(&mut self) {
+        self.start_pending = false;
         for item in &self.items {
             if let Item::Bash(run) = item {
                 if run.running { self.stop_bash(&run.entry.id); }
@@ -587,6 +622,7 @@ impl ChatSession {
     }
 
     fn end_turn(&mut self, cx: &mut Context<Self>) {
+        if !self.running { return; }
         self.running = false;
         self.turn_started_at = None;
         self.permissions.clear();
@@ -609,9 +645,7 @@ impl ChatSession {
         self.sync_rows(cx);
         if !self.local.blocked() {
             self.local.last_prompt = None;
-            if let Some(next) = self.queued.pop_front() {
-                self.deliver(next, cx);
-            }
+            self.dispatch_queued(cx);
         }
     }
 
@@ -648,13 +682,18 @@ impl ChatSession {
             }
             "started" => {
                 self.started = true;
+                self.start_pending = false;
+                self.failure = None;
+                self.last_host_error = None;
                 if let Some(mode) = msg.get("permissionMode").and_then(Value::as_str) {
                     if self.meta.permission_mode.as_deref() != Some(mode) {
                         self.meta.permission_mode = Some(mode.to_string());
                         self.touch(cx);
                     }
                 }
+                // A sign-in retry goes before anything queued behind it.
                 self.local_started(cx);
+                self.dispatch_queued(cx);
                 cx.notify();
             }
             "commands" => {
@@ -701,12 +740,18 @@ impl ChatSession {
                 if self.running {
                     self.end_turn(cx);
                 }
+                self.stopping = false;
             }
             "exit" => {
                 self.started = false;
-                if self.running {
+                self.start_pending = false;
+                if let Some(failure) = &mut self.failure { failure.connecting = false; }
+                self.fail_history(cx);
+                if msg.get("quiet").and_then(Value::as_bool) != Some(true) && !self.stopping && self.failure.is_none() {
                     let code = msg.get("code").and_then(Value::as_i64).unwrap_or(-1);
-                    self.notice(true, format!("{} exited (code {code}).", self.meta.agent.label()), cx);
+                    let message = self.last_host_error.take().unwrap_or_else(|| format!("Session ended (code {code})."));
+                    self.session_failed(message, None, cx);
+                } else if self.running {
                     self.end_turn(cx);
                 }
                 cx.notify();
@@ -720,13 +765,19 @@ impl ChatSession {
             }
             "error" => {
                 let text = msg.get("message").and_then(Value::as_str).unwrap_or("Something went wrong.");
-                self.notice(true, text.to_string(), cx);
-                if self.running && !self.started {
-                    self.end_turn(cx);
+                let code = msg.get("code").and_then(Value::as_str);
+                if self.history.loading && msg.get("requestId").and_then(Value::as_str) == self.history.request_id.as_deref() {
+                    self.fail_history(cx);
+                } else if recovery::session_error(text, code) || !self.started || self.start_pending {
+                    self.session_failed(text.to_string(), code, cx);
+                } else {
+                    self.last_host_error = Some(text.to_string());
+                    self.notice(true, text.to_string(), cx);
                 }
             }
             "needsFolder" => {
                 self.started = false;
+                self.start_pending = false;
                 self.notice(true, "Choose a project folder to start a session.", cx);
                 if self.running {
                     self.end_turn(cx);
@@ -743,27 +794,6 @@ impl ChatSession {
             "transcriptPart" => self.on_transcript_part(msg, cx),
             _ => {}
         }
-    }
-
-    /// The agent's process went away (helper crash or update).
-    pub fn on_agent_exit(&mut self, cx: &mut Context<Self>) {
-        self.started = false;
-        self.fail_question_sends(cx);
-        if self.running {
-            self.notice(true, format!("The {} helper stopped.", self.meta.agent.label()), cx);
-            self.end_turn(cx);
-        }
-        cx.notify();
-    }
-
-    /// The daemon still runs this chat from an earlier connection.
-    pub fn restore_from_daemon(&mut self, started: bool, running: bool, cx: &mut Context<Self>) {
-        self.started = started;
-        if running && !self.running {
-            self.begin_turn();
-        }
-        self.running = running;
-        self.sync_rows(cx);
     }
 
     fn note_ctx_usage(&mut self, usage: Option<&Value>) {
@@ -795,10 +825,11 @@ impl ChatSession {
                         if self.meta.session_id.as_deref() != Some(sid) {
                             self.meta.session_id = Some(sid.to_string());
                             // Live output already covers this session.
-                            self.history.requested = true;
+                            if !self.restoring && self.submitted { self.history.requested = true; }
                             self.touch(cx);
                         }
                     }
+                    self.apply_init_settings(data, cx);
                     if let Some(list) = data.get("slash_commands").and_then(Value::as_array) {
                         self.commands = list.iter().filter_map(Value::as_str).map(str::to_string).collect();
                     }
@@ -861,6 +892,9 @@ impl ChatSession {
                     if let Some(text) = text {
                         self.notice(true, text, cx);
                     }
+                }
+                if self.running && !self.stopping && data.get("result").and_then(Value::as_str) != Some("Stopped.") {
+                    cx.emit(ChatEvent::Result);
                 }
                 self.end_turn(cx);
             }
@@ -1175,6 +1209,7 @@ impl ChatSession {
                     self.ctx_tokens = n("input_tokens") + n("output_tokens");
                 }
                 if live {
+                    if self.running && !self.stopping { cx.emit(ChatEvent::Result); }
                     self.end_turn(cx);
                 }
             }
@@ -1346,97 +1381,30 @@ impl ChatSession {
         }
     }
 
-    // ---- history -------------------------------------------------------------
-
-    /// Ask the host for the saved conversation, newest page first.
-    pub fn load_history(&mut self, cx: &mut Context<Self>) {
-        if self.history.requested {
-            return;
-        }
-        self.history.requested = true;
-        if self.meta.cloud {
-            return self.replay_cloud(cx);
-        }
-        if self.meta.session_id.is_none() {
-            self.restore_bash(cx);
-        }
-        self.request_history_page(None, cx);
-    }
-
-    pub fn load_earlier(&mut self, cx: &mut Context<Self>) {
-        if self.history.loading {
-            return;
-        }
-        if let Some(cursor) = self.history.next_cursor.take() {
-            self.request_history_page(Some(cursor), cx);
-        }
-    }
-
-    fn request_history_page(&mut self, cursor: Option<Value>, cx: &mut Context<Self>) {
-        let Some(session_id) = self.meta.session_id.clone() else { return };
-        let request_id = format!("h-{}", now_ms());
-        self.history.loading = true;
-        self.history.request_id = Some(request_id.clone());
-        self.history.parts.clear();
-        let mut message = json!({
-            "type": "loadTranscript",
-            "sessionId": session_id,
-            "cwd": self.meta.cwd,
-            "requestId": request_id,
-            "paged": true,
-        });
-        if let Some(cursor) = cursor {
-            message["cursor"] = cursor;
-        }
-        if self.meta.agent == Agent::Codex {
-            message["excludeTurnIds"] = json!([]);
-        }
-        self.send(message);
-        cx.notify();
-    }
-
-    fn on_transcript_part(&mut self, msg: &Value, cx: &mut Context<Self>) {
-        if msg.get("requestId").and_then(Value::as_str) != self.history.request_id.as_deref() {
-            return;
-        }
-        let index = msg.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let total = msg.get("total").and_then(Value::as_u64).unwrap_or(1) as usize;
-        if self.history.parts.len() != total {
-            self.history.parts = vec![None; total];
-        }
-        if let Some(slot) = self.history.parts.get_mut(index) {
-            *slot = msg.get("text").and_then(Value::as_str).map(str::to_string);
-        }
-        if self.history.parts.iter().all(Option::is_some) {
-            let joined: String = self.history.parts.drain(..).map(Option::unwrap).collect();
-            let joined = restore_surrogates(&joined);
-            match serde_json::from_str::<Value>(&joined) {
-                Ok(full) => self.on_transcript(&full, cx),
-                Err(err) => {
-                    if std::env::var_os("LIZARD_STUDIO_DEBUG").is_some() {
-                        let col = err.column();
-                        eprintln!("transcript parse failed: {err} near {:?}", joined.lines().nth(err.line().saturating_sub(1)).map(|l| l.chars().skip(col.saturating_sub(60)).take(120).collect::<String>()));
-                    }
-                    self.history.loading = false;
-                    cx.notify();
-                }
-            }
-        }
-    }
-
     fn on_transcript(&mut self, msg: &Value, cx: &mut Context<Self>) {
+        if !self.history.loading { return; }
         if msg.get("requestId").and_then(Value::as_str) != self.history.request_id.as_deref() {
+            return;
+        }
+        if msg.get("sessionId").and_then(Value::as_str) != self.meta.session_id.as_deref() {
+            self.fail_history(cx);
+            return;
+        }
+        if msg.get("error").is_some_and(|e| !e.is_null()) || !msg.get("events").is_some_and(Value::is_array) {
+            self.fail_history(cx);
             return;
         }
         self.history.loading = false;
+        self.history.error = false;
         self.history.request_id = None;
         self.history.next_cursor = msg.get("nextCursor").filter(|c| !c.is_null()).cloned();
         if msg.get("missing").and_then(Value::as_bool).unwrap_or(false) {
             self.restore_bash(cx);
-            cx.notify();
+            self.session_failed("The local helper could not find this chat’s saved history.".into(), Some("CHAT_HISTORY_MISSING"), cx);
             return;
         }
         let events = msg.get("events").and_then(Value::as_array).cloned().unwrap_or_default();
+        let events = self.history_before_reply(events, cx);
         let items = self.items_from_transcript(&events, cx);
         let count = items.len();
         if count == 0 {

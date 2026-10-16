@@ -237,7 +237,8 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v37: Claude history chunks echo the request id, so only the asking view renders them.
 // v40: the router restarts once new host files land, so an update reaches the
 //      ChatGPT host and the router too, not only this one.
-const HOST_VERSION = 40;
+// v41: checkAgent re-resolves installed CLIs without disturbing live sessions.
+const HOST_VERSION = 41;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -607,7 +608,7 @@ function resolveClaude() {
   }
   return "claude";
 }
-const CLAUDE = resolveClaude();
+let CLAUDE = resolveClaude();
 log("claude resolved to", CLAUDE, "exists=", existsSync(CLAUDE));
 
 // The node that runs this host also runs the MCP relay we hand to claude.
@@ -2915,6 +2916,10 @@ function handle(msg) {
     return;
   }
   switch (msg.type) {
+    case "checkAgent":
+      CLAUDE = resolveClaude();
+      announceAgent();
+      break;
     case "refreshModels":
       refreshModels(msg.cwd);
       break;
@@ -3076,4 +3081,7 @@ function osUserName() {
 // nothing, so report not-installed — the panel's Install Claude Code step
 // (with its 4s recheck) is what gets the user out of that state. The old
 // `|| CLAUDE === "claude"` made ok always-true and the step unreachable.
-send({ type: "ready", version: HOST_VERSION, home: homedir(), claudePath: CLAUDE, user: osUserName(), ok: existsSync(CLAUDE) });
+function announceAgent() {
+  send({ type: "ready", version: HOST_VERSION, home: homedir(), claudePath: CLAUDE, user: osUserName(), ok: existsSync(CLAUDE) });
+}
+announceAgent();
