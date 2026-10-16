@@ -219,6 +219,16 @@ impl ChatSession {
         cx.notify();
     }
 
+    /// Snapshot runs: edit the last sent prompt to `text` and send it.
+    #[cfg(feature = "snapshot")]
+    pub fn preview_edit(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.items.iter().rposition(|item| matches!(item, Item::User { .. })) else { return };
+        self.begin_edit(ix, window, cx);
+        let Some(input) = self.rewind.editor.as_ref().map(|e| e.input.clone()) else { return };
+        input.update(cx, |s, cx| s.set_value(text, window, cx));
+        self.commit_edit(cx);
+    }
+
     pub fn cancel_edit(&mut self, cx: &mut Context<Self>) -> bool {
         if self.rewind.editor.is_none() {
             return false;

@@ -52,6 +52,8 @@ impl StudioApp {
             self.close_tasks();
         } else {
             self.close_tasks();
+            // One drawer at a time over the composer, as in the panel.
+            self.close_diff(cx);
             self.tasks_ui.chat = Some(self.chats[self.active].read(cx).id().to_string());
             self.menu = None;
         }

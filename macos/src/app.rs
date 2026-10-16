@@ -49,8 +49,8 @@ use crate::theme::*;
 use crate::ui::{self, caret, lizard, ph, pulse};
 use crate::{NewChat, StopTurn};
 
-/// Live agent checks keep onboarding from replaying the daemon’s stale cache.
-const MIN_HOST_VERSION: u64 = 41;
+/// Hosts from v41 recheck installed CLIs on `checkAgent`; older ones ignore it.
+const MIN_HOST_VERSION: u64 = 40;
 /// The host learned `cloudStudio` (Lizard Studio in a Lizard sandbox) in v41.
 const CLOUD_HOST_VERSION: u64 = 41;
 const CLOUD_LABEL: &str = "Run in a sandbox";
@@ -1205,6 +1205,18 @@ impl StudioApp {
         // LIZARD_STUDIO_ATTACH files go with the test prompt too.
         let files: Vec<PathBuf> = std::env::var("LIZARD_STUDIO_ATTACH").map(|v| v.split(',').map(PathBuf::from).collect()).unwrap_or_default();
         chat.update(cx, |c, cx| c.submit(chat::Message { text: prompt, files, ..Default::default() }, cx));
+        // `LIZARD_STUDIO_QUEUE=<ms>|<text>` sends a second prompt that long after.
+        if let Some((ms, text)) = std::env::var("LIZARD_STUDIO_QUEUE").ok().and_then(|v| {
+            let (ms, text) = v.split_once('|')?;
+            Some((ms.parse::<u64>().ok()?, text.to_string()))
+        }) {
+            let chat = chat.clone();
+            cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(Duration::from_millis(ms)).await;
+                let _ = chat.update(cx, |c, cx| c.submit(chat::Message { text, ..Default::default() }, cx));
+            })
+            .detach();
+        }
         if let Some(ms) = std::env::var("LIZARD_STUDIO_ALLOW_AFTER").ok().and_then(|v| v.parse::<u64>().ok()) {
             cx.spawn(async move |_, cx| loop {
                 cx.background_executor().timer(Duration::from_millis(ms)).await;
@@ -1225,7 +1237,7 @@ impl StudioApp {
     /// Visual checks of the pickers and Settings:
     /// `LIZARD_STUDIO_PICK=<model>,<effort>,<mode>` sets the open chat's
     /// settings; `LIZARD_STUDIO_MENU=model|effort|mode|settings[:tab[:file]]`
-    /// opens one once the window has drawn (also agent, place, usage).
+    /// opens one once the window has drawn (also agent, place, usage, tasks, diff).
     #[cfg(feature = "snapshot")]
     fn preview_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Ok(pick) = std::env::var("LIZARD_STUDIO_PICK") {
@@ -1254,9 +1266,39 @@ impl StudioApp {
         if let (Ok(paths), None) = (std::env::var("LIZARD_STUDIO_ATTACH"), std::env::var_os("LIZARD_STUDIO_SEND")) {
             self.attach_paths(paths.split(',').map(PathBuf::from), cx);
         }
+        // LIZARD_STUDIO_TYPE=<text> types into the composer (slash menu, bash mode).
+        if let Ok(text) = std::env::var("LIZARD_STUDIO_TYPE") {
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(1200)).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.composer.update(cx, |s, cx| {
+                        s.focus(window, cx);
+                        s.set_value(text, window, cx);
+                    });
+                    // set_value does not emit Change, which typing would.
+                    this.composer_changed(window, cx);
+                });
+            })
+            .detach();
+        }
+        // LIZARD_STUDIO_EDIT=<ms>|<text> edits the last sent prompt (rewind).
+        if let Some((ms, text)) = std::env::var("LIZARD_STUDIO_EDIT").ok().and_then(|v| {
+            let (ms, text) = v.split_once('|')?;
+            Some((ms.parse::<u64>().ok()?, text.to_string()))
+        }) {
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(ms)).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    let chat = this.chats[this.active].clone();
+                    chat.update(cx, |c, cx| c.preview_edit(text, window, cx));
+                });
+            })
+            .detach();
+        }
         let Ok(spec) = std::env::var("LIZARD_STUDIO_MENU") else { return };
+        let at = std::env::var("LIZARD_STUDIO_MENU_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(1200);
         cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(Duration::from_millis(1200)).await;
+            cx.background_executor().timer(Duration::from_millis(at)).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 let mut parts = spec.split(':');
                 match parts.next() {
@@ -1265,6 +1307,8 @@ impl StudioApp {
                     Some("mode") => this.toggle_picker(Menu::Mode, cx),
                     Some("usage") => this.toggle_usage(cx),
                     Some("agent") => this.toggle_picker(Menu::Agent, cx),
+                    Some("tasks") => this.toggle_tasks(cx),
+                    Some("diff") => this.toggle_diff(cx),
                     Some("place") => this.toggle_picker(Menu::Place, cx),
                     Some("settings") => {
                         this.open_settings(window, cx);

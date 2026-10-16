@@ -154,6 +154,7 @@ impl StudioApp {
 
     pub(super) fn toggle_diff(&mut self, cx: &mut Context<Self>) {
         if self.diff_open(cx) { self.close_diff(cx); return; }
+        if self.tasks_open(cx) { self.close_tasks(); }
         let chat = self.chats[self.active].read(cx);
         let Some(cwd) = chat.work_cwd() else { return };
         let (id, agent) = (chat.id().to_string(), chat.meta.agent);

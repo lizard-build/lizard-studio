@@ -222,14 +222,15 @@ impl ChatSession {
         self.finish_restore(&json!({ "started": started, "running": running }), cx);
     }
 
+    /// The session's permission mode wins. Its model is a full id the picker
+    /// may not list, so the chat keeps its own (chat.js reflectModel).
     pub(super) fn apply_init_settings(&mut self, data: &Value, cx: &mut Context<Self>) {
-        let mut changed = false;
-        for (key, slot) in [("model", &mut self.meta.model), ("permissionMode", &mut self.meta.permission_mode)] {
-            if let Some(value) = data.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()) {
-                if slot.as_deref() != Some(value) { *slot = Some(value.into()); changed = true; }
+        if let Some(mode) = data.get("permissionMode").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            if self.meta.permission_mode.as_deref() != Some(mode) {
+                self.meta.permission_mode = Some(mode.into());
+                self.touch(cx);
             }
         }
-        if changed { self.touch(cx); }
         cx.notify();
     }
 

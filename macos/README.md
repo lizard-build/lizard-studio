@@ -14,6 +14,15 @@ The app has no agent code of its own. It starts the same local host as the Chrom
 - History from the agent's own transcript, paged in as you scroll up.
 - Attachments from the + button, a paste (an image, or files copied in Finder) or a drop on the composer: images as thumbnails scaled to 1568px and sent inline, other files as chips the agent reads by path. In a cloud chat every attachment is put in the sandbox under `/workspace/attachments` (`lizard sandbox files put`) and named in the message.
 - The context ring opens the usage popover: the chat's context window, then the plan's limits. Claude's come from the `rate_limit_event` each turn streams (five-hour and weekly windows), ChatGPT's from the host's `planUsage`. A cloud chat shows the context window only.
+- Prompts sent while a turn runs wait above the composer, where you can edit, remove or steer one (steering stops the turn and sends it next).
+- Click a sent prompt to edit it: the chat rewinds to that point and runs again (`rewind`, for local Claude and ChatGPT chats).
+- Slash commands: the menu filters as you type, takes ↑↓, tab and enter, shows argument hints, and handles `/clear`, `/login` and `/remote-control` in the app.
+- Bash mode: start a message with `!` to run it in the chat's folder; the run streams into the chat and its output goes with your next prompt.
+- The bar above the composer: the branch (pick one to switch), the diff count, which opens a drawer of changed files with word-level highlights, and the background task count, which opens a drawer to watch or stop tasks. Drafts are kept per chat.
+- Plan mode ends in a plan card with View plan; agent status events (rate limits, compaction) show as notices.
+- ChatGPT's async questions become question cards with Dismiss. MCP elicitation shows the server's form (text, numbers, yes/no, choices) or its link.
+- Sign-in: `/login`, or an expired token, shows the panel's sign-in card; the failed prompt is sent again once you're back. A chat idle for over two hours restarts its agent before the next prompt. `/remote-control` shows Open in Claude, Copy link and Turn off.
+- Recovery: if the agent stops or the host drops, the chat says why and offers Reconnect; replies that were running when the app quit are restored from the daemon.
 
 There is no browser here, so the `browser_*` tools answer "No browser is attached". Use the extension for page work.
 
@@ -53,6 +62,9 @@ LIZARD_STUDIO_SHOT_QUIT=1 ./target/debug/lizard-studio
 - `LIZARD_STUDIO_ATTACH=<path,path>` puts files in the tray (or, with `LIZARD_STUDIO_SEND`, sends them with the test prompt).
 - `LIZARD_STUDIO_CONNECT=claude|codex` starts that sign-in 4 seconds in (put a fake `open` first in PATH to keep the browser shut).
 - `LIZARD_STUDIO_PICK=<model>,<effort>,<mode>` sets the new chat's settings; `LIZARD_STUDIO_MENU=model|effort|mode|agent|place|usage|settings[:claude|codex|models[:<file>|new]]` opens that picker or Settings tab once the window has drawn. Popovers fade in, so take two shots (`LIZARD_STUDIO_SHOT_AT=3000,4500`) and use the second.
+- `LIZARD_STUDIO_MENU` also takes `tasks` and `diff`; `LIZARD_STUDIO_MENU_AT=<ms>` opens it later than the default 1.2 s.
+- `LIZARD_STUDIO_TYPE=<text>` types into the composer (`/re` for the slash menu, `!ls` for Bash mode).
+- `LIZARD_STUDIO_QUEUE=<ms>|<text>` sends a second prompt to the `LIZARD_STUDIO_SEND` chat that long after; `LIZARD_STUDIO_EDIT=<ms>|<text>` edits its last prompt.
 - `LIZARD_STUDIO_DEBUG=1` logs host messages; with `LIZARD_STUDIO_DUMP=<dir>` it also saves the `models`, `ready`, `agentReady` and `commands` messages there.
 
-Neither kind of test chat is saved.
+Neither kind of test chat is saved. A snapshot run attaches to its own daemon (window 4242424243), so it never knocks the installed app off its daemon or picks up its chats.

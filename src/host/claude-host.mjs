@@ -237,8 +237,8 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v37: Claude history chunks echo the request id, so only the asking view renders them.
 // v40: the router restarts once new host files land, so an update reaches the
 //      ChatGPT host and the router too, not only this one.
-// v41: checkAgent re-resolves installed CLIs without disturbing live sessions.
-const HOST_VERSION = 41;
+// next: checkAgent re-resolves installed CLIs without disturbing live sessions.
+const HOST_VERSION = 40;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 

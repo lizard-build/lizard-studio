@@ -17,7 +17,7 @@ for (const agent of ['claude', 'codex']) {
     const sessions = new Map([['running', { running: true, text: 'partial reply' }]]);
     const current = sessions.get('running');
     const scope = {
-      CLAUDE: 'claude', CODEX: '', HOST_VERSION: 41, CODEX_HOST_VERSION: 12, sessions,
+      CLAUDE: 'claude', CODEX: '', HOST_VERSION: 40, CODEX_HOST_VERSION: 12, sessions,
       resolveClaude: () => installed ? '/test/bin/claude' : 'claude',
       resolveCodex: () => installed ? '/test/bin/codex' : '',
       existsSync: (path) => installed && path === '/test/bin/claude',

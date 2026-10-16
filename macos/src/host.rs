@@ -22,6 +22,16 @@ use serde_json::{Value, json};
 /// counters; this one is far outside their range.
 pub const APP_WINDOW_ID: u64 = 4_242_424_242;
 
+/// A daemon holds one client per window, so a snapshot run gets its own
+/// rather than knocking the installed app off (and adopting its chats).
+fn window_id() -> u64 {
+    #[cfg(feature = "snapshot")]
+    if std::env::var_os("LIZARD_STUDIO_SHOT").is_some() {
+        return APP_WINDOW_ID + 1;
+    }
+    APP_WINDOW_ID
+}
+
 /// Same bound as hostkit.mjs: a corrupt prefix must not allocate forever.
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
@@ -102,7 +112,7 @@ impl HostConnection {
             })?;
 
         let connection = Self { child, stdin };
-        connection.send(&json!({ "type": "runtimeAttach", "windowId": APP_WINDOW_ID }))?;
+        connection.send(&json!({ "type": "runtimeAttach", "windowId": window_id() }))?;
         Ok(connection)
     }
 
