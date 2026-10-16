@@ -24,6 +24,7 @@ mod drafts;
 mod git_diff;
 mod images;
 mod pickers;
+mod questions;
 mod settings;
 mod tasks;
 mod usage;
@@ -330,6 +331,9 @@ impl StudioApp {
             HostEvent::Message(msg) => self.on_host_message(msg, cx),
             HostEvent::Disconnected(reason) => {
                 self.host.detach();
+                for chat in self.chats.clone() {
+                    chat.update(cx, |c, cx| c.fail_question_sends(cx));
+                }
                 self.host_state.connected = false;
                 eprintln!("host disconnected: {reason}");
                 cx.notify();
@@ -981,9 +985,8 @@ impl StudioApp {
         let chat = self.chats[self.active].clone();
         let request_id = chat
             .read(cx)
-            .permissions
-            .first()
-            .filter(|p| !p.questions.is_empty())
+            .active_permission()
+            .filter(|p| !p.questions.is_empty() && p.question_editable())
             .map(|p| p.request_id.clone())?;
         Some((chat, request_id))
     }
@@ -1056,13 +1059,14 @@ impl StudioApp {
         }
         let chat = self.chats[self.active].clone();
         let composer_empty = self.composer.read(cx).value().trim().is_empty();
-        let perm = chat.read(cx).permissions.first().map(|p| {
+        if self.elicitation_key(key, mods.modified(), _window, cx) { return; }
+        let perm = chat.read(cx).active_permission().map(|p| {
             let count = if p.questions.is_empty() {
                 3
             } else {
                 p.questions.get(p.question_ix).map(|q| q.options.len() + 1).unwrap_or(1)
             };
-            (p.request_id.clone(), p.questions.is_empty(), p.hovered, count, p.other_open)
+            (p.request_id.clone(), p.questions.is_empty(), p.hovered, count, p.question_uses_input())
         });
         if let Some((rid, plain, hovered, count, other_open)) = perm {
             if key == "escape" {
@@ -1731,7 +1735,7 @@ impl StudioApp {
             }
             let dot = if !c.meta.open {
                 Dot::Idle
-            } else if !c.permissions.is_empty() {
+            } else if c.waiting_for_answer() {
                 Dot::Wait
             } else if c.running || !c.queued.is_empty() {
                 Dot::Run
@@ -2697,6 +2701,7 @@ fn render_row(
     let cwd = chat.meta.cwd.clone();
     let body: AnyElement = match &chat.items[ix] {
         Item::Bash(run) => bash::render_bash(entity, run, ix),
+        Item::Question(perm) => questions::render_async_question(entity, perm, other_answer),
         Item::User { view, images } => div()
             .w_full()
             .px(px(12.))
@@ -3007,6 +3012,10 @@ fn render_permission(entity: &Entity<ChatSession>, other_answer: &Entity<InputSt
     let cwd = chat.meta.cwd.clone();
     let rid = perm.request_id.clone();
 
+    if perm.elicitation.is_some() {
+        return questions::render_elicitation(entity, _window, cx);
+    }
+
     let card = div().w_full().flex().flex_col().px(px(14.)).pt(px(12.)).pb(px(10.)).rounded(px(12.)).bg(hex(BG_CARD));
 
     if !perm.questions.is_empty() {
@@ -3086,7 +3095,8 @@ fn render_question(
             .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(format!("{who} is asking")))
             .when(total > 1, |d| {
                 d.child(div().ml_auto().text_size(px(11.)).text_color(hex(TEXT_TERTIARY)).child(format!("{} of {total}", perm.question_ix + 1)))
-            }),
+            })
+            .children(questions::dismiss_button(entity, perm)),
     )
     .when_some(q.header.clone(), |d, header| {
         d.child(

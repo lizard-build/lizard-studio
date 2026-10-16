@@ -22,6 +22,8 @@ mod images;
 mod tasks;
 pub use tasks::{Task, TaskKind};
 use tasks::{note_task_result, note_task_start, scan_task_notice};
+mod questions;
+pub use questions::{AsyncQuestion, Elicitation, FieldKind};
 
 use crate::cloud::{self, CloudMsg};
 use crate::host::HostLink;
@@ -100,10 +102,12 @@ pub enum Item {
     Assistant { msg_id: Option<String>, text: String, view: Entity<TextViewState>, footer: Option<Footer> },
     Tools(ToolGroup),
     Bash(bash::BashRun),
+    Question(Permission),
     Notice { warn: bool, text: SharedString },
 }
 
 pub struct Question {
+    pub id: Option<String>,
     pub header: Option<String>,
     pub question: String,
     pub options: Vec<(String, Option<String>)>,
@@ -122,6 +126,8 @@ pub struct Permission {
     pub picked: Vec<usize>,
     pub hovered: usize,
     pub other_open: bool,
+    pub async_question: Option<AsyncQuestion>,
+    pub elicitation: Option<Elicitation>,
 }
 
 #[derive(Default)]
@@ -493,6 +499,7 @@ impl ChatSession {
         if self.meta.cloud {
             return self.deliver_cloud(message, cx);
         }
+        self.close_async_questions("No longer needed", cx);
         let Message { text, images, files } = message;
         // The agent reads attached files itself, by path.
         let paths: Vec<String> = files.iter().map(|p| p.to_string_lossy().to_string()).collect();
@@ -681,6 +688,8 @@ impl ChatSession {
                 self.commands = list;
                 cx.notify();
             }
+            "async_question" => self.show_async_question(msg, cx),
+            "promptResult" => self.finish_question_answer(msg, cx),
             "permission" => {
                 if self.permissions.is_empty() {
                     cx.emit(ChatEvent::Asked);
@@ -698,6 +707,7 @@ impl ChatSession {
             }
             "interrupted" => {
                 self.finish_agents(now_ms());
+                self.close_async_questions("Closed", cx);
                 if self.running {
                     self.end_turn(cx);
                 }
@@ -748,6 +758,7 @@ impl ChatSession {
     /// The agent's process went away (helper crash or update).
     pub fn on_agent_exit(&mut self, cx: &mut Context<Self>) {
         self.started = false;
+        self.fail_question_sends(cx);
         if self.running {
             self.notice(true, format!("The {} helper stopped.", self.meta.agent.label()), cx);
             self.end_turn(cx);
@@ -783,6 +794,7 @@ impl ChatSession {
             return;
         }
         match data.get("type").and_then(Value::as_str).unwrap_or("") {
+            "async_question" => self.show_async_question(data, cx),
             "system" => {
                 if data.get("subtype").and_then(Value::as_str) == Some("init") {
                     self.started = true;
@@ -843,6 +855,10 @@ impl ChatSession {
             }
             "result" => {
                 let is_error = data.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                // Async questions outlive a good turn, not a stop or failure.
+                if is_error || data.get("result").and_then(Value::as_str) == Some("Stopped.") {
+                    self.close_async_questions("Closed", cx);
+                }
                 if is_error {
                     let text = data
                         .get("result")
@@ -1222,7 +1238,13 @@ impl ChatSession {
     // ---- permissions ---------------------------------------------------------
 
     pub fn answer_permission(&mut self, request_id: &str, choice: PermissionChoice, cx: &mut Context<Self>) {
+        if self.dismiss_async_question(request_id, cx) { return; }
         let Some(pos) = self.permissions.iter().position(|p| p.request_id == request_id) else { return };
+        if self.permissions[pos].elicitation.is_some() {
+            let option = match choice { PermissionChoice::Allow => 0, PermissionChoice::AlwaysAllow => 1, _ => 2 };
+            self.answer_elicitation(request_id, option, cx);
+            return;
+        }
         let perm = self.permissions.remove(pos);
         let mut reply = json!({ "type": "permissionResult", "requestId": perm.request_id });
         let obj = reply.as_object_mut().unwrap();
@@ -1258,7 +1280,7 @@ impl ChatSession {
     }
 
     pub fn hover_option(&mut self, request_id: &str, option: usize, cx: &mut Context<Self>) {
-        if let Some(perm) = self.permissions.iter_mut().find(|p| p.request_id == request_id) {
+        if let Some(perm) = self.question_mut(request_id) {
             if perm.hovered != option {
                 perm.hovered = option;
                 cx.notify();
@@ -1269,7 +1291,8 @@ impl ChatSession {
     /// Pick an option of the current question; a single-choice question moves
     /// on at once, the last one sends every answer.
     pub fn pick_option(&mut self, request_id: &str, option: usize, cx: &mut Context<Self>) {
-        let Some(perm) = self.permissions.iter_mut().find(|p| p.request_id == request_id) else { return };
+        let Some(perm) = self.question_mut(request_id) else { return };
+        if !perm.question_editable() { return; }
         let Some(question) = perm.questions.get(perm.question_ix) else { return };
         if option >= question.options.len() {
             perm.other_open = true;
@@ -1291,7 +1314,8 @@ impl ChatSession {
 
     /// Confirm a multi-choice question, or answer with free text.
     pub fn confirm_question(&mut self, request_id: &str, free_text: Option<String>, cx: &mut Context<Self>) {
-        let Some(perm) = self.permissions.iter_mut().find(|p| p.request_id == request_id) else { return };
+        let Some(perm) = self.question_mut(request_id) else { return };
+        if !perm.question_editable() { return; }
         let Some(question) = perm.questions.get(perm.question_ix) else { return };
         let mut parts: Vec<String> = perm
             .picked
@@ -1308,15 +1332,20 @@ impl ChatSession {
     }
 
     fn record_answer(&mut self, request_id: &str, answer: String, cx: &mut Context<Self>) {
-        let Some(perm) = self.permissions.iter_mut().find(|p| p.request_id == request_id) else { return };
+        let Some(perm) = self.question_mut(request_id) else { return };
+        if !perm.question_editable() { return; }
         if let Some(question) = perm.questions.get(perm.question_ix) {
-            perm.answers.insert(question.question.clone(), answer);
+            perm.answers.insert(perm.answer_key(question).to_string(), answer);
         }
         perm.picked.clear();
         perm.other_open = false;
         perm.hovered = 0;
         perm.question_ix += 1;
         if perm.question_ix >= perm.questions.len() {
+            if perm.async_question.is_some() {
+                self.send_question_answer(request_id, cx);
+                return;
+            }
             let answers = perm.answers.clone();
             self.answer_permission(request_id, PermissionChoice::Answers(answers), cx);
         } else {
@@ -1481,6 +1510,14 @@ impl ChatSession {
                 continue;
             }
             match event.get("type").and_then(Value::as_str).unwrap_or("") {
+                "async_question" => {
+                    if let Some(perm) = questions::async_permission(event) {
+                        if !self.has_async_question(&perm.request_id) && !items.iter().any(|item| matches!(item, Item::Question(p) if p.request_id == perm.request_id)) {
+                            items.push(Item::Question(perm));
+                            open_group = false;
+                        }
+                    }
+                }
                 "user" => {
                     let content = message.and_then(|m| m.get("content"));
                     let mut texts = Vec::new();
@@ -1519,7 +1556,10 @@ impl ChatSession {
                     let raw = texts.join("\n");
                     scan_task_notice(&mut self.tasks, &raw, at);
                     let text = clean_user_text(&raw);
-                    if (!text.is_empty() || !images.is_empty()) && !text.starts_with("/usage") {
+                    let reply_id = event.get("questionReplyId").and_then(Value::as_str);
+                    let answered = questions::merge_history_answer(&mut items, &text, reply_id)
+                        || questions::merge_history_answer(&mut self.items, &text, reply_id);
+                    if !answered && (!text.is_empty() || !images.is_empty()) && !text.starts_with("/usage") {
                         footer(&mut items, turn_start, last_at);
                         let shown = link_paths(&text, cwd.as_deref());
                         let view = cx.new(|cx| TextViewState::markdown(&shown, cx).selectable(true));
@@ -1679,6 +1719,7 @@ fn permission_from(msg: &Value) -> Permission {
             .map(|list| {
                 list.iter()
                     .map(|q| Question {
+                        id: q.get("id").and_then(Value::as_str).map(str::to_string),
                         header: q.get("header").and_then(Value::as_str).map(str::to_string),
                         question: q.get("question").and_then(Value::as_str).unwrap_or("").to_string(),
                         options: q
@@ -1703,6 +1744,7 @@ fn permission_from(msg: &Value) -> Permission {
     } else {
         Vec::new()
     };
+    let elicitation = (tool_name == "McpElicitation").then(|| Elicitation::from_input(&input));
     Permission {
         request_id: msg.get("requestId").and_then(Value::as_str).unwrap_or("").to_string(),
         tool_name,
@@ -1715,6 +1757,8 @@ fn permission_from(msg: &Value) -> Permission {
         picked: Vec::new(),
         hovered: 0,
         other_open: false,
+        async_question: None,
+        elicitation,
     }
 }
 
