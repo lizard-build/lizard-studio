@@ -18,6 +18,10 @@ use serde_json::{Value, json};
 
 #[path = "chat_images.rs"]
 mod images;
+#[path = "tasks.rs"]
+mod tasks;
+pub use tasks::{Task, TaskKind};
+use tasks::{note_task_result, note_task_start, scan_task_notice};
 
 use crate::cloud::{self, CloudMsg};
 use crate::host::HostLink;
@@ -674,7 +678,11 @@ impl ChatSession {
                 self.permissions.retain(|p| p.request_id != rid);
                 self.sync_rows(cx);
             }
+            "shellKilled" | "shellPort" | "shellsAlive" => {
+                self.on_task_message(msg, cx);
+            }
             "interrupted" => {
+                self.finish_agents(now_ms());
                 if self.running {
                     self.end_turn(cx);
                 }
@@ -754,7 +762,9 @@ impl ChatSession {
     }
 
     fn on_event(&mut self, data: &Value, cx: &mut Context<Self>) {
-        if data.get("parent_tool_use_id").map_or(false, |v| !v.is_null()) {
+        if let Some(parent) = data.get("parent_tool_use_id").and_then(Value::as_str) {
+            self.note_agent_activity(parent, data);
+            cx.notify();
             return;
         }
         match data.get("type").and_then(Value::as_str).unwrap_or("") {
@@ -805,13 +815,13 @@ impl ChatSession {
                             match block.get("type").and_then(Value::as_str) {
                                 Some("tool_result") => self.fill_tool_result(block, cx),
                                 Some("text") => {
-                                    scan_task_notice(&mut self.tasks, block.get("text").and_then(Value::as_str).unwrap_or(""))
+                                    scan_task_notice(&mut self.tasks, block.get("text").and_then(Value::as_str).unwrap_or(""), now_ms())
                                 }
                                 _ => {}
                             }
                         }
                     }
-                    Some(Value::String(text)) => scan_task_notice(&mut self.tasks, text),
+                    Some(Value::String(text)) => scan_task_notice(&mut self.tasks, text, now_ms()),
                     _ => {}
                 }
                 cx.notify();
@@ -916,7 +926,7 @@ impl ChatSession {
                     if self.tool_index.contains_key(&tool_id) {
                         continue;
                     }
-                    note_task_start(&mut self.tasks, block);
+                    note_task_start(&mut self.tasks, block, now_ms());
                     self.push_tool(
                         ToolCall {
                             id: tool_id,
@@ -966,7 +976,7 @@ impl ChatSession {
                 let is_error = block.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                 tool.status = if is_error { ToolStatus::Error } else { ToolStatus::Done };
                 tool.output = Some(result_text(block.get("content")));
-                note_task_result(&mut self.tasks, &tool.id, tool.output.as_deref().unwrap_or(""), is_error);
+                note_task_result(&mut self.tasks, &tool.id, &tool.name, &tool.input, tool.output.as_deref().unwrap_or(""), is_error, now_ms());
             }
         }
         cx.notify();
@@ -1443,6 +1453,10 @@ impl ChatSession {
         for event in events {
             let message = event.get("message");
             let at = event.get("timestamp").and_then(Value::as_str).and_then(parse_iso_ms).unwrap_or(last_at);
+            if let Some(parent) = event.get("parent_tool_use_id").and_then(Value::as_str) {
+                self.note_agent_activity(parent, event);
+                continue;
+            }
             match event.get("type").and_then(Value::as_str).unwrap_or("") {
                 "user" => {
                     let content = message.and_then(|m| m.get("content"));
@@ -1468,7 +1482,7 @@ impl ChatSession {
                                                     tool.status = if is_error { ToolStatus::Error } else { ToolStatus::Done };
                                                     tool.output = Some(result_text(block.get("content")));
                                                     let output = tool.output.clone().unwrap_or_default();
-                                                    note_task_result(&mut self.tasks, id, &output, is_error);
+                                                    note_task_result(&mut self.tasks, id, &tool.name, &tool.input, &output, is_error, at);
                                                 }
                                             }
                                         }
@@ -1480,7 +1494,7 @@ impl ChatSession {
                         _ => {}
                     }
                     let raw = texts.join("\n");
-                    scan_task_notice(&mut self.tasks, &raw);
+                    scan_task_notice(&mut self.tasks, &raw, at);
                     let text = clean_user_text(&raw);
                     if (!text.is_empty() || !images.is_empty()) && !text.starts_with("/usage") {
                         footer(&mut items, turn_start, last_at);
@@ -1514,7 +1528,7 @@ impl ChatSession {
                                 if tools.contains_key(&id) {
                                     continue;
                                 }
-                                note_task_start(&mut self.tasks, block);
+                                note_task_start(&mut self.tasks, block, at);
                                 let tool = ToolCall {
                                     id: id.clone(),
                                     name: block.get("name").and_then(Value::as_str).unwrap_or("Tool").to_string(),
@@ -2031,113 +2045,6 @@ pub fn permission_options(perm: &Permission, agent: Agent) -> Vec<String> {
     };
     let who = if agent == Agent::Codex { "ChatGPT" } else { "Claude" };
     vec!["Yes".into(), always, format!("No, and tell {who} what to do differently (esc)")]
-}
-
-// ---- background tasks (chat.js noteToolStart / scanBgNotice) ----------------
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum TaskKind {
-    Agent,
-    Shell,
-    Preview,
-}
-
-pub struct Task {
-    pub tool_id: String,
-    pub kind: TaskKind,
-    /// The shell or agent id a completion notice names.
-    pub handle: Option<String>,
-    pub running: bool,
-}
-
-/// A subagent, a background command or a preview server is a task.
-fn note_task_start(tasks: &mut Vec<Task>, block: &Value) {
-    let id = block.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-    let name = block.get("name").and_then(Value::as_str).unwrap_or("");
-    let input = block.get("input");
-    let kind = match name {
-        "Task" | "Agent" => TaskKind::Agent,
-        "Bash" if input.and_then(|i| i.get("run_in_background")).and_then(Value::as_bool) == Some(true) => TaskKind::Shell,
-        n if n.ends_with("preview_start") => TaskKind::Preview,
-        _ => return,
-    };
-    if tasks.iter().any(|t| t.tool_id == id) {
-        return;
-    }
-    tasks.push(Task { tool_id: id, kind, handle: None, running: true });
-}
-
-fn note_task_result(tasks: &mut [Task], tool_id: &str, output: &str, is_error: bool) {
-    let Some(task) = tasks.iter_mut().find(|t| t.tool_id == tool_id) else { return };
-    match task.kind {
-        // A background agent answers at once with its id and finishes later.
-        TaskKind::Agent => {
-            let handle = after_label(output, "agentId:");
-            if !is_error && handle.is_some() && output.to_lowercase().contains("launched") {
-                task.handle = handle;
-            } else {
-                task.running = false;
-            }
-        }
-        TaskKind::Shell => {
-            task.handle = after_label(output, "ID:").or_else(|| output.split_whitespace().find(|w| w.starts_with("bash_")).map(str::to_string));
-            if is_error {
-                task.running = false;
-            }
-        }
-        TaskKind::Preview => {
-            if is_error {
-                task.running = false;
-            }
-        }
-    }
-}
-
-/// The CLI's synthetic "task finished" turns end the task they name.
-fn scan_task_notice(tasks: &mut [Task], text: &str) {
-    if text.is_empty() || !tasks.iter().any(|t| t.running && t.handle.is_some()) {
-        return;
-    }
-    let lower = text.to_lowercase();
-    const DONE: &[&str] = &[
-        "completed", "complete", "exited", "exit code", "finished", "killed", "terminated", "stopped", "no longer running",
-    ];
-    if !DONE.iter().any(|w| lower.contains(w)) {
-        return;
-    }
-    for task in tasks.iter_mut().filter(|t| t.running) {
-        if let Some(handle) = &task.handle {
-            if mentions_id(text, handle) {
-                task.running = false;
-            }
-        }
-    }
-}
-
-fn after_label(text: &str, label: &str) -> Option<String> {
-    let start = text.find(label)? + label.len();
-    let id: String = text[start..]
-        .trim_start()
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-        .collect();
-    (!id.is_empty()).then_some(id)
-}
-
-/// `id` as a whole token: "bash_1" must not match inside "bash_10".
-fn mentions_id(text: &str, id: &str) -> bool {
-    let is_id = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
-    text.match_indices(id).any(|(at, _)| {
-        let before = text[..at].chars().next_back().map_or(true, |c| !is_id(c));
-        let after = text[at + id.len()..].chars().next().map_or(true, |c| !is_id(c));
-        before && after
-    })
-}
-
-impl ChatSession {
-    pub fn task_counts(&self) -> (usize, usize) {
-        (self.tasks.iter().filter(|t| t.running).count(), self.tasks.len())
-    }
 }
 
 // ---- file paths in inline code (render.js filePath) -------------------------

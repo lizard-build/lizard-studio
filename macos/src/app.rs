@@ -23,6 +23,7 @@ mod drafts;
 mod images;
 mod pickers;
 mod settings;
+mod tasks;
 mod usage;
 
 use crate::chat::{
@@ -144,6 +145,7 @@ pub struct StudioApp {
     /// Connecting a cloud agent to the Lizard account (connect_card.rs).
     connect: Entity<connect_card::ConnectUi>,
     cloud: CloudState,
+    tasks_ui: tasks::TasksUi,
     sidebar_open: bool,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -166,6 +168,7 @@ impl StudioApp {
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_millis(500)).await;
             let alive = this.update(cx, |this, cx| {
+                this.tick_tasks(cx);
                 if this.chats.iter().any(|c| c.read(cx).running) {
                     cx.notify();
                 }
@@ -262,6 +265,7 @@ impl StudioApp {
             settings,
             connect,
             cloud: CloudState::default(),
+            tasks_ui: tasks::TasksUi::default(),
             sidebar_open: true,
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
@@ -598,6 +602,8 @@ impl StudioApp {
             cx.notify();
         });
         self._subscriptions.push(sub);
+        // Tasks keep changing after the main turn ends.
+        self._subscriptions.push(cx.observe(chat, |_, _, cx| cx.notify()));
     }
 
     /// chat.js playDoneChime: only if the user turned it on, and never for
@@ -718,6 +724,7 @@ impl StudioApp {
     }
 
     fn after_switch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_tasks();
         self.menu = None;
         self.switch_draft(window, cx);
         self.image_viewer = None;
@@ -1007,6 +1014,12 @@ impl StudioApp {
             return;
         }
         if self.menu == Some(Menu::Effort) && !mods.modified() && self.effort_key(key, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if key == "escape" && self.tasks_open(cx) {
+            self.close_tasks();
+            cx.notify();
             cx.stop_propagation();
             return;
         }
@@ -2133,6 +2146,7 @@ impl StudioApp {
                             ),
                         )
                     })
+                    .when(self.tasks_open(cx), |d| d.child(self.render_tasks_drawer(cx)))
 
             )
             .child(self.render_composer(cx))
@@ -2321,6 +2335,7 @@ impl StudioApp {
                 .mb(px(-14.))
                 .rounded_tl(px(14.))
                 .rounded_tr(px(14.))
+                .when(self.tasks_open(cx), |d| d.rounded_tl(px(0.)).rounded_tr(px(0.)))
                 .bg(hex(BG_SECONDARY))
                 .relative()
                 .child(pop::track(&self.bounds, "git-flap"))
@@ -2362,6 +2377,9 @@ impl StudioApp {
                 })
                 .when(tasks_total > 0, |d| {
                     let chip = div()
+                        .id("tasks-toggle")
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_tasks(cx)))
                         .flex()
                         .items_center()
                         .gap(px(8.))
