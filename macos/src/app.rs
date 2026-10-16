@@ -22,6 +22,7 @@ mod bash;
 mod connect_card;
 mod branches;
 mod drafts;
+mod edit;
 mod git_diff;
 mod images;
 mod local_session;
@@ -1052,6 +1053,11 @@ impl StudioApp {
                 self.close_plan(_window, cx);
                 cx.stop_propagation();
             }
+            return;
+        }
+        if key == "escape" && self.chats[self.active].update(cx, |chat, cx| chat.cancel_edit(cx)) {
+            self.composer.update(cx, |state, cx| state.focus(_window, cx));
+            cx.stop_propagation();
             return;
         }
         if self.settings.open {
@@ -2662,20 +2668,7 @@ fn render_row(
     let body: AnyElement = match &chat.items[ix] {
         Item::Bash(run) => bash::render_bash(entity, run, ix),
         Item::Question(perm) => questions::render_async_question(entity, perm, other_answer),
-        Item::User { view, images } => div()
-            .w_full()
-            .px(px(12.))
-            .py(px(8.))
-            .rounded(px(10.))
-            .bg(hex(BG_SECONDARY))
-            .border_1()
-            .border_color(white_a(0.08))
-            .text_size(px(14.))
-            .line_height(relative(1.55))
-            .text_color(hex(TEXT_PRIMARY))
-            .children(images::bubble_thumbs(images, image_app, ix))
-            .child(markdown_view(view))
-            .into_any_element(),
+        Item::User { .. } => edit::render_user(entity, image_app, ix, cx),
         Item::Assistant { view, footer, .. } => {
             let group: SharedString = format!("reply-{ix}").into();
             let footer = footer.as_ref().map(|f| (f.at, f.copy.clone()));

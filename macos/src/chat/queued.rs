@@ -152,9 +152,9 @@ impl ChatSession {
     }
 
     pub(super) fn flush_queued(&mut self, cx: &mut Context<Self>) {
-        // Nothing leaves the queue while a session starts, fails, restores
-        // or waits for sign-in.
-        if self.running || self.start_pending || self.failure.is_some() || self.restoring || self.local.blocked() {
+        // Nothing leaves the queue while a session starts, fails, restores,
+        // waits for sign-in or holds for an edit.
+        if self.running || self.start_pending || self.failure.is_some() || self.restoring || self.local.blocked() || self.rewind_blocks_send() {
             return;
         }
         let editing = self.queued_edit.as_ref().map(|e| e.id.as_str());

@@ -138,6 +138,7 @@ impl ChatSession {
 
     pub fn on_agent_exit(&mut self, cx: &mut Context<Self>) {
         if self.meta.cloud { return; }
+        self.abort_rewind(cx);
         self.start_pending = false;
         let had_session = self.started || self.running;
         self.started = false;
@@ -235,7 +236,11 @@ impl ChatSession {
     pub fn history_error(&self) -> bool { self.history.error }
 
     pub fn fail_history(&mut self, cx: &mut Context<Self>) {
-        if self.history.fail(None) { cx.notify(); }
+        if self.history.fail(None) {
+            // Prompts held for Claude's turn count go out without it.
+            self.flush_queued(cx);
+            cx.notify();
+        }
     }
 
     pub fn retry_history(&mut self, cx: &mut Context<Self>) {
@@ -259,7 +264,7 @@ impl ChatSession {
     }
 
     pub fn load_earlier(&mut self, cx: &mut Context<Self>) {
-        if self.history.loading || self.history.error { return; }
+        if self.history.loading || self.history.error || self.rewind.pending.is_some() { return; }
         if let Some(cursor) = self.history.next_cursor.clone() {
             self.request_history_page(Some(cursor), cx);
         }

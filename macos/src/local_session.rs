@@ -240,9 +240,8 @@ impl ChatSession {
                 self.meta.title = title.chars().take(40).collect();
             }
         }
-        if !silent {
-            self.user_item(&text, super::images::sent_images(&images), cx);
-        }
+        // A sign-in retry resends a prompt the chat already shows.
+        let message_id = (!silent).then(|| self.record_prompt(&text, &images, cx));
         let bash_context = if text.starts_with('/') { String::new() } else { self.take_bash_context() };
         let wire = if (self.context_sent && bash_context.is_empty()) || text.starts_with('/') {
             text
@@ -252,7 +251,7 @@ impl ChatSession {
             format!("{CTX_START}{app_context}\n\n{bash_context}{CTX_END}\n\n{text}")
         };
         self.reset_agent_events();
-        self.send(json!({ "type": "prompt", "text": wire, "images": images }));
+        self.send(json!({ "type": "prompt", "text": wire, "images": images, "messageId": message_id }));
         self.begin_turn();
         self.touch(cx);
         self.sync_rows(cx);

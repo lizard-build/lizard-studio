@@ -26,6 +26,8 @@ mod questions;
 pub use questions::{AsyncQuestion, Elicitation, FieldKind};
 #[path = "agent_events.rs"]
 pub mod agent_events;
+mod rewind;
+pub use rewind::UserPrompt;
 
 use crate::cloud::{self, CloudMsg};
 use crate::host::HostLink;
@@ -110,7 +112,7 @@ pub struct Footer {
 }
 
 pub enum Item {
-    User { view: Entity<TextViewState>, images: Vec<std::sync::Arc<Image>> },
+    User { view: Entity<TextViewState>, images: Vec<std::sync::Arc<Image>>, prompt: Option<UserPrompt> },
     Assistant { msg_id: Option<String>, text: String, view: Entity<TextViewState>, footer: Option<Footer> },
     Tools(ToolGroup),
     Bash(bash::BashRun),
@@ -214,6 +216,7 @@ pub struct ChatSession {
     session_generation: u64,
     host: Rc<HostLink>,
     history: History,
+    rewind: rewind::RewindState,
     streamed_msg_ids: HashSet<String>,
     stream_blocks: HashMap<u64, usize>,
     tool_index: HashMap<String, (usize, usize)>,
@@ -276,6 +279,7 @@ impl ChatSession {
             session_generation: 0,
             host,
             history: History::default(),
+            rewind: rewind::RewindState::default(),
             streamed_msg_ids: HashSet::new(),
             stream_blocks: HashMap::new(),
             tool_index: HashMap::new(),
@@ -424,7 +428,7 @@ impl ChatSession {
     fn user_item(&mut self, text: &str, images: Vec<std::sync::Arc<Image>>, cx: &mut Context<Self>) {
         let shown = link_paths(text, self.work_cwd().as_deref());
         let view = cx.new(|cx| TextViewState::markdown(&shown, cx).selectable(true));
-        self.push(Item::User { view, images }, cx);
+        self.push(Item::User { view, images, prompt: None }, cx);
     }
 
     /// A tool call joins the open group, or starts one.
@@ -533,7 +537,7 @@ impl ChatSession {
             self.notice(true, "Choose a project folder first.", cx);
             return;
         }
-        if self.running || self.local.blocked() || self.start_pending || self.failure.is_some() || self.restoring || !self.queued.is_empty() {
+        if self.running || self.local.blocked() || self.start_pending || self.failure.is_some() || self.restoring || self.rewind_blocks_send() || !self.queued.is_empty() {
             self.queued.push_back(QueuedPrompt::new(message));
             self.sync_rows(cx);
             self.flush_queued(cx);
@@ -558,6 +562,7 @@ impl ChatSession {
     }
 
     fn begin_turn(&mut self) {
+        self.rewind.editor = None;
         self.running = true;
         self.submitted = true;
         self.stopping = false;
@@ -686,6 +691,9 @@ impl ChatSession {
     // ---- host messages -------------------------------------------------------
 
     pub fn on_host_message(&mut self, msg: &Value, cx: &mut Context<Self>) {
+        if self.on_rewind_message(msg, cx) {
+            return;
+        }
         if self.on_local_message(msg, cx) {
             return;
         }
@@ -796,8 +804,14 @@ impl ChatSession {
                 }
                 cx.notify();
             }
-            "transcript" => self.on_transcript(msg, cx),
-            "transcriptPart" => self.on_transcript_part(msg, cx),
+            "transcript" => {
+                self.on_transcript(msg, cx);
+                self.flush_history_queue(cx);
+            }
+            "transcriptPart" => {
+                self.on_transcript_part(msg, cx);
+                self.flush_history_queue(cx);
+            }
             _ => {}
         }
     }
@@ -1416,6 +1430,7 @@ impl ChatSession {
         self.history.error = false;
         self.history.request_id = None;
         self.history.next_cursor = msg.get("nextCursor").filter(|c| !c.is_null()).cloned();
+        self.note_history_turns(msg);
         if msg.get("missing").and_then(Value::as_bool).unwrap_or(false) {
             self.restore_bash(cx);
             self.session_failed("The local helper could not find this chat’s saved history.".into(), Some("CHAT_HISTORY_MISSING"), cx);
@@ -1549,7 +1564,7 @@ impl ChatSession {
                         footer(&mut items, turn_start, last_at);
                         let shown = link_paths(&text, cwd.as_deref());
                         let view = cx.new(|cx| TextViewState::markdown(&shown, cx).selectable(true));
-                        items.push(Item::User { view, images });
+                        items.push(Item::User { view, images, prompt: UserPrompt::from_event(event, self.meta.agent) });
                         open_group = false;
                         turn_start = items.len();
                     }
