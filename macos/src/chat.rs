@@ -8,6 +8,7 @@
 //! and a live `user` event never draws a bubble — the app draws it at send time.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -149,12 +150,12 @@ pub struct ChatSession {
     ctx_base: u64,
     pub status_word: &'static str,
     pub permissions: Vec<Permission>,
-    pub queued: VecDeque<String>,
+    pub queued: VecDeque<Message>,
     pub restart_pending: bool,
     pub commands: Vec<String>,
     pub need_connect: Option<NeedConnect>,
     /// The last message a cloud turn carried, for a retry after connecting.
-    last_cloud_text: Option<String>,
+    last_cloud: Option<(String, Vec<PathBuf>)>,
     host: Rc<HostLink>,
     history: History,
     streamed_msg_ids: HashSet<String>,
@@ -203,7 +204,7 @@ impl ChatSession {
             restart_pending: false,
             commands: Vec::new(),
             need_connect: None,
-            last_cloud_text: None,
+            last_cloud: None,
             host,
             history: History::default(),
             streamed_msg_ids: HashSet::new(),
@@ -449,9 +450,9 @@ impl ChatSession {
     }
 
     /// Send what the user typed, or queue it behind the running turn.
-    pub fn submit(&mut self, text: String, images: Vec<Value>, cx: &mut Context<Self>) {
-        let text = text.trim().to_string();
-        if text.is_empty() && images.is_empty() {
+    pub fn submit(&mut self, message: Message, cx: &mut Context<Self>) {
+        let message = Message { text: message.text.trim().to_string(), ..message };
+        if message.text.is_empty() && message.images.is_empty() && message.files.is_empty() {
             return;
         }
         if self.meta.cwd.is_none() && !self.meta.cloud {
@@ -459,19 +460,23 @@ impl ChatSession {
             return;
         }
         if self.running {
-            self.queued.push_back(text);
+            self.queued.push_back(message);
             cx.notify();
             return;
         }
         // A new message moves on from the one waiting for a credential.
         self.need_connect = None;
-        self.deliver(text, images, cx);
+        self.deliver(message, cx);
     }
 
-    fn deliver(&mut self, text: String, images: Vec<Value>, cx: &mut Context<Self>) {
+    fn deliver(&mut self, message: Message, cx: &mut Context<Self>) {
         if self.meta.cloud {
-            return self.deliver_cloud(text, cx);
+            return self.deliver_cloud(message, cx);
         }
+        let Message { text, images, files } = message;
+        // The agent reads attached files itself, by path.
+        let paths: Vec<String> = files.iter().map(|p| p.to_string_lossy().to_string()).collect();
+        let text = join_note(&text, &files_note(&paths));
         self.ensure_started(cx);
         if self.meta.title == DEFAULT_TITLE && !self.meta.title_edited {
             let title: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -587,7 +592,7 @@ impl ChatSession {
         cx.emit(ChatEvent::TurnEnded);
         self.sync_rows(cx);
         if let Some(next) = self.queued.pop_front() {
-            self.deliver(next, Vec::new(), cx);
+            self.deliver(next, cx);
         }
     }
 
@@ -956,7 +961,8 @@ impl ChatSession {
     // The agent runs in a Lizard sandbox (cloud.rs). What the chat shows is kept
     // in a local log, since the CLI can't read a finished conversation back.
 
-    fn deliver_cloud(&mut self, text: String, cx: &mut Context<Self>) {
+    fn deliver_cloud(&mut self, message: Message, cx: &mut Context<Self>) {
+        let Message { text, files, .. } = message;
         if self.meta.title == DEFAULT_TITLE && !self.meta.title_edited {
             let title: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
             if !title.is_empty() {
@@ -964,9 +970,12 @@ impl ChatSession {
             }
         }
         self.history.requested = true;
-        self.user_item(&text, cx);
-        cloud::append_log(&self.meta.id, &json!({ "kind": "user", "text": text, "at": now_ms() }));
-        self.run_cloud(text, cx);
+        // The bubble names the files; the sandbox paths are added on upload.
+        let names: Vec<String> = files.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).collect();
+        let shown = join_note(&text, &files_note(&names));
+        self.user_item(&shown, cx);
+        cloud::append_log(&self.meta.id, &json!({ "kind": "user", "text": shown, "at": now_ms() }));
+        self.run_cloud(text, files, cx);
     }
 
     /// Send the message a refused turn carried, once its agent is connected.
@@ -976,7 +985,8 @@ impl ChatSession {
             self.sync_rows(cx);
             return;
         }
-        self.run_cloud(need.retry, cx);
+        let (text, files) = need.retry;
+        self.run_cloud(text, files, cx);
     }
 
     pub fn dismiss_connect(&mut self, cx: &mut Context<Self>) {
@@ -992,8 +1002,8 @@ impl ChatSession {
         }
     }
 
-    fn run_cloud(&mut self, text: String, cx: &mut Context<Self>) {
-        self.last_cloud_text = Some(text.clone());
+    fn run_cloud(&mut self, text: String, files: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.last_cloud = Some((text.clone(), files.clone()));
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<CloudMsg>();
         cloud::run_prompt(
             cloud::PromptJob {
@@ -1003,6 +1013,7 @@ impl ChatSession {
                 model: self.meta.model.clone(),
                 effort: self.meta.effort.clone(),
                 text,
+                files,
             },
             tx,
         );
@@ -1047,7 +1058,7 @@ impl ChatSession {
                         self.need_connect = Some(NeedConnect {
                             agent: self.meta.agent,
                             reauth: code.as_deref() == Some(crate::connect::REAUTH),
-                            retry: self.last_cloud_text.clone().unwrap_or_default(),
+                            retry: self.last_cloud.clone().unwrap_or_default(),
                         });
                     }
                     Some(error) => {
@@ -1536,13 +1547,43 @@ pub enum Tail {
     Connect,
 }
 
+/// What the user sends: text, inline images (local chats) and files on this
+/// Mac (named by path locally, uploaded to the sandbox in a cloud chat).
+#[derive(Clone, Default)]
+pub struct Message {
+    pub text: String,
+    pub images: Vec<Value>,
+    pub files: Vec<PathBuf>,
+}
+
+/// The line a message carries for its files.
+pub fn files_note(paths: &[String]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    let mut note = String::from("Attached files:");
+    for p in paths {
+        note.push_str("\n- ");
+        note.push_str(p);
+    }
+    note
+}
+
+pub fn join_note(text: &str, note: &str) -> String {
+    match (text.is_empty(), note.is_empty()) {
+        (_, true) => text.to_string(),
+        (true, false) => note.to_string(),
+        (false, false) => format!("{text}\n\n{note}"),
+    }
+}
+
 /// A cloud message the platform refused for want of a credential, kept to
 /// send again once the agent is connected.
 #[derive(Clone)]
 pub struct NeedConnect {
     pub agent: Agent,
     pub reauth: bool,
-    retry: String,
+    retry: (String, Vec<PathBuf>),
 }
 
 pub enum PermissionChoice {

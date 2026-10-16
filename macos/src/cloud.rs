@@ -41,6 +41,8 @@ pub struct PromptJob {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub text: String,
+    /// Files on this Mac to put in the sandbox and name in the prompt.
+    pub files: Vec<PathBuf>,
 }
 
 /// PATH for the CLI: an app opened from Finder gets a bare one, and `lizard`
@@ -191,11 +193,43 @@ pub fn run_prompt(job: PromptJob, tx: UnboundedSender<CloudMsg>) {
                 Err(error) => return done(Some(error)),
             },
         };
+        let mut job = job;
+        if !job.files.is_empty() {
+            let note = upload(&bin, &id, &job.files, &tx);
+            job.text = crate::chat::join_note(&job.text, &note);
+        }
         match prompt(&bin, &id, &job, conversation.as_deref(), &tx) {
             Ok(()) => done(None),
             Err(error) => done(Some(error)),
         }
     });
+}
+
+/// Where attachments land in the sandbox.
+const ATTACH_DIR: &str = "/workspace/attachments";
+
+/// `lizard sandbox files put` each file; returns the prompt's note naming
+/// them by their path in the sandbox. A file that fails is said in the chat
+/// and left out.
+fn upload(bin: &PathBuf, sandbox: &str, files: &[PathBuf], tx: &UnboundedSender<CloudMsg>) -> String {
+    let mut remote = Vec::new();
+    for file in files {
+        let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+        let mut target = format!("{ATTACH_DIR}/{name}");
+        let mut n = 2;
+        while remote.contains(&target) {
+            target = format!("{ATTACH_DIR}/{n}-{name}");
+            n += 1;
+        }
+        let local = file.to_string_lossy().to_string();
+        match run_json(bin, &["sandbox", "files", "put", sandbox, &local, &target]) {
+            Ok(_) => remote.push(target),
+            Err(e) => {
+                let _ = tx.unbounded_send(CloudMsg::Note(format!("Couldn't put {name} in the sandbox: {}", e.message)));
+            }
+        }
+    }
+    crate::chat::files_note(&remote)
 }
 
 fn prompt(bin: &PathBuf, sandbox: &str, job: &PromptJob, conversation: Option<&str>, tx: &UnboundedSender<CloudMsg>) -> Result<(), Refusal> {

@@ -12,7 +12,8 @@ The app has no agent code of its own. It starts the same local host as the Chrom
 - Settings, as the panel's modal: General (completion sound, host status, links), Claude and ChatGPT (CLAUDE.md or AGENTS.md, hooks, MCP, config.toml, plugin switches, skills) read and written through the host, and Models for your own OpenAI-compatible endpoints, which then show up in the ChatGPT picker. The host only edits a project's files for a folder a session has opened, so opening one starts the chat's agent, as the panel does when it shows a chat.
 - Chat list with Active and History, search, rename, bookmarks, status dots.
 - History from the agent's own transcript, paged in as you scroll up.
-- Image attachments; other files go in as paths.
+- Attachments from the + button, a paste (an image, or files copied in Finder) or a drop on the composer: images as thumbnails scaled to 1568px and sent inline, other files as chips the agent reads by path. In a cloud chat every attachment is put in the sandbox under `/workspace/attachments` (`lizard sandbox files put`) and named in the message.
+- The context ring opens the usage popover: the chat's context window, then the plan's limits. Claude's come from the `rate_limit_event` each turn streams (five-hour and weekly windows), ChatGPT's from the host's `planUsage`. A cloud chat shows the context window only.
 
 There is no browser here, so the `browser_*` tools answer "No browser is attached". Use the extension for page work.
 
@@ -49,8 +50,9 @@ LIZARD_STUDIO_SHOT_QUIT=1 ./target/debug/lizard-studio
 - `LIZARD_STUDIO_SIZE=<w>x<h>` sizes the window; `LIZARD_STUDIO_STORE=<file>` reads a fixture chat list; `LIZARD_STUDIO_RUNNING=<id,id>` shows those chats as running; `LIZARD_STUDIO_OPEN_AT` and `LIZARD_STUDIO_OPEN_WORKDIR` place the opened session in the list and set its working folder.
 - `LIZARD_STUDIO_SEND_CLOUD=1` makes the `LIZARD_STUDIO_SEND` chat a cloud one.
 - `LIZARD_STUDIO_CLOUD_START=1` presses Run in a sandbox once the host is ready; the stream URL is not opened in test runs.
+- `LIZARD_STUDIO_ATTACH=<path,path>` puts files in the tray (or, with `LIZARD_STUDIO_SEND`, sends them with the test prompt).
 - `LIZARD_STUDIO_CONNECT=claude|codex` starts that sign-in 4 seconds in (put a fake `open` first in PATH to keep the browser shut).
-- `LIZARD_STUDIO_PICK=<model>,<effort>,<mode>` sets the new chat's settings; `LIZARD_STUDIO_MENU=model|effort|mode|agent|place|settings[:claude|codex|models[:<file>|new]]` opens that picker or Settings tab once the window has drawn. Popovers fade in, so take two shots (`LIZARD_STUDIO_SHOT_AT=3000,4500`) and use the second.
+- `LIZARD_STUDIO_PICK=<model>,<effort>,<mode>` sets the new chat's settings; `LIZARD_STUDIO_MENU=model|effort|mode|agent|place|usage|settings[:claude|codex|models[:<file>|new]]` opens that picker or Settings tab once the window has drawn. Popovers fade in, so take two shots (`LIZARD_STUDIO_SHOT_AT=3000,4500`) and use the second.
 - `LIZARD_STUDIO_DEBUG=1` logs host messages; with `LIZARD_STUDIO_DUMP=<dir>` it also saves the `models`, `ready`, `agentReady` and `commands` messages there.
 
 Neither kind of test chat is saved.

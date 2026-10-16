@@ -16,9 +16,11 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use serde_json::{Value, json};
 
+mod attach;
 mod connect_card;
 mod pickers;
 mod settings;
+mod usage;
 
 use crate::chat::{
     self, ChatEvent, ChatSession, Detail, Item, Permission, PermissionChoice, Tail, ToolStatus, group_sentence,
@@ -104,13 +106,8 @@ enum Menu {
     Model,
     Effort,
     Agent,
+    Usage,
     Bookmark(String),
-}
-
-struct Attachment {
-    name: String,
-    media_type: String,
-    data: String,
 }
 
 pub struct StudioApp {
@@ -126,7 +123,11 @@ pub struct StudioApp {
     host_state: HostState,
     catalogs: HashMap<Agent, Catalog>,
     git: HashMap<String, GitInfo>,
-    attachments: Vec<Attachment>,
+    attachments: Vec<attach::Attachment>,
+    attachment_seq: u64,
+    /// Plan limits behind the usage popover (usage.rs).
+    claude_usage: usage::PlanUsage,
+    codex_usage: usage::PlanUsage,
     menu: Option<Menu>,
     /// Where the pickers' buttons were drawn, so a popover can point at one.
     bounds: BoundsMap,
@@ -240,6 +241,9 @@ impl StudioApp {
             catalogs: HashMap::new(),
             git: HashMap::new(),
             attachments: Vec::new(),
+            attachment_seq: 0,
+            claude_usage: Default::default(),
+            codex_usage: Default::default(),
             menu: None,
             bounds: BoundsMap::default(),
             viewport: window.viewport_size(),
@@ -391,6 +395,7 @@ impl StudioApp {
                 cx.notify();
             }
             "configRead" | "configWrite" => self.on_config_reply(&msg, cx),
+            "planUsage" if msg.get("agent").and_then(Value::as_str) == Some("codex") => self.on_plan_usage(&msg, cx),
             "daemonSnapshot" => {
                 self.host_state.restoring = true;
                 for session in msg.get("sessions").and_then(Value::as_array).cloned().unwrap_or_default() {
@@ -442,6 +447,9 @@ impl StudioApp {
                 }
                 if kind == "commands" {
                     self.on_commands(&msg, cx);
+                }
+                if let Some(info) = msg.pointer("/data/rate_limit_info").filter(|_| kind == "event") {
+                    self.on_rate_limit(info, cx);
                 }
                 if let Some(chat) = self.chat_by_id(id, cx) {
                     chat.update(cx, |chat, cx| chat.on_host_message(&msg, cx));
@@ -824,12 +832,9 @@ impl StudioApp {
         if !cloud {
             self.store.remember_start(&cwd, agent);
         }
-        let images: Vec<Value> = self
-            .attachments
-            .drain(..)
-            .map(|a| json!({ "mediaType": a.media_type, "data": a.data }))
-            .collect();
-        chat.update(cx, |chat, cx| chat.submit(text, images, cx));
+        let out = self.take_attachments(cloud);
+        let message = chat::Message { text, images: out.images, files: out.files };
+        chat.update(cx, |chat, cx| chat.submit(message, cx));
         self.composer.update(cx, |state, cx| state.set_value("", window, cx));
         self.menu = None;
         cx.notify();
@@ -893,45 +898,10 @@ impl StudioApp {
         });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = paths.await {
-                let _ = this.update(cx, |this, cx| this.attach_files(paths, cx));
+                let _ = this.update(cx, |this, cx| this.attach_paths(paths, cx));
             }
         })
         .detach();
-    }
-
-    /// Images ride along with the prompt; any other file is named by path.
-    fn attach_files(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let mut mentions = Vec::new();
-        for path in paths {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-            let media_type = match ext.as_str() {
-                "png" => Some("image/png"),
-                "jpg" | "jpeg" => Some("image/jpeg"),
-                "gif" => Some("image/gif"),
-                "webp" => Some("image/webp"),
-                _ => None,
-            };
-            match (media_type, std::fs::read(&path)) {
-                (Some(media_type), Ok(bytes)) if bytes.len() < 5 * 1024 * 1024 => {
-                    self.attachments.push(Attachment {
-                        name: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                        media_type: media_type.into(),
-                        data: base64_encode(&bytes),
-                    });
-                }
-                _ => mentions.push(path.to_string_lossy().to_string()),
-            }
-        }
-        if !mentions.is_empty() {
-            let addition = mentions.join(" ");
-            let composer = self.composer.clone();
-            let current = composer.read(cx).value().to_string();
-            let next = if current.trim().is_empty() { addition } else { format!("{current} {addition}") };
-            if let Some(window) = cx.active_window() {
-                let _ = window.update(cx, |_, window, cx| composer.update(cx, |s, cx| s.set_value(next, window, cx)));
-            }
-        }
-        cx.notify();
     }
 
     fn set_agent(&mut self, agent: Agent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1119,7 +1089,9 @@ impl StudioApp {
         self.watch_chat(&chat, cx);
         self.add_on_top(chat.clone());
         let prompt = prompt.to_string();
-        chat.update(cx, |c, cx| c.submit(prompt, Vec::new(), cx));
+        // LIZARD_STUDIO_ATTACH files go with the test prompt too.
+        let files: Vec<PathBuf> = std::env::var("LIZARD_STUDIO_ATTACH").map(|v| v.split(',').map(PathBuf::from).collect()).unwrap_or_default();
+        chat.update(cx, |c, cx| c.submit(chat::Message { text: prompt, files, ..Default::default() }, cx));
         if let Some(ms) = std::env::var("LIZARD_STUDIO_ALLOW_AFTER").ok().and_then(|v| v.parse::<u64>().ok()) {
             cx.spawn(async move |_, cx| loop {
                 cx.background_executor().timer(Duration::from_millis(ms)).await;
@@ -1140,7 +1112,7 @@ impl StudioApp {
     /// Visual checks of the pickers and Settings:
     /// `LIZARD_STUDIO_PICK=<model>,<effort>,<mode>` sets the open chat's
     /// settings; `LIZARD_STUDIO_MENU=model|effort|mode|settings[:tab[:file]]`
-    /// opens one once the window has drawn (also agent, place).
+    /// opens one once the window has drawn (also agent, place, usage).
     #[cfg(feature = "snapshot")]
     fn preview_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Ok(pick) = std::env::var("LIZARD_STUDIO_PICK") {
@@ -1165,6 +1137,10 @@ impl StudioApp {
             })
             .detach();
         }
+        // LIZARD_STUDIO_ATTACH=<path,path> puts those files in the tray.
+        if let (Ok(paths), None) = (std::env::var("LIZARD_STUDIO_ATTACH"), std::env::var_os("LIZARD_STUDIO_SEND")) {
+            self.attach_paths(paths.split(',').map(PathBuf::from), cx);
+        }
         let Ok(spec) = std::env::var("LIZARD_STUDIO_MENU") else { return };
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(1200)).await;
@@ -1174,6 +1150,7 @@ impl StudioApp {
                     Some("model") => this.toggle_picker(Menu::Model, cx),
                     Some("effort") => this.toggle_picker(Menu::Effort, cx),
                     Some("mode") => this.toggle_picker(Menu::Mode, cx),
+                    Some("usage") => this.toggle_usage(cx),
                     Some("agent") => this.toggle_picker(Menu::Agent, cx),
                     Some("place") => this.toggle_picker(Menu::Place, cx),
                     Some("settings") => {
@@ -2181,6 +2158,7 @@ impl StudioApp {
             Some(Menu::Effort) => self.render_effort_menu(&p, viewport, cx),
             Some(Menu::Mode) if !cloud => self.render_mode_menu(&p, viewport, cx),
             Some(which @ (Menu::Agent | Menu::Place)) if blank => self.render_setup_menu(which, &p, cx),
+            Some(Menu::Usage) => self.render_usage_menu(&p, ctx_tokens, limit, viewport, cx),
             _ => None,
         };
         // Slash commands while the first word is being typed.
@@ -2376,7 +2354,8 @@ impl StudioApp {
                 })
         });
 
-        let attachments: Vec<(usize, String)> = self.attachments.iter().enumerate().map(|(i, a)| (i, a.name.clone())).collect();
+        let attachments = self.render_attachments(cx);
+        let paste_app = cx.entity().downgrade();
         let effort = p.effort().cloned();
         let ultra = effort.as_ref().is_some_and(|r| is_ultra(&r.id));
         let no_efforts = p.rungs.is_empty();
@@ -2398,12 +2377,11 @@ impl StudioApp {
                 .text_color(hex(TEXT_SECONDARY))
                 .child(label)
         };
-        let ring_tip = format!(
-            "Context {}% · {} of {} tokens",
-            (fraction * 100.).round() as u32,
-            ui::thousands(ctx_tokens),
-            ui::thousands(limit)
-        );
+        let ring_tip = if limit > 0 {
+            format!("Usage · context {}%", ((fraction * 100.).round() as u32).min(100))
+        } else {
+            "Usage · context unavailable".to_string()
+        };
 
         div()
             .relative()
@@ -2427,33 +2405,10 @@ impl StudioApp {
                     .px(px(8.))
                     .pb(px(6.))
                     .children(slash_menu.map(|m| div().absolute().top_0().left_0().child(m)))
-                    .when(!attachments.is_empty(), |d| {
-                        d.child(div().flex().flex_wrap().gap(px(4.)).px(px(6.)).pb(px(6.)).children(attachments.into_iter().map(
-                            |(i, name)| {
-                                div()
-                                    .id(("attachment", i))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.))
-                                    .px(px(7.))
-                                    .py(px(2.))
-                                    .rounded(px(6.))
-                                    .bg(white_a(0.07))
-                                    .text_size(px(10.5))
-                                    .text_color(hex(TEXT_SECONDARY))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if i < this.attachments.len() {
-                                            this.attachments.remove(i);
-                                        }
-                                        cx.notify();
-                                    }))
-                                    .child(ph("file", 11., hex(TEXT_SECONDARY)))
-                                    .child(name)
-                                    .child(ph("x", 10., hex(TEXT_TERTIARY)))
-                            },
-                        )))
-                    })
+                    // Files dropped on the box attach, as in the panel.
+                    .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(hex(EMERALD)))
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.attach_paths(paths.paths().to_vec(), cx)))
+                    .children(attachments)
                     .child(
                         div().px(px(2.)).pt(px(4.)).pb(px(2.)).child(
                             Textarea::new(&self.composer)
@@ -2461,7 +2416,9 @@ impl StudioApp {
                                 .bordered(false)
                                 .xsmall()
                                 .text_size(px(14.))
-                                .line_height(relative(1.45)),
+                                .line_height(relative(1.45))
+                                // An image or files copied in Finder attach; text pastes as text.
+                                .on_paste(move |item, _, cx| paste_app.update(cx, |this, cx| this.attach_clipboard(item, cx)).unwrap_or(false)),
                         ),
                     )
                     .child(
@@ -2470,7 +2427,7 @@ impl StudioApp {
                             .items_center()
                             .gap(px(6.))
                             .pt(px(4.))
-                            .when(!cloud, |d| d.child(
+                            .child(
                                 div()
                                     .id("attach")
                                     .size(px(26.))
@@ -2481,9 +2438,10 @@ impl StudioApp {
                                     .rounded(px(6.))
                                     .cursor_pointer()
                                     .hover(|s| s.bg(white_a(0.08)))
+                                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Attach a file").build(window, cx))
                                     .on_click(cx.listener(|this, _, window, cx| this.pick_files(window, cx)))
                                     .child(ph("plus", 15., hex(TEXT_TERTIARY))),
-                            ))
+                            )
                             // A cloud agent runs without asking, so it has no mode.
                             .when(!cloud, |d| d.child(
                                 div()
@@ -2540,12 +2498,19 @@ impl StudioApp {
                             )
                             .child(
                                 div()
-                                    .id("context-ring")
-                                    .p(px(4.))
-                                    .rounded(px(6.))
-                                    .hover(|s| s.bg(white_a(0.05)))
-                                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(ring_tip.clone()).build(window, cx))
-                                    .child(ui::ring(fraction)),
+                                    .relative()
+                                    .child(pop::track(&self.bounds, "usage"))
+                                    .child(
+                                        div()
+                                            .id("context-ring")
+                                            .p(px(4.))
+                                            .rounded(px(6.))
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(white_a(0.05)))
+                                            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(ring_tip.clone()).build(window, cx))
+                                            .on_click(cx.listener(|this, _, _, cx| this.toggle_usage(cx)))
+                                            .child(ui::ring(fraction)),
+                                    ),
                             )
                             .child(
                                 div()

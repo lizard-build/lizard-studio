@@ -11,7 +11,7 @@ path = "src/main.rs"
 [features]
 # Renders the window to a PNG (LIZARD_STUDIO_SNAPSHOT=path) for visual checks
 # on machines where the terminal may not record the screen.
-snapshot = ["dep:gpui_platform_snapshot", "dep:image"]
+snapshot = ["dep:gpui_platform_snapshot"]
 
 [dependencies]
 gpui-kit = "0.7.3"
@@ -20,7 +20,8 @@ serde_json = "1"
 anyhow = "1"
 futures = "0.3"
 gpui_platform_snapshot = { package = "gpui-pre-platform", version = "=0.3.9", optional = true, features = ["test-support"] }
-image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+# Attachments: decode, scale to 1568px and re-encode pasted or picked images.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 
 [profile.dev]
 opt-level = 1
