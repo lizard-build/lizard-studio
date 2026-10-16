@@ -30,6 +30,9 @@ use crate::host::HostLink;
 use crate::store::{Agent, CustomModel, SavedChat, new_chat_id, now_ms};
 
 pub mod bash;
+#[path = "local_session.rs"]
+mod local_session;
+pub use local_session::{LocalCommand, LocalSession, LoginPhase, local_command};
 
 /// The snapshot cloud chats start their sandboxes from, if the user set one.
 #[derive(Default)]
@@ -177,6 +180,7 @@ pub struct ChatSession {
     pub commands: Vec<String>,
     pub bash_mode: bool,
     pub need_connect: Option<NeedConnect>,
+    pub local: LocalSession,
     /// The last message a cloud turn carried, for a retry after connecting.
     last_cloud: Option<(String, Vec<PathBuf>)>,
     host: Rc<HostLink>,
@@ -228,6 +232,7 @@ impl ChatSession {
             commands: Vec::new(),
             bash_mode: false,
             need_connect: None,
+            local: LocalSession::default(),
             last_cloud: None,
             host,
             history: History::default(),
@@ -287,7 +292,9 @@ impl ChatSession {
         if !self.permissions.is_empty() {
             Tail::Permission
         } else if self.running {
-            Tail::Running
+            if self.local.has_cards() { Tail::LocalSession } else { Tail::Running }
+        } else if self.local.has_cards() {
+            Tail::LocalSession
         } else if self.need_connect.is_some() {
             Tail::Connect
         } else {
@@ -485,7 +492,7 @@ impl ChatSession {
             self.notice(true, "Choose a project folder first.", cx);
             return;
         }
-        if self.running {
+        if self.running || self.local.blocked() {
             self.queued.push_back(message);
             cx.notify();
             return;
@@ -499,31 +506,7 @@ impl ChatSession {
         if self.meta.cloud {
             return self.deliver_cloud(message, cx);
         }
-        self.close_async_questions("No longer needed", cx);
-        let Message { text, images, files } = message;
-        // The agent reads attached files itself, by path.
-        let paths: Vec<String> = files.iter().map(|p| p.to_string_lossy().to_string()).collect();
-        let text = join_note(&text, &files_note(&paths));
-        self.ensure_started(cx);
-        if self.meta.title == DEFAULT_TITLE && !self.meta.title_edited {
-            let title: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-            if !title.is_empty() {
-                self.meta.title = title.chars().take(40).collect();
-            }
-        }
-        self.user_item(&text, images::sent_images(&images), cx);
-        let bash_context = if text.starts_with('/') { String::new() } else { self.take_bash_context() };
-        let wire = if (self.context_sent && bash_context.is_empty()) || text.starts_with('/') {
-            text
-        } else {
-            let app_context = if self.context_sent { "" } else { APP_CONTEXT };
-            self.context_sent = true;
-            format!("{CTX_START}{app_context}\n\n{bash_context}{CTX_END}\n\n{text}")
-        };
-        self.send(json!({ "type": "prompt", "text": wire, "images": images }));
-        self.begin_turn();
-        self.touch(cx);
-        self.sync_rows(cx);
+        self.deliver_local(message, false, cx);
     }
 
     fn begin_turn(&mut self) {
@@ -619,13 +602,16 @@ impl ChatSession {
             }
         }
         self.place_footer(self.turn_first_item, now_ms());
-        if self.restart_pending {
+        if self.restart_pending && !self.local.blocked() {
             self.restart(cx);
         }
         cx.emit(ChatEvent::TurnEnded);
         self.sync_rows(cx);
-        if let Some(next) = self.queued.pop_front() {
-            self.deliver(next, cx);
+        if !self.local.blocked() {
+            self.local.last_prompt = None;
+            if let Some(next) = self.queued.pop_front() {
+                self.deliver(next, cx);
+            }
         }
     }
 
@@ -649,6 +635,9 @@ impl ChatSession {
     // ---- host messages -------------------------------------------------------
 
     pub fn on_host_message(&mut self, msg: &Value, cx: &mut Context<Self>) {
+        if self.on_local_message(msg, cx) {
+            return;
+        }
         let kind = msg.get("type").and_then(Value::as_str).unwrap_or("");
         match kind {
             "bashStart" | "bashOut" | "bashExit" => self.on_bash_message(msg, cx),
@@ -665,6 +654,7 @@ impl ChatSession {
                         self.touch(cx);
                     }
                 }
+                self.local_started(cx);
                 cx.notify();
             }
             "commands" => {
@@ -791,6 +781,9 @@ impl ChatSession {
         if let Some(parent) = data.get("parent_tool_use_id").and_then(Value::as_str) {
             self.note_agent_activity(parent, data);
             cx.notify();
+            return;
+        }
+        if self.on_local_event(data, cx) {
             return;
         }
         match data.get("type").and_then(Value::as_str).unwrap_or("") {
@@ -1645,6 +1638,8 @@ pub enum Tail {
     Permission,
     /// The cloud agent has no credential on the account (connect.rs).
     Connect,
+    /// Local sign-in and Remote Control share the panel's card shell.
+    LocalSession,
 }
 
 /// What the user sends: text, images and files on this Mac. Cloud images

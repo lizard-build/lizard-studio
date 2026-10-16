@@ -23,6 +23,7 @@ mod branches;
 mod drafts;
 mod git_diff;
 mod images;
+mod local_session;
 mod pickers;
 mod questions;
 mod settings;
@@ -347,6 +348,9 @@ impl StudioApp {
     }
 
     fn on_host_message(&mut self, msg: Value, cx: &mut Context<Self>) {
+        if self.route_local_auth_done(&msg, cx) {
+            return;
+        }
         let kind = msg.get("type").and_then(Value::as_str).unwrap_or("").to_string();
         if std::env::var_os("LIZARD_STUDIO_DEBUG").is_some() {
             let id = msg.get("id").and_then(Value::as_str).unwrap_or("-");
@@ -855,6 +859,9 @@ impl StudioApp {
             return;
         }
         let chat = self.chats[self.active].clone();
+        if self.submit_local_command(&chat, &text, window, cx) {
+            return;
+        }
         let cloud = chat.read(cx).meta.cloud;
         if chat.read(cx).meta.cwd.is_none() && !cloud {
             self.pick_folder(window, cx);
@@ -2078,7 +2085,7 @@ impl StudioApp {
         let (blank, loading, paging, list_state, list_id) = {
             let c = entity.read(cx);
             (
-                c.is_blank(),
+                c.is_blank() && !c.local.has_cards(),
                 c.history_loading() && c.items.is_empty(),
                 c.history_loading() && !c.items.is_empty(),
                 c.list.clone(),
@@ -2694,6 +2701,7 @@ fn render_row(
                 let Some(need) = chat.need_connect.clone() else { return div().into_any_element() };
                 div().pt(px(gap)).child(connect_card::render_connect(entity, &need, connect, cx)).into_any_element()
             }
+            Tail::LocalSession => local_session::render_local_session(entity, cx),
             Tail::None => div().into_any_element(),
         };
     }
