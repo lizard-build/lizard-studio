@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync, mkdtempSync, createReadStream, statSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdtempSync, createReadStream, statSync } from "node:fs";
+import { open as openFileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import readline from "node:readline";
@@ -12,7 +13,7 @@ const cut = (from, to) => source.slice(source.indexOf(from), source.indexOf(to, 
 function load(file) {
   const sent = [];
   const plain = (v) => JSON.parse(JSON.stringify(v));
-  const scope = { createReadStream, statSync, readline, Buffer, MAX_MSG: 900 * 1024, log() {},
+  const scope = { createReadStream, statSync, openFileHandle, readline, Buffer, MAX_MSG: 900 * 1024, log() {},
     send: (m) => sent.push(plain(m)), findTranscript: () => file };
   vm.createContext(scope);
   vm.runInContext(cut("const CMD_NAME_RE", "function rewindSession") + cut("// ---- paged transcript", "function loadTranscript(id"), scope);
@@ -61,4 +62,55 @@ test("a missing transcript answers with no events and no cursor", async () => {
   const { sent, page } = load(null);
   await page({ id: "c", sessionId: "s", cwd: "/x", requestId: "r", paged: true });
   assert.deepEqual([sent[0].events, sent[0].missing, sent[0].nextCursor], [[], true, undefined]);
+});
+
+test("a growing transcript is read from where the last page stopped", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "page-"));
+  const file = join(dir, "s.jsonl");
+  const lines = [];
+  for (let n = 1; n <= 3; n++) lines.push(...turn(n));
+  writeFileSync(file, lines.join("\n") + "\n");
+  const { sent, page } = load(file);
+  const msg = { id: "c", sessionId: "s", cwd: "/x", requestId: "r", paged: true };
+  await page(msg);
+  assert.equal(sent.at(-1).totalTurns, 3);
+
+  // A line still being written has no newline yet: it waits for the next read.
+  appendFileSync(file, turn(4).join("\n") + "\n" + turn(5)[0].slice(0, 20));
+  await page(msg);
+  const grown = sent.at(-1);
+  assert.equal(grown.totalTurns, 4);
+  assert.equal(grown.events.at(-1).message.id, "b4");
+
+  appendFileSync(file, turn(5)[0].slice(20) + "\n" + turn(5).slice(1).join("\n") + "\n");
+  await page(msg);
+  const done = sent.at(-1);
+  assert.equal(done.totalTurns, 5);
+  assert.deepEqual(done.events.filter((e) => e.historyTurnIndex).map((e) => e.historyTurnIndex), [1, 2, 3, 4, 5]);
+  assert.equal(done.events.length, 20);
+});
+
+test("a transcript rewritten in place is indexed again", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "page-"));
+  const file = join(dir, "s.jsonl");
+  const lines = [];
+  for (let n = 1; n <= 4; n++) lines.push(...turn(n));
+  writeFileSync(file, lines.join("\n") + "\n");
+  const { sent, page } = load(file);
+  const msg = { id: "c", sessionId: "s", cwd: "/x", requestId: "r", paged: true };
+  await page(msg);
+  assert.equal(sent.at(-1).totalTurns, 4);
+  const before = statSync(file).size;
+
+  // A rewind cuts the file back, and the session appends a different, longer
+  // turn: same file, bigger than before, different bytes under the old end.
+  const rewound = [...turn(1), ...turn(2)];
+  const long = turn(9).map((l) => l.replace('"q9"', '"' + "x".repeat(2000) + '"'));
+  writeFileSync(file, [...rewound, ...long].join("\n") + "\n");
+  assert.ok(statSync(file).size > before); // only the bytes can tell
+  await page(msg);
+  const after = sent.at(-1);
+  assert.equal(after.totalTurns, 3);
+  assert.equal(after.events.at(-1).message.id, "b9");
+  assert.equal(after.events.length, 12);
 });

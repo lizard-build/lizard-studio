@@ -108,6 +108,7 @@ import { PassThrough } from "node:stream";
 import net from "node:net";
 import https from "node:https";
 import readline from "node:readline";
+import { open as openFileHandle } from "node:fs/promises";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // Old installers point launch.sh at this file. Self-update replaces the host
@@ -2514,10 +2515,22 @@ function hasMessages(lines) {
 // exclusive index into the filtered event list). Each real user turn carries
 // `historyTurnIndex`, counted exactly as rewindSession counts, so editing an
 // old message still cuts the right line.
+//
+// Pages are read through an index, not a parsed copy of the file: for every
+// visible event, where its line sits and its turn number. A page then parses
+// only its own lines, and a file that grew is indexed from where the last
+// read stopped. A live session appends after every message, and re-parsing a
+// 100 MB transcript for each page used to take most of a second.
 const TRANSCRIPT_PAGE_TURNS = 30;
 const TRANSCRIPT_PAGE_BYTES = 1500000;
 const TRANSCRIPT_SYNTH_RE = /<(task-notification|system-reminder|local-command-stdout|local-command-stderr|local-command-caveat)>[\s\S]*?<\/\1>\n*/g;
-let transcriptCache = null;
+// An index is a few numbers per event, so many fit; the oldest is dropped.
+const TRANSCRIPT_INDEX_MAX = 32;
+// Bytes before the indexed end, kept to notice a file rewritten in place
+// (rewind truncates and then the session appends again).
+const TRANSCRIPT_SIG_BYTES = 64;
+const transcriptIndexes = new Map(); // file -> index, oldest first
+const transcriptLocks = new Map(); // file -> tail of its queued reads
 
 function transcriptEvent(o) {
   if (o.isSidechain || o.isMeta || o.isCompactSummary || o.isVisibleInTranscriptOnly) return null;
@@ -2541,31 +2554,116 @@ function countsAsTurn(ev) {
   return hasText && !isUsageCommandTurn(content);
 }
 
-function readTranscriptEvents(file) {
-  let st;
-  try { st = statSync(file); } catch { st = null; }
-  const key = st ? file + ":" + st.size + ":" + st.mtimeMs : null;
-  if (key && transcriptCache?.key === key) return Promise.resolve(transcriptCache.events);
+// Index the complete lines in [from, to) of a file. Resolves with the new
+// entries; nothing is committed to `index` here, so a failed read leaves it
+// as it was. A line still being written (no newline yet) waits for next time.
+function indexTranscriptLines(file, index, from, to) {
   return new Promise((resolve, reject) => {
-    const events = [];
-    let turns = 0;
-    const stream = createReadStream(file, "utf8");
-    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-    stream.on("error", (err) => { rl.close(); reject(err); });
-    rl.on("line", (line) => {
-      if (!line.trim()) return;
-      let o;
-      try { o = JSON.parse(line); } catch { return; }
-      const ev = transcriptEvent(o);
-      if (!ev) return;
-      if (countsAsTurn(ev)) ev.historyTurnIndex = ++turns;
-      events.push(ev);
+    const add = { starts: [], ends: [], turns: [], turnCount: index.turnCount, offset: from };
+    const stream = createReadStream(file, { start: from, end: to - 1, highWaterMark: 1 << 22 });
+    let parts = [];
+    let pos = from; // file offset of the current chunk
+    stream.on("data", (chunk) => {
+      let i = 0;
+      for (;;) {
+        const nl = chunk.indexOf(10, i);
+        if (nl === -1) { parts.push(i ? chunk.subarray(i) : chunk); break; }
+        const piece = chunk.subarray(i, nl);
+        const line = parts.length ? Buffer.concat([...parts, piece]) : piece;
+        const lineStart = add.offset;
+        const lineEnd = pos + nl;
+        parts = [];
+        i = nl + 1;
+        add.offset = pos + i;
+        let o;
+        try { o = JSON.parse(line.toString("utf8")); } catch { continue; }
+        const ev = transcriptEvent(o);
+        if (!ev) continue;
+        add.starts.push(lineStart);
+        add.ends.push(lineEnd);
+        add.turns.push(countsAsTurn(ev) ? ++add.turnCount : 0);
+      }
+      pos += chunk.length;
     });
-    rl.on("close", () => {
-      if (key) transcriptCache = { key, events };
-      resolve(events);
-    });
+    stream.on("error", reject);
+    stream.on("end", () => resolve(add));
   });
+}
+
+async function readTranscriptBytes(file, from, to) {
+  const handle = await openFileHandle(file, "r");
+  try {
+    const buf = Buffer.alloc(to - from);
+    const { bytesRead } = await handle.read(buf, 0, buf.length, from);
+    return bytesRead === buf.length ? buf : null;
+  } finally {
+    await handle.close();
+  }
+}
+
+// The file's index, brought up to date: rebuilt if the file was replaced or
+// rewritten under the indexed part, extended if it only grew.
+async function freshTranscriptIndex(file) {
+  const st = statSync(file);
+  let index = transcriptIndexes.get(file);
+  if (index && (index.ino !== st.ino || st.size < index.offset)) index = null;
+  if (index?.sig) {
+    const now = await readTranscriptBytes(file, index.offset - index.sig.length, index.offset);
+    if (!now || !now.equals(index.sig)) index = null;
+  }
+  if (!index) index = { ino: st.ino, offset: 0, sig: null, turnCount: 0, firstTurn: Infinity, starts: [], ends: [], turns: [] };
+  if (st.size > index.offset) {
+    const add = await indexTranscriptLines(file, index, index.offset, st.size);
+    for (let k = 0; k < add.starts.length; k++) {
+      if (add.turns[k] && index.firstTurn === Infinity) index.firstTurn = index.starts.length;
+      index.starts.push(add.starts[k]);
+      index.ends.push(add.ends[k]);
+      index.turns.push(add.turns[k]);
+    }
+    index.turnCount = add.turnCount;
+    if (add.offset > index.offset) {
+      index.sig = await readTranscriptBytes(file, Math.max(0, add.offset - TRANSCRIPT_SIG_BYTES), add.offset);
+      index.offset = add.offset;
+    }
+  }
+  transcriptIndexes.delete(file);
+  transcriptIndexes.set(file, index);
+  while (transcriptIndexes.size > TRANSCRIPT_INDEX_MAX) transcriptIndexes.delete(transcriptIndexes.keys().next().value);
+  return index;
+}
+
+// Runs `work(index)` with the file's index, one read per file at a time, so
+// two chats opening the same session cannot extend its index twice.
+function withTranscriptIndex(file, work) {
+  const prev = transcriptLocks.get(file) || Promise.resolve();
+  const run = prev.then(async () => {
+    try {
+      return await work(await freshTranscriptIndex(file));
+    } catch (err) {
+      transcriptIndexes.delete(file); // read it from scratch next time
+      throw err;
+    }
+  });
+  const tail = run.catch(() => {});
+  transcriptLocks.set(file, tail);
+  tail.then(() => { if (transcriptLocks.get(file) === tail) transcriptLocks.delete(file); });
+  return run;
+}
+
+// Events [start, end) of an indexed file, parsed from one read of their span.
+async function readIndexedEvents(file, index, start, end) {
+  if (start >= end) return [];
+  const from = index.starts[start];
+  const buf = await readTranscriptBytes(file, from, index.ends[end - 1]);
+  if (!buf) throw new Error("transcript changed while reading");
+  const events = [];
+  for (let k = start; k < end; k++) {
+    const ev = transcriptEvent(JSON.parse(buf.toString("utf8", index.starts[k] - from, index.ends[k] - from)));
+    if (!ev) throw new Error("transcript changed while reading");
+    if (index.turns[k]) ev.historyTurnIndex = index.turns[k];
+    events.push(ev);
+  }
+  return events;
 }
 
 function sendTranscriptPage(message) {
@@ -2586,23 +2684,27 @@ async function loadTranscriptPage(msg) {
   const file = findTranscript(sessionId, cwd);
   if (!file) { send({ ...meta, events: [], missing: true }); return; }
   try {
-    const all = await readTranscriptEvents(file);
-    const initial = !msg.cursor;
-    const end = initial ? all.length : Math.min(all.length, Math.max(0, Number(msg.cursor.end) || 0));
-    let start = end;
-    let turns = 0;
-    let bytes = 0;
-    while (start > 0) {
-      const ev = all[start - 1];
-      bytes += JSON.stringify(ev).length;
-      start--;
-      if (ev.historyTurnIndex && (++turns >= TRANSCRIPT_PAGE_TURNS || bytes > TRANSCRIPT_PAGE_BYTES)) break;
-    }
-    // A page opens on a user turn; leading non-turn events (no user turn
-    // before them) belong to the first page of the file.
-    if (start > 0 && !all.slice(0, start).some((ev) => ev.historyTurnIndex)) start = 0;
-    const out = { ...meta, events: all.slice(start, end), nextCursor: start > 0 ? { kind: "claude", end: start } : null };
-    if (initial) out.totalTurns = all.reduce((n, ev) => n + (ev.historyTurnIndex ? 1 : 0), 0);
+    const out = await withTranscriptIndex(file, async (index) => {
+      const total = index.starts.length;
+      const initial = !msg.cursor;
+      const end = initial ? total : Math.min(total, Math.max(0, Number(msg.cursor.end) || 0));
+      let start = end;
+      let turns = 0;
+      let bytes = 0;
+      while (start > 0) {
+        start--;
+        // The line's size on disk stands in for its event's: close enough
+        // for a soft budget, and it needs no parse.
+        bytes += index.ends[start] - index.starts[start];
+        if (index.turns[start] && (++turns >= TRANSCRIPT_PAGE_TURNS || bytes > TRANSCRIPT_PAGE_BYTES)) break;
+      }
+      // A page opens on a user turn; leading non-turn events (no user turn
+      // before them) belong to the first page of the file.
+      if (start > 0 && index.firstTurn >= start) start = 0;
+      const page = { ...meta, events: await readIndexedEvents(file, index, start, end), nextCursor: start > 0 ? { kind: "claude", end: start } : null };
+      if (initial) page.totalTurns = index.turnCount;
+      return page;
+    });
     sendTranscriptPage(out);
   } catch (err) {
     log("transcript page failed", err.message);
@@ -2769,6 +2871,7 @@ function rewindSession(id, turnIndex, text, images) {
         if (cut !== -1) {
           const kept = lines.slice(0, cut);
           writeFileSync(file, kept.join("\n") + (cut > 0 ? "\n" : ""));
+          transcriptIndexes.delete(file);
           if (!hasMessages(kept)) resume = null;
         }
       } catch (err) {
