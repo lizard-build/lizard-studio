@@ -114,3 +114,22 @@ test("a transcript rewritten in place is indexed again", async () => {
   assert.equal(after.events.at(-1).message.id, "b9");
   assert.equal(after.events.length, 12);
 });
+
+test("tool screenshots stay out of history pages; the user's own images stay in", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "page-"));
+  const file = join(dir, "s.jsonl");
+  const shot = { type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(50000) } };
+  writeFileSync(file, [
+    line({ type: "user", message: { content: [{ type: "text", text: "look" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "B".repeat(100) } }] } }),
+    line({ type: "assistant", message: { id: "a1", content: [{ type: "tool_use", id: "tu1", name: "mcp__browser__browser_screenshot", input: {} }] } }),
+    line({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu1", content: [{ type: "text", text: "captured" }, shot] }] } }),
+    line({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu2", content: [shot] }] } }),
+  ].join("\n") + "\n");
+  const { sent, page } = load(file);
+  await page({ id: "c", sessionId: "s", cwd: "/x", requestId: "r", paged: true });
+  const events = sent.at(-1).events;
+  assert.equal(events[0].message.content[1].type, "image");
+  assert.deepEqual(events[2].message.content[0].content, [{ type: "text", text: "captured" }]);
+  assert.deepEqual(events[3].message.content[0].content, []);
+  assert.ok(JSON.stringify(events).length < 5000);
+});

@@ -238,7 +238,9 @@ function lineJsonReader(onMsg, maxBuf = 32 * 1024 * 1024) {
 // v37: Claude history chunks echo the request id, so only the asking view renders them.
 // v40: the router restarts once new host files land, so an update reaches the
 //      ChatGPT host and the router too, not only this one.
-const HOST_VERSION = 40;
+// v41: Claude history pages read through a line index, and tool-result
+//      screenshots are left out of history and live events.
+const HOST_VERSION = 41;
 
 log("=== host starting ===", "node", process.version, "argv", JSON.stringify(process.argv.slice(2)));
 
@@ -1482,7 +1484,9 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
           remoteControl(id, { enabled: true, name });
         }
       }
-      send({ type: "event", id, data: obj });
+      // Tool screenshots are text-less weight to the panel (see
+      // dropToolResultImages); the model already has them.
+      send({ type: "event", id, data: obj.type === "user" && obj.message ? { ...obj, message: dropToolResultImages(obj.message) } : obj });
       if (obj.type === "result") {
         s.turnRunning = false;
         maybeFinishUpdate();
@@ -2538,9 +2542,41 @@ function transcriptEvent(o) {
     return { type: "local_command", content: o.content, timestamp: o.timestamp };
   }
   if ((o.type === "user" || o.type === "assistant") && o.message) {
-    return { type: o.type, message: o.message, timestamp: o.timestamp };
+    return { type: o.type, message: dropToolResultImages(o.message), timestamp: o.timestamp };
   }
   return null;
+}
+
+// Screenshots a tool returns (browser_screenshot and the like) ride inside its
+// tool_result as base64, and in a browser-heavy session they are most of the
+// transcript's bytes. The panel shows a tool's output as text only, so they
+// would cross the router, Chrome and the extension worker for nothing. Images
+// the user sent stay: those render as thumbnails in their bubble.
+function dropToolResultImages(message) {
+  if (!message || !Array.isArray(message.content)) return message;
+  let changed = false;
+  const content = message.content.map((block) => {
+    if (!block || block.type !== "tool_result" || !Array.isArray(block.content)) return block;
+    const kept = block.content.filter((part) => !(part && part.type === "image"));
+    if (kept.length === block.content.length) return block;
+    changed = true;
+    return { ...block, content: kept };
+  });
+  return changed ? { ...message, content } : message;
+}
+
+// Characters of tool-result images in a raw transcript line's message, so a
+// page's byte budget counts what is actually sent.
+function toolResultImageChars(message) {
+  let chars = 0;
+  if (!message || !Array.isArray(message.content)) return chars;
+  for (const block of message.content) {
+    if (!block || block.type !== "tool_result" || !Array.isArray(block.content)) continue;
+    for (const part of block.content) {
+      if (part && part.type === "image" && typeof part.source?.data === "string") chars += part.source.data.length;
+    }
+  }
+  return chars;
 }
 
 // Mirrors the turn test in rewindSession: a user line with real text that is
@@ -2559,7 +2595,7 @@ function countsAsTurn(ev) {
 // as it was. A line still being written (no newline yet) waits for next time.
 function indexTranscriptLines(file, index, from, to) {
   return new Promise((resolve, reject) => {
-    const add = { starts: [], ends: [], turns: [], turnCount: index.turnCount, offset: from };
+    const add = { starts: [], ends: [], sizes: [], turns: [], turnCount: index.turnCount, offset: from };
     const stream = createReadStream(file, { start: from, end: to - 1, highWaterMark: 1 << 22 });
     let parts = [];
     let pos = from; // file offset of the current chunk
@@ -2581,6 +2617,7 @@ function indexTranscriptLines(file, index, from, to) {
         if (!ev) continue;
         add.starts.push(lineStart);
         add.ends.push(lineEnd);
+        add.sizes.push(lineEnd - lineStart - toolResultImageChars(o.message));
         add.turns.push(countsAsTurn(ev) ? ++add.turnCount : 0);
       }
       pos += chunk.length;
@@ -2611,13 +2648,14 @@ async function freshTranscriptIndex(file) {
     const now = await readTranscriptBytes(file, index.offset - index.sig.length, index.offset);
     if (!now || !now.equals(index.sig)) index = null;
   }
-  if (!index) index = { ino: st.ino, offset: 0, sig: null, turnCount: 0, firstTurn: Infinity, starts: [], ends: [], turns: [] };
+  if (!index) index = { ino: st.ino, offset: 0, sig: null, turnCount: 0, firstTurn: Infinity, starts: [], ends: [], sizes: [], turns: [] };
   if (st.size > index.offset) {
     const add = await indexTranscriptLines(file, index, index.offset, st.size);
     for (let k = 0; k < add.starts.length; k++) {
       if (add.turns[k] && index.firstTurn === Infinity) index.firstTurn = index.starts.length;
       index.starts.push(add.starts[k]);
       index.ends.push(add.ends[k]);
+      index.sizes.push(add.sizes[k]);
       index.turns.push(add.turns[k]);
     }
     index.turnCount = add.turnCount;
@@ -2693,9 +2731,9 @@ async function loadTranscriptPage(msg) {
       let bytes = 0;
       while (start > 0) {
         start--;
-        // The line's size on disk stands in for its event's: close enough
-        // for a soft budget, and it needs no parse.
-        bytes += index.ends[start] - index.starts[start];
+        // The line's size on disk, less the images it won't send, stands in
+        // for its event's: close enough for a soft budget, and no parse.
+        bytes += index.sizes[start];
         if (index.turns[start] && (++turns >= TRANSCRIPT_PAGE_TURNS || bytes > TRANSCRIPT_PAGE_BYTES)) break;
       }
       // A page opens on a user turn; leading non-turn events (no user turn
@@ -2761,7 +2799,7 @@ function loadTranscript(id, sessionId, cwd, requestId, msg) {
     } else if ((o.type === "user" || o.type === "assistant") && o.message) {
       // Carry the JSONL line's `timestamp` so the panel can show a real "Xm ago"
       // on replay instead of resetting every message to "now" on each panel open.
-      ev = { type: o.type, message: o.message, timestamp: o.timestamp };
+      ev = { type: o.type, message: dropToolResultImages(o.message), timestamp: o.timestamp };
     } else {
       return;
     }
