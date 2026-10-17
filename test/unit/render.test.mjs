@@ -90,6 +90,12 @@ function fakeDocument() {
     }
     setAttribute(k, v) { this.attrs[k] = v; }
     addEventListener() {}
+    cloneNode() {
+      const copy = new El(this.tagName);
+      copy.className = this.className;
+      copy.childNodes = this.childNodes.map((c) => (c.tagName ? c.cloneNode() : { html: c.html, parentNode: copy }));
+      return copy;
+    }
     get outerHTML() {
       if (this.className === "code-wrap") return `<pre>${this.childNodes[0].childNodes[0].childNodes[0].html.replace(/<[^>]+>/g, "")}</pre>`;
       const tag = this.tagName.toLowerCase();

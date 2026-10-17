@@ -3459,8 +3459,10 @@
   // Full absolute timestamp ("Jul 5, 2026, 1:40 PM GMT+4") — set as the
   // `.msg-time` span's title so hovering the relative time ("3m ago") shows
   // exactly when that was, via the browser's native tooltip.
+  // toLocaleString would build a new formatter on every call.
+  let fullTimeFormat = null;
   function fullTime(ts) {
-    return new Date(ts).toLocaleString("en-US", {
+    fullTimeFormat ||= new Intl.DateTimeFormat("en-US", {
       month: "short",
       day: "numeric",
       year: "numeric",
@@ -3468,6 +3470,7 @@
       minute: "2-digit",
       timeZoneName: "short",
     });
+    return fullTimeFormat.format(new Date(ts));
   }
 
   // Visible prose of an assistant message — markdown / live-stream text blocks,
@@ -3484,6 +3487,15 @@
     return out.trim();
   }
 
+  function hasAssistantProse(body) {
+    for (const child of body.children) {
+      if (!child.classList) continue;
+      if (child.classList.contains("tool-card") || child.classList.contains("tool-group") || child.classList.contains("msg-footer")) continue;
+      if (child.textContent.trim()) return true;
+    }
+    return false;
+  }
+
   // Shared copy-button behavior lives in render.js next to codeBlock, which
   // wires its own copy overlay — same flash-to-check feedback everywhere.
   const wireCopyButton = R.wireCopyButton;
@@ -3498,7 +3510,9 @@
     const time = el("span", "msg-time");
     time.dataset.ts = String(ts);
     time.textContent = relTime(ts);
-    time.title = fullTime(ts);
+    // The absolute time is only ever a hover tooltip. Formatting it for every
+    // footer up front cost more than the rest of a history page.
+    time.addEventListener("mouseenter", () => { time.title = fullTime(ts); }, { once: true });
     footer.appendChild(copyBtn);
     footer.appendChild(time);
     return footer;
@@ -3512,7 +3526,9 @@
   function finalizeAssistant(chat, body, ts) {
     if (chat && chat.turnRunning) return;
     if (!body || body.dataset.footered) return;
-    if (!assistantProse(body)) return;
+    // Only asks whether there is prose at all: textContent needs no layout,
+    // where innerText (used for the copy itself) forces one.
+    if (!hasAssistantProse(body)) return;
     body.dataset.footered = "1";
     const footer = messageFooter(() => assistantProse(body), ts || Date.now());
     body.appendChild(footer);
@@ -3858,14 +3874,15 @@
     const toggle = el("span", "tool-toggle running");
     toggle.innerHTML = ICON("caret-down", 14);
     head.appendChild(toggle);
-    head.addEventListener("click", () => card.classList.toggle("collapsed"));
+    head.addEventListener("click", () => openCardBody(card));
     card.appendChild(head);
-
-    const detail = toolDetail(block.name, block.input);
-    if (detail) card.appendChild(detail);
 
     const resultEl = el("div", "tool-result hidden");
     card.appendChild(resultEl);
+    deferCardBody(card, () => {
+      const detail = toolDetail(block.name, block.input);
+      if (detail) card.insertBefore(detail, resultEl);
+    });
 
     // A poll/kill/stop carries the id it targets in its input — stash it so the
     // result can resolve which background task / preview it belongs to.
@@ -4090,6 +4107,38 @@
     return shortPath(p);
   }
 
+  // A card's request detail and result stay folded until its head is clicked,
+  // and most cards are never opened — yet one page of history can carry
+  // megabytes of Read/Bash output and Write/Edit bodies. Highlighting all of
+  // that up front made a page cost tens of thousands of hidden nodes, so the
+  // body is built on the first open instead. Builders run in the order they
+  // were queued (detail before result), and at once on a card that is open.
+  const cardBodies = new WeakMap();
+  function deferCardBody(card, build) {
+    if (!card.classList.contains("collapsed")) { build(); return; }
+    const queue = cardBodies.get(card);
+    if (queue) queue.push(build);
+    else cardBodies.set(card, [build]);
+  }
+  function openCardBody(card) {
+    const queue = cardBodies.get(card);
+    if (queue) {
+      cardBodies.delete(card);
+      for (const build of queue) build();
+    }
+    card.classList.toggle("collapsed");
+  }
+  function fillResultBody(resultEl, text) {
+    const lines = text.split("\n");
+    // Expanding the card is the one fold the user needs — a long result
+    // just gets a (non-interactive) line-count label above it, always
+    // shown in full, instead of a second nested collapse to click through.
+    if (lines.length > 16 || text.length > 1400) {
+      resultEl.appendChild(el("div", "result-label", `Output · ${lines.length} lines`));
+    }
+    resultEl.appendChild(R.codeBlock(text, ""));
+  }
+
   function toolDetail(name, input) {
     input = input || {};
     if (name === "Bash" && input.command) {
@@ -4151,14 +4200,7 @@
     if (text.trim()) {
       entry.resultEl.classList.remove("hidden");
       entry.resultEl.classList.toggle("err", !!isError);
-      const lines = text.split("\n");
-      // Expanding the card is the one fold the user needs — a long result
-      // just gets a (non-interactive) line-count label above it, always
-      // shown in full, instead of a second nested collapse to click through.
-      if (lines.length > 16 || text.length > 1400) {
-        entry.resultEl.appendChild(el("div", "result-label", `Output · ${lines.length} lines`));
-      }
-      entry.resultEl.appendChild(R.codeBlock(text, ""));
+      deferCardBody(entry.card, () => fillResultBody(entry.resultEl, text));
     }
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
     // Resolve this result against any subagent / background task it belongs to
@@ -8714,7 +8756,14 @@
     const chat = chats.get(activeId);
     const known = chat && contextLimit(chat) && (chat.harness !== "codex" || chat.codexContextKnown);
     const pct = known ? Math.round(((chat.ctxTokens || 0) / contextLimit(chat)) * 100) : 0;
-    els.usageBtn.innerHTML = usageRingSVG(pct);
+    // Called on every streamed token's frame; the reading moves a percent at a
+    // time. Leave the DOM alone unless it changed, and then move the arc only.
+    const key = (known ? "k" : "u") + pct;
+    if (els.usageBtn.dataset.ring === key) return;
+    els.usageBtn.dataset.ring = key;
+    const fill = els.usageBtn.querySelector(".usage-ring-fill");
+    if (fill) fill.setAttribute("stroke-dashoffset", (USAGE_RING_C * (1 - Math.max(0, Math.min(100, pct)) / 100)).toFixed(2));
+    else els.usageBtn.innerHTML = usageRingSVG(pct);
     els.usageBtn.title = known ? "Usage · context " + Math.max(0, Math.min(100, pct)) + "%" : "Usage · context unavailable";
     els.usageBtn.classList.toggle("high", pct >= 90);
   }
@@ -10101,17 +10150,17 @@
     const toggle = el("span", "tool-toggle " + (result ? (result.isError ? "err" : "done") : "running"));
     toggle.innerHTML = ICON("caret-down", 14);
     head.appendChild(toggle);
-    head.addEventListener("click", () => card.classList.toggle("collapsed"));
+    head.addEventListener("click", () => openCardBody(card));
     card.appendChild(head);
-    const detail = toolDetail(block.name, block.input);
-    if (detail) card.appendChild(detail);
-    if (result && result.text && result.text.trim()) {
-      const resultEl = el("div", "tool-result" + (result.isError ? " err" : ""));
-      const lines = result.text.split("\n");
-      if (lines.length > 16 || result.text.length > 1400) resultEl.appendChild(el("div", "result-label", `Output · ${lines.length} lines`));
-      resultEl.appendChild(R.codeBlock(result.text, ""));
-      card.appendChild(resultEl);
-    }
+    deferCardBody(card, () => {
+      const detail = toolDetail(block.name, block.input);
+      if (detail) card.appendChild(detail);
+      if (result && result.text && result.text.trim()) {
+        const resultEl = el("div", "tool-result" + (result.isError ? " err" : ""));
+        fillResultBody(resultEl, result.text);
+        card.appendChild(resultEl);
+      }
+    });
     return card;
   }
 
@@ -11179,6 +11228,20 @@
       }
       els.tasksDrawer.classList.remove("opening");
     });
+    // The composer squares its flap and hides the setup chips while a drawer
+    // covers the chat. CSS used to read that with .chat-stack:has(...), but
+    // every node the stream adds anywhere in the stack made Chrome re-run that
+    // match over every message of every open chat, each frame. Mirror the
+    // drawers' state onto the stack instead.
+    const drawers = [els.gitDrawer, els.tasksDrawer];
+    const syncDrawerFlags = () => {
+      const shown = drawers.filter((d) => !d.classList.contains("hidden"));
+      els.stack.classList.toggle("drawer-shown", shown.length > 0);
+      els.stack.classList.toggle("drawer-settled", shown.some((d) => !d.classList.contains("closing")));
+    };
+    const drawerWatch = new MutationObserver(syncDrawerFlags);
+    for (const d of drawers) drawerWatch.observe(d, { attributes: true, attributeFilter: ["class"] });
+    syncDrawerFlags();
 
     els.send.addEventListener("click", () => {
       if (els.send.classList.contains("busy")) interrupt();

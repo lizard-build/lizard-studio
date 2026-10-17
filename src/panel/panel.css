@@ -3239,13 +3239,13 @@ code.inline.path:focus-visible {
    flush on it (drawer + flap + composer read as one sheet). The moment close
    begins (.closing), drop back to rounded — the flap's border-radius transition
    then rounds it in step with the sink, instead of snapping when it hides. */
-.chat-stack:has(.git-diff-drawer:not(.hidden):not(.closing)) ~ .composer .git-status-bar {
+.chat-stack.drawer-settled ~ .composer .git-status-bar {
   border-top-left-radius: 0;
   border-top-right-radius: 0;
 }
 /* …and hide the empty-state setup chips (folder/branch), which otherwise sit
    between the chat stack and the flap and leave a gap under the open drawer. */
-.chat-stack:has(.git-diff-drawer:not(.hidden)) ~ .composer .chat-setup {
+.chat-stack.drawer-shown ~ .composer .chat-setup {
   display: none;
 }
 /* Top row: "Diffs" title on the left (aligned to the 16px content inset of

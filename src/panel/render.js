@@ -101,15 +101,22 @@
   // innerHTML can only cut. So wiring owns the button's contents: callers set
   // the class, title and label, not the icon. The box and colours are
   // untouched; panel.css drives the swap off the .copied class.
+  // Every message footer carries one of these; parse the two marks once per
+  // size and clone them after that.
+  const copySwaps = new Map();
   function wireCopyButton(btn, getText, size) {
-    const ICON = window.RKIconHTML;
-    const swap = document.createElement("span");
-    swap.className = "copy-swap";
-    swap.style.setProperty("--copy-mark", size + "px");
-    swap.innerHTML =
-      '<span class="copy-mark copy-mark-idle">' + ICON("copy", size) + "</span>" +
-      '<span class="copy-mark copy-mark-done">' + ICON("check", size) + "</span>";
-    btn.replaceChildren(swap);
+    let proto = copySwaps.get(size);
+    if (!proto) {
+      const ICON = window.RKIconHTML;
+      proto = document.createElement("span");
+      proto.className = "copy-swap";
+      proto.style.setProperty("--copy-mark", size + "px");
+      proto.innerHTML =
+        '<span class="copy-mark copy-mark-idle">' + ICON("copy", size) + "</span>" +
+        '<span class="copy-mark copy-mark-done">' + ICON("check", size) + "</span>";
+      copySwaps.set(size, proto);
+    }
+    btn.replaceChildren(proto.cloneNode(true));
     let revert = 0;
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
