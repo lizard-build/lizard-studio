@@ -114,3 +114,53 @@ test('Claude usage menu shows unavailable plan data instead of a permanent loadi
   scope.renderUsageMenu();
   assert.equal(menu.children[1].children[1].text, 'Usage unavailable');
 });
+
+test('rate limit events fill Claude plan rows, persist them and hide windows past their reset', () => {
+  const { scope, chat } = setup();
+  const stored = {};
+  let redraws = 0;
+  const node = (tag, cls, text) => ({ tag, cls, text, children: [], appendChild(child) { this.children.push(child); } });
+  Object.assign(scope, {
+    chrome: { storage: { local: { set(values) { Object.assign(stored, values); } } } },
+    refreshUsageUI() { redraws++; },
+    els: { usageMenu: node('div') }, el: node, contextLimit: () => 1000000,
+    usageMenuRow: (...args) => ({ args }), describeReset: (at) => 'at ' + at,
+    normalizeUsageLabel: (label) => label,
+  });
+  vm.runInContext(section('  // Every reply\'s rate_limit_event', '  // A `/usage` reply identifies itself') +
+    section('  function renderUsageMenu()', '  // Open the popover on demand'), scope);
+  const soon = Math.floor(Date.now() / 1000) + 3600;
+  scope.absorbRateLimitWindows({ status: 'allowed' });
+  assert.equal(redraws, 0);
+  scope.absorbRateLimitWindows({ status: 'allowed_warning', unifiedWindows: {
+    five_hour: { utilization: 0.06, resetsAt: soon }, seven_day: { utilization: 0.5, resetsAt: soon + 86400 } } });
+  assert.deepEqual(Array.from(scope.usageState.rows, r => [r.label, r.pct]), [['5-hour limit', 6], ['Weekly · all models', 50]]);
+  assert.equal(stored.rkClaudePlanUsage.rows.length, 2);
+  chat.ctxTokens = 100;
+  scope.renderUsageMenu();
+  const plan = scope.els.usageMenu.children[1];
+  assert.deepEqual(plan.children.slice(1).map(r => [r.args[0], r.args[2], r.args[3]]),
+    [['5-hour limit', '6%', 'at ' + soon], ['Weekly · all models', '50%', 'at ' + (soon + 86400)]]);
+  scope.usageState.rows[0].resetsAt = Math.floor(Date.now() / 1000) - 1;
+  scope.els.usageMenu = node('div');
+  scope.renderUsageMenu();
+  assert.deepEqual(scope.els.usageMenu.children[1].children.slice(1).map(r => r.args[0]), ['Weekly · all models']);
+});
+
+test('the context ring uses the window the CLI reports for the model that answered', () => {
+  const { scope, chat } = setup();
+  Object.assign(scope, { CONTEXT_LIMITS: {}, DEFAULT_CONTEXT_LIMIT: 200000, CODEX_CONTEXT_LIMITS: {}, refreshUsageUI() {} });
+  vm.runInContext(section('  function contextLimit(', '  // ---- Claude Code model catalog') +
+    section('  // The result\'s modelUsage names', '  function trackCtxStream('), scope);
+  assert.equal(scope.contextLimit(chat), 200000);
+  scope.learnContextWindow(chat, { 'claude-opus-5-5': { contextWindow: 1000000 } });
+  assert.equal(scope.contextLimit(chat), 200000, 'no answering model yet');
+  chat.apiModel = 'claude-opus-5-5';
+  scope.learnContextWindow(chat, {
+    'claude-haiku-4-5-20251001': { contextWindow: 200000 },
+    'claude-opus-5-5[1m]': { contextWindow: 1000000 },
+  });
+  assert.equal(scope.contextLimit(chat), 1000000);
+  chat.model = 'haiku';
+  assert.equal(scope.contextLimit(chat), 200000, 'a model switch drops the learned window');
+});

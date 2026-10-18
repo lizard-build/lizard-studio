@@ -163,6 +163,7 @@ function claudeCatalogSetup() {
       get(keys, cb) { callbacks.push(cb); }, set(values) { Object.assign(storage, values); },
     } } },
   });
+  vm.runInContext(source.slice(source.indexOf('  function fallbackContextLimit('), source.indexOf('  function contextLimit(')), scope);
   const catalogCode = source.slice(source.indexOf('  // ---- Claude Code model catalog'), source.indexOf('  const usageState'));
   vm.runInContext(catalogCode, scope);
   const receive = source.slice(source.indexOf('      case "models":'), source.indexOf('      // Codex\'s plan limits'));
@@ -194,6 +195,16 @@ test('CLI catalog replaces fallback, persists new models and leaves saved chat m
   assert.equal(scope.claudeCatalog.error, 'offline');
   scope.receive({ type: 'models', agent: 'claude', models: [{ id: '', label: 'invalid' }] });
   assert.equal(scope.MODELS, catalog);
+});
+
+test('a point release without a CLI window reads its family window, not the 200k default', () => {
+  const { scope } = claudeCatalogSetup();
+  scope.receive({ type: 'models', agent: 'claude', defaultModel: 'opus', models: [
+    { id: 'opus', label: 'Opus', resolvedModel: 'claude-sonnet-5-5' },
+    { id: 'older', label: 'Older', resolvedModel: 'claude-sonnet-4-5' },
+  ] });
+  assert.equal(scope.CONTEXT_LIMITS.opus, 1000000);
+  assert.equal(scope.CONTEXT_LIMITS.older, undefined);
 });
 
 test('late storage reads cannot overwrite live CLI models, while offline cache still works', () => {

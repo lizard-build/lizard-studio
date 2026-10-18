@@ -312,6 +312,19 @@
   let CONTEXT_LIMITS = Object.assign({}, CONTEXT_LIMITS_FALLBACK);
   const DEFAULT_CONTEXT_LIMIT_FALLBACK = 200000;
   let DEFAULT_CONTEXT_LIMIT = DEFAULT_CONTEXT_LIMIT_FALLBACK;
+  // A point release keeps its family's window (claude-opus-5-5 reads as
+  // claude-opus-5), so a model newer than the table still reads right before
+  // its first reply reports the real number (see learnContextWindow).
+  function fallbackContextLimit(model) {
+    let id = canonicalModel(String(model || "").replace(/\[1m\]$/i, ""));
+    while (id) {
+      if (CONTEXT_LIMITS_FALLBACK[id]) return CONTEXT_LIMITS_FALLBACK[id];
+      const parent = id.replace(/-\d+$/, "");
+      if (parent === id) return null;
+      id = parent;
+    }
+    return null;
+  }
   function contextLimit(chat) {
     if (!chat) return DEFAULT_CONTEXT_LIMIT;
     // Codex's own number per model: the catalog seeds it from the sizes Codex
@@ -319,7 +332,7 @@
     // more when config.toml raises model_context_window, never past its 872k
     // cap), and the first turn's report replaces it with the live one.
     if (chat.harness === "codex") return (chat.codexContextModel === chat.model && chat.codexContextWindow) || CODEX_CONTEXT_LIMITS[chat.model] || null;
-    return CONTEXT_LIMITS[chat.model] || DEFAULT_CONTEXT_LIMIT;
+    return (chat.ctxWindowModel === chat.model && chat.ctxWindow) || CONTEXT_LIMITS[chat.model] || DEFAULT_CONTEXT_LIMIT;
   }
 
   // ---- Claude Code model catalog --------------------------------------------
@@ -342,7 +355,7 @@
       const resolvedModel = typeof m.resolvedModel === "string" ? m.resolvedModel : "";
       models.push({ id, label, resolvedModel, description: typeof m.description === "string" ? m.description : "" });
       if (Number.isFinite(m.contextLimit) && m.contextLimit > 0) limits[id] = m.contextLimit;
-      else limits[id] = CONTEXT_LIMITS_FALLBACK[canonicalModel(resolvedModel)] || null;
+      else limits[id] = fallbackContextLimit(resolvedModel);
     }
     if (!models.length) return null;
     for (const id of Object.keys(limits)) if (limits[id] === null) delete limits[id];
@@ -404,8 +417,9 @@
     }
   }
 
-  // Claude plan rows come only from commands the user sends. Never inject a
-  // usage prompt into a conversation to refresh the toolbar.
+  // Claude plan rows come from each reply's rate_limit_event (see
+  // absorbRateLimitWindows) or a /usage the user typed. Never inject a usage
+  // prompt into a conversation to refresh the toolbar.
   const usageState = { rows: [], at: 0, fetching: false };
   // Codex hands its limits over the protocol rather than through a command, so
   // there is nothing to probe and nothing to parse — the host just tells us.
@@ -980,6 +994,11 @@
       // latest main-chain API call; ctxTokens adds its output streamed so far.
       ctxBase: 0,
       ctxTokens: 0,
+      // Claude's real window for chat.model, from the last result — see
+      // learnContextWindow.
+      apiModel: "",
+      ctxWindow: null,
+      ctxWindowModel: null,
       codexContextModel: null,
       codexContextWindow: null,
       codexContextKnown: false,
@@ -3403,6 +3422,40 @@
     return true;
   }
 
+  // Every reply's rate_limit_event carries the plan windows the API sent in
+  // its headers: utilization as a 0–1 fraction, resets as unix seconds. Same
+  // numbers as /usage, without putting /usage into a chat. Saved so a fresh
+  // panel shows the last reading; renderUsageMenu hides a window once it resets.
+  const CLAUDE_USAGE_KEY = "rkClaudePlanUsage";
+  const CLAUDE_WINDOWS = [["five_hour", "5-hour limit"], ["seven_day", "Weekly · all models"]];
+  function absorbRateLimitWindows(info) {
+    const windows = info && info.unifiedWindows;
+    if (!windows) return;
+    const rows = [];
+    for (const [key, label] of CLAUDE_WINDOWS) {
+      const w = windows[key];
+      if (!w || !Number.isFinite(w.utilization)) continue;
+      rows.push({ label, pct: Math.max(0, Math.min(100, Math.round(w.utilization * 100))), resetsAt: w.resetsAt });
+    }
+    if (!rows.length) return;
+    usageState.rows = rows;
+    usageState.at = Date.now();
+    try { chrome.storage.local.set({ [CLAUDE_USAGE_KEY]: { rows, at: usageState.at } }); } catch (_) {}
+    refreshUsageUI();
+  }
+  function loadClaudeUsage() {
+    try {
+      chrome.storage.local.get([CLAUDE_USAGE_KEY], (r) => {
+        const saved = r && r[CLAUDE_USAGE_KEY];
+        // A reply that landed while storage was answering is newer.
+        if (!saved || !Array.isArray(saved.rows) || usageState.at) return;
+        usageState.rows = saved.rows.filter((row) => row && Number.isFinite(row.pct) && Number.isFinite(row.resetsAt));
+        usageState.at = saved.at || 0;
+        refreshUsageUI();
+      });
+    } catch (_) {}
+  }
+
   // A `/usage` reply identifies itself by content, not by timing: the CLI
   // answers with a zero-turn message whose model is the literal "<synthetic>"
   // and whose whole text is the plan dump, then a `result` carrying that same
@@ -5342,6 +5395,21 @@
     chat.ctxBase = base;
     chat.ctxTokens = base + (usage.output_tokens || 0);
   }
+  // The result's modelUsage names the window the CLI ran each model with, the
+  // same number its /context divides by. Once a turn has run, that beats any
+  // table. It also lists the CLI's side calls (titles, summaries) under their
+  // own models, so read the entry for chat.apiModel: the model that answered
+  // the last main-chain call.
+  function learnContextWindow(chat, modelUsage) {
+    if (!modelUsage || chat.harness === "codex" || !chat.apiModel) return;
+    const bare = (id) => id.replace(/\[1m\]$/i, "");
+    const key = Object.keys(modelUsage).find((k) => bare(k) === bare(chat.apiModel));
+    const win = key && modelUsage[key] && modelUsage[key].contextWindow;
+    if (!Number.isFinite(win) || win <= 0) return;
+    chat.ctxWindow = win;
+    chat.ctxWindowModel = chat.model;
+    if (chat.id === activeId) refreshUsageUI();
+  }
   function trackCtxStream(chat, ev) {
     if (!ev) return;
     if (ev.type === "message_start") {
@@ -5465,6 +5533,7 @@
         }
         resumeTurnIfIdle(chat);
         noteCtxUsage(chat, d.message && d.message.usage);
+        if (d.message && d.message.model && d.message.model !== "<synthetic>") chat.apiModel = d.message.model;
         const msgId = d.message && d.message.id;
         const body = ensureAssistantBody(chat, msgId);
         const streamed = msgId && chat.streamedMsgIds.has(msgId);
@@ -5556,6 +5625,7 @@
           break;
         }
         chat.usageEcho = false;
+        learnContextWindow(chat, d.modelUsage);
         // Auth death arrives as a failed result — the process is alive but its
         // token is gone (see sessionLooksStale for how it gets that way). The
         // CLI usually says so twice: once as a plain assistant line, then in
@@ -5572,6 +5642,7 @@
         break;
       }
       case "rate_limit_event":
+        absorbRateLimitWindows(d.rate_limit_info);
         if (d.rate_limit_info && d.rate_limit_info.status !== "allowed") {
           const status = d.rate_limit_info.status;
           // Soft "allowed_warning" still lets requests through — show it plainly
@@ -8851,12 +8922,14 @@
     if (chat && customModel(chat.model)) return;
 
     const onCodex = chat && chat.harness === "codex";
-    const planRows = onCodex ? codexUsage.rows : usageState.rows;
+    // A window past its reset no longer means anything, so drop it.
+    const planRows = onCodex ? codexUsage.rows : usageState.rows.filter((row) => !row.resetsAt || row.resetsAt * 1000 > Date.now());
     const planSec = el("div", "usage-menu-sec");
     planSec.appendChild(el("div", "usage-menu-head", "Plan usage"));
     if (planRows.length) {
       for (const row of planRows) {
-        planSec.appendChild(usageMenuRow(onCodex ? row.label : normalizeUsageLabel(row.label), row.pct, row.pct + "%", onCodex ? (row.resetsAt ? describeReset(row.resetsAt) : "") : row.resets, false, true));
+        const resets = row.resetsAt ? describeReset(row.resetsAt) : row.resets;
+        planSec.appendChild(usageMenuRow(onCodex ? row.label : normalizeUsageLabel(row.label), row.pct, row.pct + "%", resets, false, true));
       }
     } else if (!onCodex) {
       planSec.appendChild(el("div", "usage-menu-head", "Usage unavailable"));
@@ -11548,6 +11621,7 @@
       };
       loadModelCatalog(catalogsReady);
       loadCustomModels(catalogsReady);
+      loadClaudeUsage();
     }, 0);
   }
 
