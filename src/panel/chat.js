@@ -3344,7 +3344,11 @@
     if (Number.isNaN(when.getTime())) return "";
     const days = Math.round((when - Date.now()) / 86400000);
     if (days > 1) return "in " + days + " days";
-    return when.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric" });
+    // Minutes always: an hour alone drops the :40 of a 17:40 reset, and in a
+    // 24-hour locale "20 Oct, 17" reads like a date. Today needs no date.
+    const time = { hour: "numeric", minute: "2-digit" };
+    if (when.toDateString() === new Date().toDateString()) return when.toLocaleTimeString(undefined, time);
+    return when.toLocaleString(undefined, Object.assign({ month: "short", day: "numeric" }, time));
   }
 
   // Refresh through a separate protocol request only. Claude's /usage is a

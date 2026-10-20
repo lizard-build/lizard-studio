@@ -164,3 +164,17 @@ test('the context ring uses the window the CLI reports for the model that answer
   chat.model = 'haiku';
   assert.equal(scope.contextLimit(chat), 200000, 'a model switch drops the learned window');
 });
+
+test('reset times keep their minutes and skip the date when the reset is today', () => {
+  const now = new Date(2026, 9, 20, 15, 38).getTime();
+  const scope = { Date: class extends Date { constructor(...a) { super(...(a.length ? a : [now])); } static now() { return now; } } };
+  vm.createContext(scope);
+  vm.runInContext(section('  function describeReset(', '  // Refresh through a separate protocol request'), scope);
+  const time = { hour: 'numeric', minute: '2-digit' };
+  const today = new Date(2026, 9, 20, 17, 40), tomorrow = new Date(2026, 9, 21, 17, 40);
+  assert.equal(scope.describeReset(today / 1000), today.toLocaleTimeString(undefined, time));
+  assert.equal(scope.describeReset(tomorrow / 1000), tomorrow.toLocaleString(undefined, { month: 'short', day: 'numeric', ...time }));
+  assert.match(scope.describeReset(tomorrow / 1000), /21/);
+  assert.match(scope.describeReset(today / 1000), /40/);
+  assert.equal(scope.describeReset(new Date(2026, 9, 24, 12).getTime() / 1000), 'in 4 days');
+});
