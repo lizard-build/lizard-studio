@@ -50,3 +50,41 @@ test('picking a color sets it, and picking it again or no bookmark clears it', (
   p.choice('white').click(); p.choice('').click();
   assert.equal(p.target.bookmarkColor, null); assert.equal(p.changes(), 4);
 });
+
+const filter = source.slice(source.indexOf('  // One button per color at the end of the search field'), source.indexOf('  function hideTabTip('));
+
+function setupFilter() {
+  const box = el('div');
+  const list = { scrollTop: 120 };
+  let renders = 0;
+  const scope = { el, els: { chatMenuBookmarkFilter: box, chatMenuList: list }, menuBookmarkFilter: '', HISTORY_PAGE_SIZE: 40, historyVisibleLimit: 120, renderChatMenuList: () => renders++ };
+  vm.createContext(scope);
+  vm.runInContext(consts.replace(/^  const /gm, 'var ') + filter.replace(/^  function /gm, 'function '), scope);
+  scope.renderBookmarkFilter();
+  const choice = (id) => box.children.find((b) => b.dataset.bookmarkColor === id);
+  const pressed = () => box.children.filter((b) => b.attrs['aria-pressed'] === 'true').map((b) => b.dataset.bookmarkColor);
+  return { scope, box, list, choice, pressed, renders: () => renders };
+}
+
+test('the menu filter offers one button per color, none picked', () => {
+  const f = setupFilter();
+  assert.deepEqual(f.box.children.map((b) => b.dataset.bookmarkColor), ['violet', 'pink', 'coral', 'white']);
+  assert.deepEqual(f.pressed(), []);
+  assert.equal(f.choice('pink').attrs['aria-label'], 'Pink bookmarks');
+  assert.equal(f.choice('pink').title, 'Show pink bookmarks');
+  f.scope.renderBookmarkFilter();
+  assert.equal(f.box.children.length, 4);
+});
+
+test('picking a filter color narrows to it, another color swaps, the same color shows all', () => {
+  const f = setupFilter();
+  f.choice('violet').click();
+  assert.equal(f.scope.menuBookmarkFilter, 'violet'); assert.deepEqual(f.pressed(), ['violet']);
+  assert.equal(f.choice('violet').title, 'Show all chats');
+  assert.equal(f.scope.historyVisibleLimit, 40); assert.equal(f.list.scrollTop, 0);
+  f.choice('white').click();
+  assert.equal(f.scope.menuBookmarkFilter, 'white'); assert.deepEqual(f.pressed(), ['white']);
+  f.choice('white').click();
+  assert.equal(f.scope.menuBookmarkFilter, ''); assert.deepEqual(f.pressed(), []);
+  assert.equal(f.renders(), 3);
+});

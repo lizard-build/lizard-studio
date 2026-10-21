@@ -506,6 +506,7 @@
   let activeId = null;
   let history = [];
   let menuFilter = "";
+  let menuBookmarkFilter = ""; // a BOOKMARK_COLORS id, or "" for every chat
   // Last-used model / effort / mode, remembered per harness. One shared slot
   // would mean switching to Codex and back left Claude holding a gpt-5.6 model
   // id and a mode it doesn't have — so each agent keeps its own.
@@ -1460,6 +1461,37 @@
     els.chatMenuList.addEventListener("scroll", placeBookmarkMenu, { passive: true });
   }
 
+  // One button per color at the end of the search field: an outline until it
+  // narrows the list to that color, filled while it does. Picking it again
+  // shows every chat.
+  function renderBookmarkFilter() {
+    const box = els.chatMenuBookmarkFilter;
+    if (!box.children.length) {
+      for (const color of BOOKMARK_COLORS) {
+        const button = el("button", "chat-menu-filter-choice");
+        button.type = "button";
+        button.dataset.bookmarkColor = color.id;
+        button.style.color = color.color;
+        button.setAttribute("aria-label", `${color.label} bookmarks`);
+        button.addEventListener("click", () => {
+          menuBookmarkFilter = menuBookmarkFilter === color.id ? "" : color.id;
+          historyVisibleLimit = HISTORY_PAGE_SIZE;
+          els.chatMenuList.scrollTop = 0;
+          renderBookmarkFilter();
+          renderChatMenuList();
+        });
+        box.appendChild(button);
+      }
+    }
+    for (const button of box.children) {
+      const color = BOOKMARK_COLORS.find((c) => c.id === button.dataset.bookmarkColor);
+      const on = menuBookmarkFilter === color.id;
+      button.setAttribute("aria-pressed", String(on));
+      button.title = on ? "Show all chats" : `Show ${color.label.toLowerCase()} bookmarks`;
+      button.innerHTML = on ? BOOKMARK_SVG : BOOKMARK_EMPTY_SVG;
+    }
+  }
+
   function hideTabTip() {
     clearTimeout(tabTipTimer);
     tabTipAnchor?.setAttribute("aria-expanded", "false");
@@ -1714,9 +1746,11 @@
     if (chatMenuIsOpen()) return;
     for (const menu of menuRegistry) closeMenu(menu);
     menuFilter = "";
+    menuBookmarkFilter = "";
     historyVisibleLimit = HISTORY_PAGE_SIZE;
     els.chatMenuList.scrollTop = 0;
     els.chatMenuSearch.value = "";
+    renderBookmarkFilter();
     els.chatMenu.inert = false;
     els.chatMenu.setAttribute("aria-hidden", "false");
     if (!chatMenuIsDocked()) els.chatMenuGuard.classList.remove("hidden");
@@ -1914,10 +1948,11 @@
     historyHasMore = false;
     list.innerHTML = "";
     const q = menuFilter.trim().toLowerCase();
+    const mark = BOOKMARK_COLORS.find((c) => c.id === menuBookmarkFilter);
     const all = chatMenuEntries();
-    const rows = q ? all.filter((r) => r.title.toLowerCase().includes(q)) : all;
+    const rows = q || mark ? all.filter((r) => (!q || r.title.toLowerCase().includes(q)) && (!mark || (r.chat || r.item).bookmarkColor === mark.id)) : all;
     if (!rows.length) {
-      list.appendChild(el("div", "chat-menu-empty", q ? "No matches." : "No chats yet."));
+      list.appendChild(el("div", "chat-menu-empty", q ? "No matches." : mark ? `No ${mark.label.toLowerCase()} bookmarks.` : "No chats yet."));
       placeBookmarkMenu();
       return;
     }
@@ -11162,6 +11197,7 @@
     els.chatMenu = root.querySelector("#chat-menu");
     els.chatMenuGuard = root.querySelector("#chat-menu-guard");
     els.chatMenuSearch = root.querySelector("#chat-menu-search");
+    els.chatMenuBookmarkFilter = root.querySelector("#chat-menu-bookmark-filter");
     els.chatMenuList = root.querySelector("#chat-menu-list");
     els.settingsBtn = root.querySelector("#settings-btn");
     els.settingsOverlay = root.querySelector("#settings-overlay");
@@ -11360,6 +11396,7 @@
     els.chatMenuViewport.addEventListener("wheel", chatMenuScroller.onWheel, { passive: false });
     els.chatMenuList.addEventListener("scroll", scheduleChatHistoryLoad, { passive: true });
     setupBookmarkMenu();
+    renderBookmarkFilter();
     window.addEventListener("resize", scheduleChatHistoryLoad);
     els.chatMenuSearch.addEventListener("input", () => {
       menuFilter = els.chatMenuSearch.value;
@@ -11658,6 +11695,7 @@
         <div class="chat-menu-search">
           <span id="chat-menu-search-ic" class="chat-menu-search-ic"></span>
           <input id="chat-menu-search" class="chat-menu-search-input" type="text" placeholder="Search chats" />
+          <div id="chat-menu-bookmark-filter" class="chat-menu-bookmark-filter" role="group" aria-label="Filter by bookmark"></div>
         </div>
         <div id="chat-menu-list" class="chat-menu-list"></div>
         <div class="chat-menu-foot">
