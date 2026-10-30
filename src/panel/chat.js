@@ -1556,24 +1556,29 @@
       if (post({ type: "backgroundQueue", id: chat.id, agent, entries })) chat.backgroundQueueKey = key;
     }
   }
-  // Retargets the dot classes on the existing tab nodes. Deliberately NOT a
-  // full renderTabs(): turns start and end in background tabs all the time,
-  // and a rebuild mid-hover would kill the tooltip (or an in-flight drag).
+  // Retargets the dot classes on the existing tab nodes and chat menu rows.
+  // Deliberately NOT a full renderTabs() or renderChatMenuList(): turns start
+  // and end in background tabs all the time, and a rebuild mid-hover would
+  // kill the tooltip (or an in-flight drag), flicker the hovered menu row and
+  // drop a click whose press and release land on different row nodes.
   function updateTabDots() {
     syncBackgroundQueues();
     reportChatActivity();
     if (!mounted || !els.tabs) return;
-    for (const node of els.tabs.children) {
-      const chat = chats.get(node.dataset.tabId);
-      if (!chat) continue;
-      const waiting = tabDotWaiting(chat);
-      const running = !waiting && tabDotRunning(chat);
-      node.classList.toggle("dot-wait", waiting);
-      node.classList.toggle("dot-run", running);
-      node.classList.toggle("dot-unseen", !waiting && !running && !!chat.unseen);
+    for (const node of els.tabs.children) paintTabDot(node, chats.get(node.dataset.tabId));
+    // The menu wears the same dots. Only open chats have one.
+    for (const row of els.chatMenuList?.querySelectorAll(".chat-menu-item.is-open") || []) {
+      paintTabDot(row, chats.get(row.dataset.chatId));
     }
-    renderChatMenuList(); // the menu wears the same dots
     window.dispatchEvent(new Event("rk-chat-view"));
+  }
+  function paintTabDot(node, chat) {
+    if (!chat) return;
+    const waiting = tabDotWaiting(chat);
+    const running = !waiting && tabDotRunning(chat);
+    node.classList.toggle("dot-wait", waiting);
+    node.classList.toggle("dot-run", running);
+    node.classList.toggle("dot-unseen", !waiting && !running && !!chat.unseen);
   }
   // A fresh permission/question ask just landed — paint the tab's blue waiting
   // dot, and chime for attention like a finished session does. `wasWaiting` is
@@ -6141,6 +6146,11 @@
     if (msg.type === "backgroundSessionState") {
       const chat = chats.get(msg.id);
       if (!chat?.backgroundDeferred) return;
+      // The worker sends this after every event a deferred chat streams,
+      // dozens a second. Repaint only when something actually changed.
+      const state = () => [chat.turnRunning, chat.turnStartedAt, chat.started, chat.backgroundWaiting,
+        chat.codexHasSubmittedTurn, chat.sessionId, chat.unseen].join();
+      const before = state();
       if (chat.turnRunning && !msg.running && !msg.failed) chat.unseen = true;
       chat.turnRunning = msg.running;
       chat.turnStartedAt = msg.turnStartedAt;
@@ -6148,7 +6158,7 @@
       chat.backgroundWaiting = msg.waiting;
       chat.codexHasSubmittedTurn = msg.submitted;
       if (msg.sessionId) chat.sessionId = msg.sessionId;
-      updateTabDots();
+      if (state() !== before) updateTabDots();
       return;
     }
     if ((msg.type === "sharedPrompt" || msg.type === "sharedEvent") && chats.get(msg.message?.id)?.backgroundDeferred) return;

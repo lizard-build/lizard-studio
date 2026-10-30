@@ -59,7 +59,7 @@ function panelView(activeId) {
     makeChat: (opts) => ({ ...opts, messagesEl: element(), permCards: new Map(), queue: [], bashRuns: new Map() }),
     systemNote: (chat, text) => notes.push([chat.id, text]),
     endTurn: (chat) => { chat.turnRunning = false; },
-    resumeTurnIfIdle: (chat) => { chat.turnRunning = true; },
+    resumeTurnIfIdle: (chat, startedAt) => { chat.turnRunning = true; chat.turnStartedAt = startedAt; },
     failAsyncQuestionSends: (chat) => failedQuestions.push(chat.id),
     resumableSessionId: () => null, finishBashRun() {}, maybeReplay() {}, renderQueuedBubble() {},
     renderTabs() {}, updateTabDots() {}, syncComposer() {}, savePrefs() {},
@@ -105,4 +105,59 @@ test("a full snapshot without a running chat still reports the lost turn", () =>
   view.receive(w.panel({ lazyReplay: true, activeId: "gone" }).sent);
   assert.deepEqual(view.notes, [["gone", "Host disconnected mid-turn."]]);
   assert.equal(view.scope.chats.get("gone").started, false);
+});
+
+test("a deferred chat streaming in the background repaints the dots only when its state changes", () => {
+  const w = worker(), first = w.panel();
+  w.run(first, "a");
+  w.run(first, "b");
+  first.disconnect();
+  const reopened = w.panel({ lazyReplay: true, activeId: "a" });
+  const view = panelView("a");
+  view.receive(reopened.sent);
+  let repaints = 0;
+  view.scope.updateTabDots = () => repaints++;
+
+  // Each repaint used to rebuild the chat menu: the hovered row flickered and
+  // a click on it was lost.
+  let seen = reopened.sent.length;
+  const next = () => { const sent = reopened.sent.slice(seen); seen = reopened.sent.length; return sent; };
+  for (let i = 0; i < 20; i++) w.native[0].emit({ type: "event", id: "b", data: { type: "stream_event" } });
+  const streamed = next();
+  assert.equal(streamed.filter((m) => m.type === "backgroundSessionState").length, 20);
+  view.receive(streamed);
+  assert.equal(repaints, 0);
+
+  w.native[0].emit({ type: "event", id: "b", data: { type: "result" } });
+  view.receive(next());
+  assert.equal(repaints, 1);
+  assert.equal(view.scope.chats.get("b").turnRunning, false);
+  assert.equal(view.scope.chats.get("b").unseen, true);
+});
+
+test("dot changes repaint the open chat menu rows in place", () => {
+  const source = readFileSync(new URL("../../src/panel/chat.js", import.meta.url), "utf8");
+  const from = "  // Retargets the dot classes", to = "  // A fresh permission/question ask just landed";
+  const node = (data) => {
+    const classes = new Set();
+    return { dataset: data, classes, classList: { toggle(name, on) { if (on) classes.add(name); else classes.delete(name); } } };
+  };
+  const tab = node({ tabId: "a" }), row = node({ chatId: "a" });
+  let rebuilds = 0;
+  const scope = {
+    mounted: true, chats: new Map([["a", { turnRunning: true }]]),
+    els: { tabs: { children: [tab] }, chatMenuList: { querySelectorAll: (sel) => sel === ".chat-menu-item.is-open" ? [row] : [] } },
+    syncBackgroundQueues() {}, reportChatActivity() {}, renderChatMenuList() { rebuilds++; },
+    tabDotWaiting: (chat) => !!chat.waiting, tabDotRunning: (chat) => !!chat.turnRunning,
+    Event: class {}, window: { dispatchEvent() {} },
+  };
+  vm.createContext(scope);
+  vm.runInContext(source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from))), scope);
+  scope.updateTabDots();
+  assert.deepEqual([...row.classes], ["dot-run"]);
+  assert.deepEqual([...tab.classes], ["dot-run"]);
+  Object.assign(scope.chats.get("a"), { turnRunning: false, unseen: true });
+  scope.updateTabDots();
+  assert.deepEqual([...row.classes], ["dot-unseen"]);
+  assert.equal(rebuilds, 0);
 });
