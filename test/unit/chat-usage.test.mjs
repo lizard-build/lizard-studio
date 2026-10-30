@@ -84,7 +84,7 @@ test('transcript replay drops prior command reports in each CLI output shape', (
     SYNTHETIC_USER_TAG_RE: /<local-command-caveat>.*?<\/local-command-caveat>/g,
     commandBubbleText: () => null, scanBgNotice() {}, scanAgentNotice() {},
     userBubble: (_chat, text) => bubbles.push(text), noteCtxUsage() {},
-    ensureAssistantBody: () => ({ appendChild() {} }), finalizeAssistant() {},
+    ensureAssistantBody: () => ({ appendChild() {}, dataset: {} }), finalizeAssistant() {}, trayFinishedTurns() {},
     addText: (_chat, _body, text) => rendered.push(text),
     renderLocalCommandOutput: (_chat, text) => rendered.push(text),
   });

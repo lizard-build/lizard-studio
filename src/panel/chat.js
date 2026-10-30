@@ -3571,13 +3571,14 @@
   }
 
   // Visible prose of an assistant message — markdown / live-stream text blocks,
-  // minus tool cards and the footer itself. Read at click time so copy reflects
-  // the finished message regardless of when the footer was attached.
+  // minus tool cards, the folded work above the answer, and the footer itself.
+  // Read at click time so copy reflects the finished message regardless of
+  // when the footer was attached.
   function assistantProse(body) {
     let out = "";
     for (const child of body.children) {
       if (!child.classList) continue;
-      if (child.classList.contains("tool-card") || child.classList.contains("tool-group") || child.classList.contains("msg-footer")) continue;
+      if (child.classList.contains("tool-card") || child.classList.contains("tool-group") || child.classList.contains("work-tray") || child.classList.contains("msg-footer")) continue;
       const t = child.innerText || child.textContent || "";
       if (t) out += (out ? "\n" : "") + t;
     }
@@ -3587,7 +3588,7 @@
   function hasAssistantProse(body) {
     for (const child of body.children) {
       if (!child.classList) continue;
-      if (child.classList.contains("tool-card") || child.classList.contains("tool-group") || child.classList.contains("msg-footer")) continue;
+      if (child.classList.contains("tool-card") || child.classList.contains("tool-group") || child.classList.contains("work-tray") || child.classList.contains("msg-footer")) continue;
       if (child.textContent.trim()) return true;
     }
     return false;
@@ -4168,6 +4169,186 @@
     g.closed = true;
     g.el.classList.remove("running");
     chat.toolGroup = null;
+  }
+
+  // ---- work tray ---------------------------------------------------------------
+  // Once a turn has its answer, the way there — the notes between tool calls
+  // and the tool groups themselves — folds into one line above it: "Worked for
+  // 1m 42s · 7 tool calls ›". The answer is the run of prose the body ends
+  // with; a turn with no tool call, or no prose after its last one, stays as it
+  // is. Opened, the line shows that history again, every group and card still
+  // opening on its own, and sticks to the top while a long one scrolls past.
+  const TRAY_EASE = "cubic-bezier(.2,.8,.2,1)";
+  const isAnswerBlock = (n) => n.classList.contains("md") || n.classList.contains("assistant-stream");
+
+  // Safe to run again on the same body: a turn that went on after its answer
+  // (a background task woke the model) gets the old tray, the old answer and
+  // the new work folded into one. mode: "collapsed" (no motion), "open" (no
+  // motion, the reader keeps their place) or "fold" (animated from the turn's
+  // live layout; needs the chat's scroller).
+  function trayTurn(body, { ms = 0, total = false, mode = "collapsed", scroller = null } = {}) {
+    if (!body) return null;
+    const kids = [...body.children].filter((n) => !n.classList.contains("msg-footer"));
+    let cut = kids.length;
+    while (cut > 0 && isAnswerBlock(kids[cut - 1])) cut--;
+    const work = kids.slice(0, cut);
+    if (cut === kids.length || !work.length) return null;
+    const old = work[0].classList.contains("work-tray") ? work[0] : null;
+    if (old && work.length === 1) return null;
+    const calls = work.reduce((n, node) => n + (node.matches(".tool-card, .ask-block") ? 1 : 0) + node.querySelectorAll(".tool-card, .ask-block").length, 0);
+    if (!calls) return null;
+    if (old) mode = "collapsed";
+    const anchor = mode === "open" && scroller ? kids.find((n) => n.getBoundingClientRect().bottom > scroller.getBoundingClientRect().top) : null;
+    const anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
+    const tray = old || makeWorkTray();
+    if (!old) body.insertBefore(tray, work[0]);
+    const list = tray.querySelector(":scope > .work-tray-list");
+    for (const node of work) if (node !== tray) list.appendChild(node);
+    const prev = Number(tray.dataset.ms) || 0;
+    tray.dataset.ms = String(total ? Math.max(prev, ms) : prev + ms);
+    tray.dataset.calls = String(calls);
+    labelWorkTray(tray);
+    setWorkTrayOpen(tray, mode === "open");
+    // Opening in place adds the line above what the reader is looking at.
+    if (anchor) scroller.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+    if (mode === "fold" && scroller) {
+      tray.classList.remove("collapsed");
+      tray.classList.add("folding");
+      foldWorkTray(tray, scroller, true);
+    }
+    return tray;
+  }
+
+  function makeWorkTray() {
+    const tray = el("div", "work-tray collapsed");
+    const head = el("button", "work-tray-head");
+    head.type = "button";
+    head.appendChild(el("span", "work-tray-label"));
+    head.appendChild(el("span", "work-tray-meta"));
+    const toggle = el("span", "work-tray-toggle");
+    toggle.innerHTML = ICON("caret-down", 14);
+    head.appendChild(toggle);
+    head.addEventListener("click", () => toggleWorkTray(tray));
+    tray.appendChild(head);
+    tray.appendChild(el("div", "work-tray-list"));
+    return tray;
+  }
+
+  function labelWorkTray(tray) {
+    const secs = Math.round((Number(tray.dataset.ms) || 0) / 1000);
+    const calls = Number(tray.dataset.calls) || 0;
+    tray.querySelector(".work-tray-label").textContent = secs ? "Worked for " + formatElapsed(secs) : "Worked";
+    tray.querySelector(".work-tray-meta").textContent = "· " + calls + (calls === 1 ? " tool call" : " tool calls");
+  }
+
+  function setWorkTrayOpen(tray, open) {
+    tray.classList.toggle("open", open);
+    tray.classList.toggle("collapsed", !open);
+    tray.querySelector(":scope > .work-tray-head").setAttribute("aria-expanded", String(open));
+  }
+
+  function toggleWorkTray(tray) {
+    if (tray.dataset.moving) return;
+    const open = !tray.classList.contains("open");
+    const scroller = tray.closest(".chat-messages");
+    if (!scroller || !scroller.clientHeight || reducedMotion.matches) { setWorkTrayOpen(tray, open); return; }
+    if (open) openWorkTray(tray, scroller);
+    else foldWorkTray(tray, scroller, false);
+  }
+
+  // Only the part of the history inside the panel moves. Whatever sits above or
+  // below the view is cut in the same frame, unseen, so a turn with sixty tool
+  // calls folds as quickly as one with six and the answer never jumps.
+  function foldWorkTray(tray, scroller, fresh) {
+    tray.dataset.moving = "1";
+    const head = tray.querySelector(":scope > .work-tray-head");
+    const list = tray.querySelector(":scope > .work-tray-list");
+    const view = scroller.getBoundingClientRect(), box = tray.getBoundingClientRect();
+    const above = Math.max(0, Math.round(view.top - box.top));
+    const below = Math.max(0, Math.round(box.bottom - view.bottom));
+    const from = Math.max(0, Math.round(box.height) - above - below);
+    const to = head.offsetHeight;
+    const scroll = scroller.scrollTop;
+    if (from <= to) {
+      // None of it is in view: fold at once and keep the reader's place.
+      tray.classList.remove("folding");
+      setWorkTrayOpen(tray, false);
+      if (box.bottom <= view.top) scroller.scrollTop = scroll - (Math.round(box.height) - to);
+      delete tray.dataset.moving;
+      return;
+    }
+    tray.classList.add("closing");
+    scroller.style.overflowAnchor = "none";
+    tray.style.overflow = "clip";
+    tray.style.height = from + "px";
+    if (above) scroller.scrollTop = scroll - above;
+    const anims = [
+      tray.animate([{ height: from + "px" }, { height: to + "px" }], { duration: 440, easing: TRAY_EASE, fill: "both" }),
+      list.animate([{ opacity: 1, transform: `translateY(${-above}px)` }, { opacity: 0, transform: `translateY(${-above - 10}px)` }],
+        { duration: 240, easing: "cubic-bezier(.4,0,1,1)", fill: "both" }),
+    ];
+    if (fresh) {
+      anims.push(head.animate([{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }],
+        { duration: 260, delay: 170, easing: TRAY_EASE, fill: "both" }));
+    }
+    settleWorkTray(tray, scroller, anims, () => {
+      tray.classList.remove("folding", "closing");
+      setWorkTrayOpen(tray, false);
+    });
+  }
+
+  function openWorkTray(tray, scroller) {
+    tray.dataset.moving = "1";
+    const list = tray.querySelector(":scope > .work-tray-list");
+    const from = tray.offsetHeight;
+    setWorkTrayOpen(tray, true);
+    const full = tray.offsetHeight;
+    // Grow only to the bottom of the panel; the rest lands out of view.
+    const to = Math.max(from, Math.min(full, Math.round(scroller.getBoundingClientRect().bottom - tray.getBoundingClientRect().top)));
+    scroller.style.overflowAnchor = "none";
+    tray.style.overflow = "clip";
+    settleWorkTray(tray, scroller, [
+      tray.animate([{ height: from + "px" }, { height: to + "px" }], { duration: 440, easing: TRAY_EASE, fill: "both" }),
+      list.animate([{ opacity: 0, transform: "translateY(-8px)" }, { opacity: 1, transform: "none" }],
+        { duration: 300, delay: 90, easing: TRAY_EASE, fill: "both" }),
+    ]);
+  }
+
+  function settleWorkTray(tray, scroller, anims, done) {
+    Promise.all(anims.map((a) => a.finished.catch(() => {}))).then(() => {
+      if (done) done();
+      for (const a of anims) a.cancel();
+      tray.style.overflow = "";
+      tray.style.height = "";
+      scroller.style.overflowAnchor = "";
+      delete tray.dataset.moving;
+    });
+  }
+
+  // Folds the turn that just ended, a moment after its answer lands: animated
+  // when the reader is at the bottom watching it, opened in place when they
+  // have scrolled up into the work, and silently in a background tab. Skipped
+  // if the turn picked up again by then; its next end folds everything.
+  function scheduleWorkTray(chat, body, ms) {
+    if (!body || chat.historyPage) return;
+    setTimeout(() => {
+      if (!body.isConnected || (chat.turnRunning && chat.currentAssistantBody === body)) return;
+      const scroller = chat.messagesEl;
+      const seen = chat.id === activeId && !document.hidden && !reducedMotion.matches && scroller.clientHeight > 0;
+      if (!seen) trayTurn(body, { ms });
+      else trayTurn(body, { ms, mode: atBottom(chat) ? "fold" : "open", scroller });
+    }, 600);
+  }
+
+  // History arrives finished: every turn in it folds at once, except the last
+  // when that turn is still running (its end folds it).
+  function trayFinishedTurns(chat, skipTail) {
+    const tail = skipTail ? transcriptTail(chat) : null;
+    for (const body of chat.messagesEl.querySelectorAll(":scope > .msg-assistant > .assistant-body")) {
+      if (tail && body.parentElement === tail) continue;
+      const start = Number(body.dataset.turnStart) || 0, end = Number(body.dataset.turnEnd) || 0;
+      trayTurn(body, { ms: start && end > start ? end - start : 0, total: true });
+    }
   }
 
   function toolSummary(chat, name, input) {
@@ -5716,6 +5897,9 @@
     chat.compacting = false;
     closeToolGroup(chat);
     finalizeAssistant(chat, chat.currentAssistantBody, Date.now());
+    const workMs = result && Number.isFinite(result.duration_ms) ? result.duration_ms
+      : chat.turnStartedAt ? Date.now() - chat.turnStartedAt : 0;
+    scheduleWorkTray(chat, chat.currentAssistantBody, workMs);
     chat.currentAssistantId = null;
     chat.currentAssistantBody = null;
     // Finalize any dangling live blocks (e.g. an interrupted turn) — renders
@@ -6951,6 +7135,7 @@
     page.bashHistory = chat.bashHistory.filter((entry) => !chat.historyBashSeen.has(entry.id) && (entry.ts || 0) >= oldest).sort((a, b) => (a.ts || 0) - (b.ts || 0));
     replayTranscript(page, events);
     drainBashUntil(page, Infinity);
+    trayFinishedTurns(page, request.initial && chat.turnRunning);
     if (request.initial && chat.harness !== "codex") {
       // The page is its own chat object: carry over what the newest messages
       // told it, and the turn count the next live turn continues from.
@@ -7035,6 +7220,7 @@
         if (chat.harness === "codex" && ev.historyTurnId && !content?.some?.((part) => part.type === "tool_result")) {
           const raw = typeof content === "string" ? content : (content || []).filter((part) => part.type === "text").map((part) => part.text).join("\n");
           const text = raw.replace(CTX_MARK_RE, "").trim();
+          if (text || ev.hasAttachments) chat.replayTurnStart = Date.parse(ev.timestamp) || 0;
           if (text || ev.hasAttachments) userBubble(chat, text, ev.attachments, { real: true,
             turnId: ev.historyTurnId, itemId: ev.historyItemId, hasAttachments: ev.hasAttachments });
           continue;
@@ -7057,7 +7243,10 @@
             commandBubbleText(content) || content.replace(SYNTHETIC_USER_TAG_RE, "").replace(CTX_MARK_RE, "").trim();
           // Don't replay bare `/usage` command bubbles (their output is skipped
           // above, so the lone command echo would dangle).
-          if (stripped && !USAGE_CMD_RE.test(stripped)) userBubble(chat, stripped, null, { real: true, ts, replayQuestionReply: true, turnId: ev.historyTurnId, itemId: ev.historyItemId, turnIndex: ev.historyTurnIndex });
+          if (stripped && !USAGE_CMD_RE.test(stripped)) {
+            chat.replayTurnStart = ts;
+            userBubble(chat, stripped, null, { real: true, ts, replayQuestionReply: true, turnId: ev.historyTurnId, itemId: ev.historyItemId, turnIndex: ev.historyTurnIndex });
+          }
         } else if (Array.isArray(content)) {
           const texts = [];
           const images = [];
@@ -7081,6 +7270,7 @@
           // The host counts a turn for rewind only when it has a text block, so
           // an image sent with no text gets a bubble but no turn index.
           if (stripped ? !USAGE_CMD_RE.test(stripped) : images.length) {
+            chat.replayTurnStart = ts;
             userBubble(chat, stripped, images, texts.length ? { real: true, ts, replayQuestionReply: true, turnId: ev.historyTurnId, itemId: ev.historyItemId, turnIndex: ev.historyTurnIndex } : null);
           }
         }
@@ -7089,6 +7279,10 @@
         // last one in the transcript is the conversation's current size.
         noteCtxUsage(chat, ev.message.usage);
         const body = ensureAssistantBody(chat, ev.message.id);
+        const ts = ev.timestamp ? (Date.parse(ev.timestamp) || Date.now()) : Date.now();
+        // How long the turn worked, for its tray: from the prompt to its last message.
+        if (!body.dataset.turnStart) body.dataset.turnStart = String(chat.replayTurnStart || ts);
+        body.dataset.turnEnd = String(ts);
         for (const block of ev.message.content || []) {
           if (!block) continue;
           if (block.type === "tool_use") {
@@ -7102,11 +7296,11 @@
             addText(chat, body, block.text);
           }
         }
-        const ts = ev.timestamp ? (Date.parse(ev.timestamp) || Date.now()) : Date.now();
         finalizeAssistant(null, body, ts);
       }
     }
     replayStamp = 0; // back to live time
+    if (!chat.historyPage) trayFinishedTurns(chat, chat.turnRunning);
     // Leave currentAssistantId pointing at the last replayed turn so a turn that
     // straddles a chunk boundary stays in one body; the next live turn arrives
     // with a fresh message id and naturally opens its own body.

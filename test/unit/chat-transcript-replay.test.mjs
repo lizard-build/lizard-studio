@@ -12,7 +12,7 @@ function replay(events) {
   const chat = { id: "chat", harness: "claude" };
   const scope = { activeId: "other", replayStamp: 0, CTX_MARK_RE: /<context>[\s\S]*?<\/context>/g,
     SYNTHETIC_USER_TAG_RE: /<system-reminder>[\s\S]*?<\/system-reminder>/g, USAGE_CMD_RE: /^\/usage$/,
-    commandBubbleText: () => null, scanBgNotice() {}, scanAgentNotice() {}, fillToolResult() {},
+    commandBubbleText: () => null, scanBgNotice() {}, scanAgentNotice() {}, fillToolResult() {}, trayFinishedTurns() {},
     userBubble: (_chat, text, attachments, opts) => bubbles.push({ text, attachments, real: !!opts?.real }) };
   vm.createContext(scope);
   vm.runInContext(section("  function replayImage(source)", "  // Render the output of a local slash command."), scope);

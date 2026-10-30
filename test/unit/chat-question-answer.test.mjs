@@ -29,7 +29,7 @@ function setup() {
   const scope = { el, ICON: () => '', activeId: null, connected: true, hostReady: true,
     els: {}, append: (chat, row) => chat.messagesEl.appendChild(row), buildBubble: text => el('div', '', text),
     paintPerm() {}, tabDotWaiting: () => false, renderTurnStatus() { effects.status++; }, noteWaitingAsk() {},
-    touchChat() {}, updateTabDots() { effects.dots++; }, savePrefs() { effects.saves++; }, resumeTurnIfIdle() {},
+    touchChat() {}, scheduleWorkTray() {}, updateTabDots() { effects.dots++; }, savePrefs() { effects.saves++; }, resumeTurnIfIdle() {},
     closeToolGroup() {}, finalizeAssistant() {}, backgroundRestoring: true, sharedRendering: false,
     chats: new Map([['chat', chat]]), reportChatActivity() {}, liftSuppress() {}, failQueuedSteers() {},
     updateSetup() {}, finishAgentCheck() {}, harnessReady: {}, harnessChecked: {},

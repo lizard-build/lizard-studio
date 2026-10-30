@@ -2943,6 +2943,56 @@ code.inline.path:focus-visible {
 .tool-group.err .tool-group-toggle { color: var(--other-red); }
 .tool-group.collapsed .tool-group-list > .tool-card { display: none; }
 
+/* A finished turn's work, folded into one line above its answer (see trayTurn
+   in chat.js): "Worked for 1m 42s · 7 tool calls ›". Opened, the history keeps
+   a hairline on its left and its prose steps back a shade, so it never reads
+   as part of the answer, and the line sticks to the top while a long history
+   scrolls under it. While it folds, the line rides on top of the history. */
+.work-tray { position: relative; display: flex; flex-direction: column; min-width: 0; }
+.work-tray-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+.work-tray-head:hover { color: var(--text-primary); }
+.work-tray-head:focus-visible { outline: 1px solid var(--control-primary); outline-offset: 2px; border-radius: 4px; }
+.work-tray-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-tertiary); }
+.work-tray-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  transform: rotate(-90deg);
+  transition: transform 0.15s ease, color 0.15s ease;
+}
+.work-tray-head:hover .work-tray-toggle { color: var(--text-primary); }
+.work-tray.open:not(.closing) .work-tray-toggle { transform: none; }
+.work-tray-list { display: none; flex-direction: column; gap: 8px; min-width: 0; }
+.work-tray.open > .work-tray-list,
+.work-tray.folding > .work-tray-list { display: flex; }
+.work-tray.open > .work-tray-list { margin-top: 6px; padding-left: 12px; border-left: 1px solid var(--border-primary); }
+.work-tray.open > .work-tray-list .md { color: var(--text-secondary); }
+.work-tray.open > .work-tray-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-primary);
+  box-shadow: 0 -14px 0 var(--bg-primary);
+}
+.work-tray.folding > .work-tray-head { position: absolute; top: 0; left: 0; z-index: 2; background: var(--bg-primary); }
+
 /* diff */
 .diff {
   margin: 8px 0;

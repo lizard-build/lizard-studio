@@ -203,6 +203,11 @@
         tabs: [{ id: "history-a", title: "History", harness: "codex", model: "test-model", cwd: "/test/project", sessionId: "thread-history", mode: "workspace" }],
         history: [{ id: "history-old", title: "Old chat", harness: "claude", model: "claude-opus-5-5", cwd: "/test/project", sessionId: "session-old", mode: "default", ts: Date.now() - 86400000 }],
       };
+      const trayRegression = new URLSearchParams(location.search).get("regressions") === "tray";
+      if (trayRegression) store.rkChatV2 = {
+        activeId: "tray-a", lastHarness: "claude",
+        tabs: [{ id: "tray-a", title: "Work tray", harness: "claude", cwd: "/test/project", model: "opus", mode: "default", sessionId: "tray-session" }],
+      };
       if (codexRegression) store.rkChatV2 = {
         activeId: "audit-a", lastHarness: "codex",
         tabs: ["audit-a", "audit-b"].map((id) => ({ id, title: id === "audit-a" ? "ChatGPT audit" : "Second chat", harness: "codex", model: "test-model", cwd: "/test/project", mode: "workspace" })),
@@ -268,6 +273,13 @@
             script.onload = resolve; script.onerror = reject; document.body.appendChild(script);
           });
           window.__test.backgroundResult = await window.runBackgroundPanelTests();
+        }
+        if (trayRegression) {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement("script"); script.src = "tray-panel.js?t=" + stamp;
+            script.onload = resolve; script.onerror = reject; document.body.appendChild(script);
+          });
+          window.__test.trayResult = await window.runTrayPanelTests();
         }
         if (editRegression) {
           await new Promise((resolve, reject) => {
