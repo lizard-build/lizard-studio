@@ -1536,6 +1536,20 @@
   function tabDotWaiting(chat) {
     return !!chat.backgroundWaiting || !!(chat.permCards && chat.permCards.size) || (!chat.turnRunning && !!pendingAsyncQuestion(chat));
   }
+  // The worker's unread results are what the green badge counts. They outlive
+  // this page and include turns that finished in another Studio view, where
+  // this panel never set `unseen` — give those chats the green dot too, or the
+  // badge counts chats nobody can find.
+  let workerUnread = new Set();
+  function tabDotUnseen(chat) {
+    return !!chat.unseen || workerUnread.has(chat.id) && (chat.id !== activeId || document.hidden);
+  }
+  function setUnreadResults(ids) {
+    const next = new Set(ids);
+    if (next.size === workerUnread.size && [...next].every((id) => workerUnread.has(id))) return;
+    workerUnread = next;
+    updateTabDots();
+  }
   function syncBackgroundQueues() {
     if (!connected || backgroundRestoring || sharedRendering || applyingSharedPrefs) return;
     for (const chat of chats.values()) {
@@ -1578,7 +1592,7 @@
     const running = !waiting && tabDotRunning(chat);
     node.classList.toggle("dot-wait", waiting);
     node.classList.toggle("dot-run", running);
-    node.classList.toggle("dot-unseen", !waiting && !running && !!chat.unseen);
+    node.classList.toggle("dot-unseen", !waiting && !running && tabDotUnseen(chat));
   }
   // A fresh permission/question ask just landed — paint the tab's blue waiting
   // dot, and chime for attention like a finished session does. `wasWaiting` is
@@ -1600,7 +1614,7 @@
       const chat = chats.get(id);
       const waiting = tabDotWaiting(chat);
       const running = !waiting && tabDotRunning(chat);
-      const dotCls = waiting ? " dot-wait" : running ? " dot-run" : chat.unseen ? " dot-unseen" : "";
+      const dotCls = waiting ? " dot-wait" : running ? " dot-run" : tabDotUnseen(chat) ? " dot-unseen" : "";
       const tab = el("button", "chat-tab" + (id === activeId ? " active" : "") + dotCls);
       tab.dataset.tabId = id;
       tab.setAttribute("aria-haspopup", "dialog");
@@ -2174,7 +2188,7 @@
     const chat = entry.chat;
     const waiting = chat ? tabDotWaiting(chat) : false;
     const running = chat ? !waiting && tabDotRunning(chat) : false;
-    const dotCls = waiting ? " dot-wait" : running ? " dot-run" : chat && chat.unseen ? " dot-unseen" : "";
+    const dotCls = waiting ? " dot-wait" : running ? " dot-run" : chat && tabDotUnseen(chat) ? " dot-unseen" : "";
     const active = chat && chat.id === activeId;
     const row = el("div", "chat-menu-item" + (entry.open ? " is-open" : "") + (active ? " active" : "") + dotCls);
     if (entry.open) makeChatMenuRowReorderable(row, chat.id);
@@ -12180,5 +12194,5 @@
   }
 
 
-  window.RKChat = { mount, activate, deactivate, addContext, addImage, getRunningChatCount, getVisibleChatId, setLiveSelection };
+  window.RKChat = { mount, activate, deactivate, addContext, addImage, getRunningChatCount, getVisibleChatId, setLiveSelection, setUnreadResults };
 })();

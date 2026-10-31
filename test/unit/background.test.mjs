@@ -192,6 +192,25 @@ test("only a visible, loaded chat can acknowledge a result", () => {
   scope.backgroundRestoring = true; assert.equal(scope.getVisibleChatId(), null);
 });
 
+test("chats the worker counts as unread wear the green dot, except the one in view", () => {
+  const source = readFileSync(new URL("../../src/panel/chat.js", import.meta.url), "utf8");
+  const from = "  // The worker's unread results";
+  const chats = new Map([["a", { id: "a" }], ["b", { id: "b" }], ["c", { id: "c", unseen: true }]]);
+  let repaints = 0;
+  const scope = { chats, activeId: "a", document: { hidden: false }, updateTabDots: () => repaints++ };
+  vm.createContext(scope);
+  vm.runInContext(source.slice(source.indexOf(from), source.indexOf("  function syncBackgroundQueues()")), scope);
+  const dots = () => [...chats.values()].filter(chat => scope.tabDotUnseen(chat)).map(chat => chat.id);
+  assert.deepEqual(dots(), ["c"]);
+  scope.setUnreadResults(["a", "b"]);
+  assert.deepEqual(dots(), ["b", "c"]); assert.equal(repaints, 1);
+  scope.setUnreadResults(["b", "a"]); assert.equal(repaints, 1);
+  scope.document.hidden = true; assert.deepEqual(dots(), ["a", "b", "c"]);
+  scope.document.hidden = false;
+  scope.setUnreadResults(["a"]);
+  assert.deepEqual(dots(), ["c"]); assert.equal(repaints, 2);
+});
+
 test("favicon changes from yellow to green and acknowledges only the visible result", () => {
   let receive;
   const sent = [], images = [], colors = [], labels = [], events = {};
@@ -199,6 +218,7 @@ test("favicon changes from yellow to green and acknowledges only the visible res
   const ctx = { drawImage() {}, measureText: text => ({ width: text.length * 7 }), beginPath() {}, roundRect() {},
     fill() { colors.push(this.fillStyle); }, fillText: text => labels.push(text) };
   let visible = null;
+  const unreadIds = [];
   const chrome = { runtime: { id: "test", getURL: path => "chrome-extension://test/" + path,
     connect: () => ({ postMessage: msg => sent.push(msg), onMessage: { addListener: fn => { receive = fn; } }, onDisconnect: { addListener() {} } }) },
     windows: { getCurrent: cb => cb({ id: 101 }) } };
@@ -207,11 +227,12 @@ test("favicon changes from yellow to green and acknowledges only the visible res
     document: { ...document, addEventListener: (name, fn) => { events[name] = fn; },
       createElement: tag => tag === "link" ? document.createElement(tag) : ({ getContext: () => ctx,
         toDataURL: () => "data:image/png;base64," + colors.at(-1) + labels.at(-1) }) },
-    window: { RKChat: { getVisibleChatId: () => visible }, addEventListener: (name, fn) => { events[name] = fn; } },
+    window: { RKChat: { getVisibleChatId: () => visible, setUnreadResults: ids => unreadIds.push(ids) }, addEventListener: (name, fn) => { events[name] = fn; } },
     setInterval() {}, setTimeout() {},
   });
   const unread = [["a", "token-a"], ["b", "token-b"]];
   receive({ cmd: "sessionActivity", count: 2, unread });
+  assert.equal(JSON.stringify(unreadIds.at(-1)), "[\"a\",\"b\"]");
   images[0].complete = true; images[0].naturalWidth = 48; images[0].onload();
   assert.equal(labels.at(-1), "2"); assert.equal(colors.at(-1), "#fbbf24");
   const yellowIcon = document.getElementById("studio-favicon");
@@ -222,6 +243,7 @@ test("favicon changes from yellow to green and acknowledges only the visible res
   visible = "b"; events["rk-chat-view"]();
   assert.equal(sent.at(-1).id, "b"); assert.equal(sent.at(-1).token, "token-b");
   receive({ cmd: "sessionActivity", count: 0, unread: [] });
+  assert.equal(JSON.stringify(unreadIds.at(-1)), "[]");
   assert.equal(document.getElementById("studio-favicon").href, "chrome-extension://test/icons/icon48.png");
 });
 

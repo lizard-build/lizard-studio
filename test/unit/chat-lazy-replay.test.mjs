@@ -148,7 +148,7 @@ test("dot changes repaint the open chat menu rows in place", () => {
     mounted: true, chats: new Map([["a", { turnRunning: true }]]),
     els: { tabs: { children: [tab] }, chatMenuList: { querySelectorAll: (sel) => sel === ".chat-menu-item.is-open" ? [row] : [] } },
     syncBackgroundQueues() {}, reportChatActivity() {}, renderChatMenuList() { rebuilds++; },
-    tabDotWaiting: (chat) => !!chat.waiting, tabDotRunning: (chat) => !!chat.turnRunning,
+    tabDotWaiting: (chat) => !!chat.waiting, tabDotRunning: (chat) => !!chat.turnRunning, tabDotUnseen: (chat) => !!chat.unseen,
     Event: class {}, window: { dispatchEvent() {} },
   };
   vm.createContext(scope);

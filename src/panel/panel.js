@@ -103,6 +103,7 @@
         hasWorkerActivity = true;
         unreadTokens = new Map((Array.isArray(m.unread) ? m.unread : [])
           .filter(entry => Array.isArray(entry) && entry.length === 2 && entry.every(value => typeof value === "string")));
+        window.RKChat?.setUnreadResults?.([...unreadTokens.keys()]);
         updateFavicon(m.count, unreadTokens.size);
         acknowledgeResult();
       }

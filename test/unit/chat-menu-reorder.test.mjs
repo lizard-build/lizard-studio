@@ -31,7 +31,7 @@ function setup() {
     document: eventTarget, window: eventTarget,
     requestAnimationFrame: fn => { frames.set(++nextFrame, fn); return nextFrame; }, cancelAnimationFrame: id => frames.delete(id),
     els: { chatMenuList: list }, BOOKMARK_COLORS: [], BOOKMARK_SVG: '', BOOKMARK_EMPTY_SVG: '', bookmarkMenu: null, toggleBookmarkMenu() {},
-    el: node, ICON: () => '', tabDotWaiting: () => false, tabDotRunning: () => false, relTime: () => '',
+    el: node, ICON: () => '', tabDotWaiting: () => false, tabDotRunning: () => false, tabDotUnseen: () => false, relTime: () => '',
     renderTabs: () => tabOrders.push([...scope.order]), savePrefs: () => saved.push([...scope.order]),
     renderChatMenuList: () => { menuRenders++; },
   };
