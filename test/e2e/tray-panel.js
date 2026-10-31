@@ -41,6 +41,8 @@ window.runTrayPanelTests = async function () {
     { ...toolResult("h-t1", "chat.js"), timestamp: at(20) },
     { type: "assistant", timestamp: at(40), message: { id: "h2", content: [tool("h-t2", "Read", { file_path: "/test/project/src/panel/chat.js" })] } },
     { ...toolResult("h-t2", "function renderChatMenuList() {}"), timestamp: at(60) },
+    // A transcript stores one message as several lines under one id.
+    { type: "assistant", timestamp: at(88), message: { id: "h3", content: [{ type: "thinking", thinking: "The fix holds." }] } },
     { type: "assistant", timestamp: at(90), message: { id: "h3", content: [{ type: "text", text: "Fixed: the menu no longer rebuilds." }] } },
     { type: "user", timestamp: at(100), message: { content: "And what is 2 + 2?" } },
     { type: "assistant", timestamp: at(102), message: { id: "h4", content: [{ type: "text", text: "Four." }] } },
@@ -58,6 +60,7 @@ window.runTrayPanelTests = async function () {
   check("the tray names the time and the tool calls", head.textContent.includes("Worked for 1m 30s") && head.textContent.includes("· 2 tool calls"));
   const answer = [...fixed.querySelector(".assistant-body").children].find((n) => n.textContent.includes("Fixed: the menu"));
   check("the answer stays outside the tray and on screen", !!answer && !tray.contains(answer) && answer.getBoundingClientRect().height > 0);
+  check("copy and time sit under the answer", fixed.querySelector(".assistant-body").lastElementChild.classList.contains("msg-footer"));
   check("notes and tool groups go inside the tray, hidden", tray.textContent.includes("Looking for the menu code.") && !!tray.querySelector(".tool-group")
     && tray.querySelector(".work-tray-list").getBoundingClientRect().height === 0);
   check("a turn without tool calls has no tray", !rows().find((row) => row.textContent.includes("Four.")).querySelector(".work-tray"));

@@ -3631,13 +3631,20 @@
   }
 
   // Attach the copy + time footer once an assistant message is complete. No-op
-  // for tool-only messages (no prose to copy), if a footer is already present,
-  // or if the turn is still running — a turn can span several assistant
-  // messages (interleaved with tool calls), and the footer should only land
-  // once the whole reply is done, not after each intermediate message.
+  // for tool-only messages (no prose to copy) or if the turn is still running —
+  // a turn can span several assistant messages (interleaved with tool calls),
+  // and the footer should only land once the whole reply is done, not after
+  // each intermediate message. An existing footer moves back to the bottom:
+  // a transcript stores one message as several lines under the same id
+  // (thinking, then the answer), and replay finalizes after each line.
   function finalizeAssistant(chat, body, ts) {
     if (chat && chat.turnRunning) return;
-    if (!body || body.dataset.footered) return;
+    if (!body) return;
+    if (body.dataset.footered) {
+      const footer = body.querySelector(":scope > .msg-footer");
+      if (footer && footer !== body.lastElementChild) body.appendChild(footer);
+      return;
+    }
     // Only asks whether there is prose at all: textContent needs no layout,
     // where innerText (used for the copy itself) forces one.
     if (!hasAssistantProse(body)) return;
