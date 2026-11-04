@@ -144,18 +144,34 @@ function recordPanelMessage(name, msg) {
   if (msg.type === "start" || msg.type === "restartSession") {
     sessionState.set(msg.id, { id: msg.id, agent: name, spec: msg, started: true,
       running: false, turnStartedAt: 0, failed: false, submitted: !!msg.resume, sessionId: msg.resume || null,
-      turnIds: new Set(), journal: [], journalBytes: 0 });
+      turnIds: new Set(), journal: [], journalBytes: 0, prompts: new Map() });
     return;
   }
   const state = sessionState.get(msg.id);
   if (!state) return;
   if (msg.type === "prompt") {
-    if (!state.running) { state.journal = []; state.journalBytes = 0; state.turnIds.clear(); }
+    if (!state.running) { state.journal = []; state.journalBytes = 0; state.turnIds.clear(); state.prompts.clear(); }
     if (!state.running) state.turnStartedAt = Date.now();
     state.running = true;
     state.failed = false;
     state.submitted = true;
+    // The host never echoes a prompt back, so the journal would replay the
+    // turn without its question. A Codex panel rebuilds the turn from it.
+    if (state.agent === "codex") {
+      const body = Buffer.from(JSON.stringify({ type: "backgroundPrompt", id: msg.id, text: msg.text,
+        images: msg.images, questionReplyId: msg.questionReplyId }));
+      journal(state, body);
+      if (msg.promptRequestId) state.prompts.set(msg.promptRequestId, body);
+    }
   }
+}
+function journal(state, body) {
+  if (body.length > MAX_JOURNAL_BYTES) return;
+  while (state.journal.length && state.journalBytes + body.length > MAX_JOURNAL_BYTES) {
+    state.journalBytes -= state.journal.shift().length;
+  }
+  state.journal.push(body);
+  state.journalBytes += body.length;
 }
 function recordChildMessage(name, body) {
   let msg;
@@ -183,15 +199,14 @@ function recordChildMessage(name, body) {
       state.failed = !!msg.data?.is_error || msg.type !== "event";
       if (msg.type === "exit") state.started = false;
     }
-    if (!["browser", "transcript", "transcriptPart"].includes(msg.type) && state.journalBytes + body.length > MAX_JOURNAL_BYTES) {
-      while (state.journal.length && state.journalBytes + body.length > MAX_JOURNAL_BYTES) {
-        state.journalBytes -= state.journal.shift().length;
-      }
+    if (msg.type === "promptResult" && state.prompts.has(msg.requestId)) {
+      // A prompt the host turned down never started a turn; don't replay it.
+      const prompt = state.prompts.get(msg.requestId);
+      state.prompts.delete(msg.requestId);
+      const index = msg.ok ? -1 : state.journal.indexOf(prompt);
+      if (index >= 0) { state.journal.splice(index, 1); state.journalBytes -= prompt.length; }
     }
-    if (!["browser", "transcript", "transcriptPart"].includes(msg.type) && body.length <= MAX_JOURNAL_BYTES) {
-      state.journal.push(Buffer.from(body));
-      state.journalBytes += body.length;
-    }
+    if (!["browser", "transcript", "transcriptPart"].includes(msg.type)) journal(state, Buffer.from(body));
   }
   if (daemonMode && msg.type === "browser" && !browserOutput && typeof msg.bid === "number") {
     const reply = JSON.stringify({ type: "browserResult", bid: msg.bid, ok: false,
