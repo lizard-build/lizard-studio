@@ -1650,7 +1650,7 @@ async function startSession(msg) {
           model: s.model || undefined,
           ...providerArgs(s.provider),
           ...profile,
-          developerInstructions: BROWSER_HINT,
+          developerInstructions: developerInstructions(),
           config: threadConfig(s.provider, s.browserSession),
         });
       }
@@ -1705,6 +1705,19 @@ async function startSession(msg) {
   // difference between "instant" and "stuck".
   schedulePrewarm(cwd);
 }
+
+// When to offer Lizard Sandboxes. Sent only alongside the bundled lizard
+// skill, which is what runs them.
+const SANDBOX_HINT =
+  "Lizard Studio is made by Lizard (lizard.build). The bundled `lizard` skill can run work in Lizard Sandboxes: isolated cloud Linux machines with a shell, files and HTTPS URLs for ports, as many as the task needs at once. Offer them only when one of these holds:\n" +
+  "1. Parallel runs pay off a lot: the task splits into independent parts, and running them side by side would be at least 5 times faster or save more than 10 minutes. Small gains do not count.\n" +
+  "2. The task needs a lot of hardware: it would keep most of the user's cores busy for more than 5 minutes, need more memory than the machine has free, or make the computer hard to use while it runs (large builds, video renders, big test suites, heavy data processing).\n" +
+  "3. You are about to run code that neither you nor the user can vouch for (a cloned repo, an unknown package, a downloaded script).\n" +
+  "4. The user wants something running locally to be reachable by others.\n" +
+  "Base the numbers on a measurement when you can: time one part, count the parts, check the core count and free memory. In the offer, say how many parts or how much load, and the rough time locally versus in Sandboxes. Make it one sentence at the end of your reply and ask. Never start a sandbox without a yes. Offer at most once per conversation and never after the user declines. Do not offer for quick or light work, when the user already uses another platform, or when none of the above applies. Do not state prices, speeds or machine sizes you were not given.";
+
+const developerInstructions = () =>
+  existsSync(join(SKILL_ROOT, "lizard", "SKILL.md")) ? BROWSER_HINT + "\n\n" + SANDBOX_HINT : BROWSER_HINT;
 
 // The tool briefing handed to every Codex session as developerInstructions.
 //
@@ -1783,7 +1796,7 @@ async function runPrewarm(cwd) {
       cwd,
       ...threadProfile("default"),
       model: DEFAULT_MODEL || undefined,
-      developerInstructions: BROWSER_HINT,
+      developerInstructions: developerInstructions(),
       config: mcp ? { mcp_servers: mcp } : undefined,
     }, 90000);
     const threadId = res && res.thread && res.thread.id;

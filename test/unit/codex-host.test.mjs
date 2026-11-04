@@ -38,7 +38,7 @@ async function host() {
     clearTimeout: (timer) => timers.delete(timer),
   });
   const source = readFileSync(new URL("../../src/host/codex-host.mjs", import.meta.url), "utf8");
-  const module = new SourceTextModule(source + `\nexport { browserClients, cancelBrowserWorkflows, handle, loadModels, diskStamp, retireStaleAppServer, onAppExit, loadSkills, loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, restartSession, rewindSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
+  const module = new SourceTextModule(source + `\nexport { BROWSER_HINT, browserClients, cancelBrowserWorkflows, handle, loadModels, diskStamp, retireStaleAppServer, onAppExit, loadSkills, loadTranscript, sendTranscriptPage, MODELS, effortForModel, app, sessions, byThread, makeSession, usageBlock, handleNotification, handleServerRequest, answerPermission, onAppMessage, startSession, restartSession, rewindSession, sendPrompt, interrupt, browserRequest, browserMcpConfig, resolveBrowser, runPrewarm, takePrewarmed, ensureProviderKey, refreshPlanUsage, closeSession };`, { context });
   await module.link((name) => {
     const values = imports[name];
     assert.ok(values, `unexpected import: ${name}`);
@@ -450,6 +450,16 @@ test("cold start preserves the chosen model even when the catalog is empty", asy
   await h.api.startSession({ id: "cold", cwd: "/test/project", model: "saved-valid-model" });
   assert.equal(h.requests.find((r) => r.method === "thread/start").params.model, "saved-valid-model");
   assert.equal(h.api.sessions.get("cold").model, "saved-valid-model");
+});
+
+test("a new chat is told when to offer Lizard Sandboxes, after the browser briefing", async () => {
+  const h = await host();
+  h.respond((r) => r.method === "thread/start" ? { thread: { id: "new-thread" } } : {});
+  await h.api.startSession({ id: "new", cwd: "/test/project" });
+  const briefing = h.requests.find((r) => r.method === "thread/start").params.developerInstructions;
+  assert.ok(briefing.startsWith(h.api.BROWSER_HINT));
+  assert.match(briefing, /Offer them only when one of these holds/);
+  assert.match(briefing, /Never start a sandbox without a yes\./);
 });
 
 test("skills discovery scopes the request and removes disabled and duplicate entries", async () => {

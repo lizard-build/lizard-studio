@@ -723,6 +723,16 @@ function resolveBrowser(msg) {
   p.resolve({ ok: msg.ok !== false, data: msg.data, error: msg.error });
 }
 
+// When to offer Lizard Sandboxes. Sent only alongside the bundled lizard
+// skill, which is what runs them.
+const SANDBOX_HINT =
+  "Lizard Studio is made by Lizard (lizard.build). The bundled `lizard` skill can run work in Lizard Sandboxes: isolated cloud Linux machines with a shell, files and HTTPS URLs for ports, as many as the task needs at once. Offer them only when one of these holds:\n" +
+  "1. Parallel runs pay off a lot: the task splits into independent parts, and running them side by side would be at least 5 times faster or save more than 10 minutes. Small gains do not count.\n" +
+  "2. The task needs a lot of hardware: it would keep most of the user's cores busy for more than 5 minutes, need more memory than the machine has free, or make the computer hard to use while it runs (large builds, video renders, big test suites, heavy data processing).\n" +
+  "3. You are about to run code that neither you nor the user can vouch for (a cloned repo, an unknown package, a downloaded script).\n" +
+  "4. The user wants something running locally to be reachable by others.\n" +
+  "Base the numbers on a measurement when you can: time one part, count the parts, check the core count and free memory. In the offer, say how many parts or how much load, and the rough time locally versus in Sandboxes. Make it one sentence at the end of your reply and ask. Never start a sandbox without a yes. Offer at most once per conversation and never after the user declines. Do not offer for quick or light work, when the user already uses another platform, or when none of the above applies. Do not state prices, speeds or machine sizes you were not given.";
+
 // Appended to claude's system prompt so it knows the live-tab tools exist.
 const BROWSER_HINT =
   "Browser tool timeouts do not prove that the side panel is closed. Ask the user to open or reopen Lizard Studio, open its side panel, or restart the extension only when a tool error or documentation gives a specific reason that this step is needed; a generic timeout is not enough. Do not repeat the request after the user confirms they have done it. After a timeout, check the page with a read before retrying an action, since the action may have completed. If access still fails, report the exact error and continue work that does not need browser access. " +
@@ -1374,6 +1384,8 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
   // Ship the lizard-build/skill bootstrap skill to this session (see the
   // refreshBundledSkill block above) — ephemeral, doesn't touch user config.
   if (existsSync(SKILL_MARKER)) args.push("--plugin-dir", SKILL_DIR);
+  // claude takes one --append-system-prompt; every briefing goes into it.
+  const briefing = [];
 
   // Register the browser MCP server so claude can inspect the live tab. The
   // read-only tools are pre-allowed; browser_eval still goes through the normal
@@ -1401,8 +1413,10 @@ function startClaude({ id, cwd, model, effort, permissionMode, resume }) {
       // only ships the open-tabs list once, and the model refreshes it on demand.
       "mcp__browser__browser_tabs,mcp__browser__browser_info,mcp__browser__browser_dom,mcp__browser__browser_console,mcp__browser__browser_network,mcp__browser__browser_screenshot,mcp__browser__browser_snapshot"
     );
-    args.push("--append-system-prompt", BROWSER_HINT);
+    briefing.push(BROWSER_HINT);
   }
+  if (existsSync(SKILL_MARKER)) briefing.push(SANDBOX_HINT);
+  if (briefing.length) args.push("--append-system-prompt", briefing.join("\n\n"));
 
   log("spawning", CLAUDE, args.join(" "), "cwd=", s.cwd, "id=", id, DETACH ? "(via launchd)" : "(direct)");
   let proc;
