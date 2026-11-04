@@ -390,6 +390,20 @@ test("history reads the newest five full turns and passes the older cursor", asy
   assert.equal(h.requests.at(-1).params.cursor, "older");
 });
 
+test("the answer mark reaches the panel live and from history", async () => {
+  const h = await host(), s = h.session();
+  h.api.handleNotification("item/completed", { threadId: s.threadId, item: { type: "agentMessage", id: "note", text: "Checking.", phase: "commentary" } });
+  h.api.handleNotification("item/completed", { threadId: s.threadId, item: { type: "agentMessage", id: "answer", text: "Done.", phase: "final_answer" } });
+  h.api.handleNotification("item/completed", { threadId: s.threadId, item: { type: "agentMessage", id: "legacy", text: "Old model.", phase: null } });
+  const live = (id) => h.messages.find((m) => m.data?.type === "assistant" && m.data.message.id === id).data.message;
+  assert.equal(live("note").phase, "commentary");
+  assert.equal(live("answer").phase, "final_answer");
+  assert.equal("phase" in live("legacy"), false, "no mark means no guess");
+  h.respond(() => ({ data: [{ id: "t1", startedAt: 1000, items: [{ id: "h", type: "agentMessage", text: "Done.", phase: "final_answer" }] }], nextCursor: null }));
+  await h.api.loadTranscript({ id: "a", sessionId: "thread-a", requestId: "r1", paged: true });
+  assert.equal(h.messages.at(-1).events[0].message.phase, "final_answer");
+});
+
 test("oversized Unicode history survives native frames without truncation", async () => {
   const h = await host();
   const original = { type: "transcript", id: "a", sessionId: "thread-a", requestId: "large", events: [{ text: 'Привет 🦎 \"\\'.repeat(120000) }], paged: true, done: true };

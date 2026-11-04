@@ -3552,8 +3552,9 @@
     if (takeUsageReply(chat, body, text, asked)) return;
     attachAssistantRow(chat, body);
     closeToolGroup(chat);
-    body.appendChild(R.markdown(text));
+    const node = body.appendChild(R.markdown(text));
     if (chat.id === activeId && atBottom(chat)) scrollToBottom(chat);
+    return node;
   }
 
   // ---- per-message footer (copy + relative time) ----------------------------
@@ -4195,14 +4196,16 @@
   }
 
   // ---- work tray ---------------------------------------------------------------
-  // Once a turn has its answer, the way there — the notes between tool calls
-  // and the tool groups themselves — folds into one line above it: "Worked for
-  // 1m 42s · 7 tool calls ›". The answer is the run of prose the body ends
-  // with; a turn with no tool call, or no prose after its last one, stays as it
-  // is. Opened, the line shows that history again, every group and card still
-  // opening on its own, and sticks to the top while a long one scrolls past.
+  // Once a ChatGPT turn has its answer, the way there — the notes between tool
+  // calls and the tool groups themselves — folds into one line above it:
+  // "Worked for 1m 42s · 7 tool calls ›". ChatGPT marks the answer itself
+  // (phase "final_answer"); a turn without that mark, or without a tool call
+  // before it, stays as it is. Claude marks nothing, and a guess can hide the
+  // answer (a long reply, then one saved note and a closing line), so Claude
+  // turns never fold. Opened, the line shows that history again, every group
+  // and card still opening on its own, and sticks to the top while a long one
+  // scrolls past.
   const TRAY_EASE = "cubic-bezier(.2,.8,.2,1)";
-  const isAnswerBlock = (n) => n.classList.contains("md") || n.classList.contains("assistant-stream");
 
   // Safe to run again on the same body: a turn that went on after its answer
   // (a background task woke the model) gets the old tray, the old answer and
@@ -4212,10 +4215,11 @@
   function trayTurn(body, { ms = 0, total = false, mode = "collapsed", scroller = null } = {}) {
     if (!body) return null;
     const kids = [...body.children].filter((n) => !n.classList.contains("msg-footer"));
-    let cut = kids.length;
-    while (cut > 0 && isAnswerBlock(kids[cut - 1])) cut--;
-    const work = kids.slice(0, cut);
-    if (cut === kids.length || !work.length) return null;
+    let cut = kids.findLastIndex((n) => n.dataset.phase === "final_answer");
+    // An answer sent in parts keeps its earlier parts beside it.
+    while (cut > 0 && kids[cut - 1].dataset.phase === "partial_answer") cut--;
+    const work = cut > 0 ? kids.slice(0, cut) : [];
+    if (!work.length) return null;
     const old = work[0].classList.contains("work-tray") ? work[0] : null;
     if (old && work.length === 1) return null;
     const calls = work.reduce((n, node) => n + (node.matches(".tool-card, .ask-block") ? 1 : 0) + node.querySelectorAll(".tool-card, .ask-block").length, 0);
@@ -5799,6 +5803,8 @@
         // *before* content_block_stop, so there is legitimately no record yet
         // and the right move is to leave it alone. Codex's copy arrives after,
         // which is the case this exists for.
+        // ChatGPT says which message is the answer; the work tray folds by it.
+        const phase = d.message && d.message.phase;
         if (streamed) {
           const rec = chat.streamedText.get(msgId);
           const full = content.filter((b) => b.type === "text").map((b) => b.text || "").join("");
@@ -5807,6 +5813,7 @@
             rec.node.classList.remove("streaming");
             rec.text = full;
           }
+          if (rec && rec.node && phase) rec.node.dataset.phase = phase;
         }
         for (const block of content) {
           if (block.type === "tool_use") {
@@ -5818,7 +5825,10 @@
             // the finished block directly. When it was streamed, the live nodes
             // already are the canonical render, so we skip to avoid duplicates.
             // (thinking blocks are intentionally not rendered.)
-            if (block.type === "text") addText(chat, body, block.text);
+            if (block.type === "text") {
+              const node = addText(chat, body, block.text);
+              if (node && phase) node.dataset.phase = phase;
+            }
           }
         }
         if (!streamed) finalizeAssistant(chat, body, Date.now());
@@ -7316,7 +7326,8 @@
             // (thinking blocks are intentionally not rendered.)
             // Skip stale plan-usage dumps — the live toolbar meter owns those.
             if (isUsageText(block.text)) continue;
-            addText(chat, body, block.text);
+            const node = addText(chat, body, block.text);
+            if (node && ev.message.phase) node.dataset.phase = ev.message.phase;
           }
         }
         finalizeAssistant(null, body, ts);

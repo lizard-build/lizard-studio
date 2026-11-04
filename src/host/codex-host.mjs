@@ -1270,6 +1270,8 @@ function onItemCompleted(s, params) {
           model: s.model || DEFAULT_MODEL || "codex",
           content: [{ type: "text", text: item.text || "" }],
           usage: usageBlock(s),
+          // "commentary" or "final_answer": the panel folds the notes by it.
+          ...(item.phase ? { phase: item.phase } : {}),
         },
       });
       break;
@@ -2175,7 +2177,8 @@ function replayItem(s, item) {
       if (!item.text) return null;
       return [{
         type: "assistant",
-        message: { id: item.id, type: "message", role: "assistant", model: s.model || DEFAULT_MODEL || "codex", content: [{ type: "text", text: item.text }], usage: {} },
+        message: { id: item.id, type: "message", role: "assistant", model: s.model || DEFAULT_MODEL || "codex", content: [{ type: "text", text: item.text }], usage: {},
+          ...(item.phase ? { phase: item.phase } : {}) },
       }];
     case "commandExecution": {
       const t = commandTool(item.command || "", item.commandActions);

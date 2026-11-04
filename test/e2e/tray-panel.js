@@ -1,6 +1,7 @@
 "use strict";
-// The work tray: a finished turn's notes and tool calls fold into one line
-// above its answer, from history at once and from a live turn with motion.
+// The work tray: a finished ChatGPT turn's notes and tool calls fold into one
+// line above the message ChatGPT marked as its answer, from history at once and
+// from a live turn with motion. A turn with no mark (every Claude turn) stays open.
 window.runTrayPanelTests = async function () {
   const t = window.__test, passed = [], id = "tray-a";
   const check = (name, ok) => { if (!ok) throw new Error(name); passed.push(name); };
@@ -16,10 +17,10 @@ window.runTrayPanelTests = async function () {
     for (let i = 0; i < calls; i++) {
       const content = i % 2 ? [] : [{ type: "text", text: `Step ${i}: reading the next part of the panel code to see where the chat menu gets rebuilt.` }];
       content.push(tool(`${prefix}-${i}`, "Bash", { command: `grep -n "step ${i}" src/panel/chat.js` }));
-      live({ type: "assistant", message: { id: `${prefix}-m${i}`, content } });
+      live({ type: "assistant", message: { id: `${prefix}-m${i}`, content, phase: "commentary" } });
       live(toolResult(`${prefix}-${i}`, `${i}: match`));
     }
-    live({ type: "assistant", message: { id: `${prefix}-end`, content: [{ type: "text", text: answer }] } });
+    live({ type: "assistant", message: { id: `${prefix}-end`, content: [{ type: "text", text: answer }], phase: "final_answer" } });
     live({ type: "result", subtype: "success", duration_ms: ms, result: answer });
   };
   const send = async (text) => {
@@ -31,21 +32,26 @@ window.runTrayPanelTests = async function () {
   };
 
   t.emit({ type: "ready", ok: true, version: 41, home: "/test" });
-  t.emit({ type: "agentReady", agent: "claude", ok: true, version: 2 });
+  t.emit({ type: "agentReady", agent: "codex", ok: true, version: 12 });
   await frame();
   const request = t.posted("loadTranscript").at(-1);
-  check("a restored Claude chat asks for its history", !!request && request.paged);
+  check("a restored chat asks for its history", !!request && request.paged);
   t.emit({ type: "transcript", id: request.id, sessionId: request.sessionId, requestId: request.requestId, paged: true, done: true, nextCursor: null, events: [
     { type: "user", timestamp: at(0), message: { content: "Why does the chat menu flicker?" } },
-    { type: "assistant", timestamp: at(5), message: { id: "h1", content: [{ type: "text", text: "Looking for the menu code." }, tool("h-t1", "Bash", { command: "ls src/panel" })] } },
+    { type: "assistant", timestamp: at(5), message: { id: "h1", phase: "commentary", content: [{ type: "text", text: "Looking for the menu code." }, tool("h-t1", "Bash", { command: "ls src/panel" })] } },
     { ...toolResult("h-t1", "chat.js"), timestamp: at(20) },
     { type: "assistant", timestamp: at(40), message: { id: "h2", content: [tool("h-t2", "Read", { file_path: "/test/project/src/panel/chat.js" })] } },
     { ...toolResult("h-t2", "function renderChatMenuList() {}"), timestamp: at(60) },
     // A transcript stores one message as several lines under one id.
     { type: "assistant", timestamp: at(88), message: { id: "h3", content: [{ type: "thinking", thinking: "The fix holds." }] } },
-    { type: "assistant", timestamp: at(90), message: { id: "h3", content: [{ type: "text", text: "Fixed: the menu no longer rebuilds." }] } },
+    { type: "assistant", timestamp: at(90), message: { id: "h3", phase: "final_answer", content: [{ type: "text", text: "Fixed: the menu no longer rebuilds." }] } },
     { type: "user", timestamp: at(100), message: { content: "And what is 2 + 2?" } },
-    { type: "assistant", timestamp: at(102), message: { id: "h4", content: [{ type: "text", text: "Four." }] } },
+    { type: "assistant", timestamp: at(102), message: { id: "h4", phase: "final_answer", content: [{ type: "text", text: "Four." }] } },
+    // No answer mark, as on every Claude turn: a long reply, one saved note, a closing line.
+    { type: "user", timestamp: at(104), message: { content: "What did you learn about renders?" } },
+    { type: "assistant", timestamp: at(105), message: { id: "h6", content: [{ type: "text", text: "Lessons from this session: " + "render each chunk in its own process. ".repeat(20) }, tool("h-t6", "Edit", { file_path: "/test/notes.md" })] } },
+    { ...toolResult("h-t6", "edited"), timestamp: at(106) },
+    { type: "assistant", timestamp: at(107), message: { id: "h7", content: [{ type: "text", text: "Saved all of it to notes." }] } },
     { type: "user", timestamp: at(110), message: { content: "Run the tests" } },
     { type: "assistant", timestamp: at(112), message: { id: "h5", content: [tool("h-t3", "Bash", { command: "npm test" })] } },
     { ...toolResult("h-t3", "pass 421"), timestamp: at(130) },
@@ -64,6 +70,9 @@ window.runTrayPanelTests = async function () {
   check("notes and tool groups go inside the tray, hidden", tray.textContent.includes("Looking for the menu code.") && !!tray.querySelector(".tool-group")
     && tray.querySelector(".work-tray-list").getBoundingClientRect().height === 0);
   check("a turn without tool calls has no tray", !rows().find((row) => row.textContent.includes("Four.")).querySelector(".work-tray"));
+  const unmarked = rows().find((row) => row.textContent.includes("Lessons from this session"));
+  check("a turn with no answer mark keeps every message in view", !unmarked.querySelector(".work-tray")
+    && unmarked.textContent.includes("Saved all of it to notes.") && !!unmarked.querySelector(".tool-group"));
   check("a turn that ends on a tool call has no tray", !rows().at(-1).querySelector(".work-tray"));
 
   head.click();
@@ -87,9 +96,9 @@ window.runTrayPanelTests = async function () {
 
   // The history ended on a tool call; the model picks that turn up live.
   box.scrollTop = box.scrollHeight;
-  live({ type: "assistant", message: { id: "l1", content: [{ type: "text", text: "Checking the build." }, tool("l-t1", "Bash", { command: "npm run build" })] } });
+  live({ type: "assistant", message: { id: "l1", phase: "commentary", content: [{ type: "text", text: "Checking the build." }, tool("l-t1", "Bash", { command: "npm run build" })] } });
   live(toolResult("l-t1", "built"));
-  live({ type: "assistant", message: { id: "l2", content: [{ type: "text", text: "The build passes." }] } });
+  live({ type: "assistant", message: { id: "l2", phase: "final_answer", content: [{ type: "text", text: "The build passes." }] } });
   live({ type: "result", subtype: "success", duration_ms: 125000, result: "The build passes." });
   const resumed = rows().at(-1);
   check("the fold waits a moment after the answer", !resumed.querySelector(".work-tray"));
@@ -102,7 +111,7 @@ window.runTrayPanelTests = async function () {
   // The same turn wakes up again after it folded: one tray holds all of it.
   live({ type: "assistant", message: { id: "l3", content: [tool("l-t2", "Bash", { command: "npm run lint" })] } });
   live(toolResult("l-t2", "clean"));
-  live({ type: "assistant", message: { id: "l4", content: [{ type: "text", text: "Lint is clean too." }] } });
+  live({ type: "assistant", message: { id: "l4", phase: "final_answer", content: [{ type: "text", text: "Lint is clean too." }] } });
   live({ type: "result", subtype: "success", duration_ms: 5000, result: "Lint is clean too." });
   await sleep(900);
   const merged = resumed.querySelectorAll(".work-tray");

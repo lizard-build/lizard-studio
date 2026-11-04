@@ -11,7 +11,7 @@ window.runReplayOrderPanelTests = async function () {
   t.emit({ type: "agentReady", agent: "codex", ok: true, version: 12 });
   t.emit({ type: "backgroundReplay", message: { type: "backgroundPrompt", id, text: "Post it on both sites" } });
   const replay = (data) => t.emit({ type: "backgroundReplay", message: { type: "event", id, data } });
-  const note = (msgId, text) => {
+  const note = (msgId, text, phase = "commentary") => {
     for (const event of [
       { type: "message_start", message: { id: msgId, role: "assistant", content: [], usage: {} } },
       { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
@@ -19,7 +19,7 @@ window.runReplayOrderPanelTests = async function () {
       { type: "content_block_stop", index: 0 },
       { type: "message_stop" },
     ]) replay({ type: "stream_event", event });
-    replay({ type: "assistant", message: { id: msgId, role: "assistant", content: [{ type: "text", text }], usage: {} } });
+    replay({ type: "assistant", message: { id: msgId, role: "assistant", content: [{ type: "text", text }], usage: {}, phase } });
   };
   const tool = (toolId) => {
     replay({ type: "assistant", message: { id: "codex_tool_" + toolId, role: "assistant",
@@ -30,7 +30,7 @@ window.runReplayOrderPanelTests = async function () {
   tool("a"); tool("b");
   note("note-2", "Second note between tools.");
   tool("c");
-  note("answer", "Final answer.");
+  note("answer", "Final answer.", "final_answer");
   replay({ type: "result", result: "Final answer.", usage: {} });
   t.emit({ type: "backgroundRestoreEnd" });
   const req = t.posted("loadTranscript").at(-1);

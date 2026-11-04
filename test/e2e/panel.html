@@ -206,8 +206,8 @@
       };
       const trayRegression = new URLSearchParams(location.search).get("regressions") === "tray";
       if (trayRegression) store.rkChatV2 = {
-        activeId: "tray-a", lastHarness: "claude",
-        tabs: [{ id: "tray-a", title: "Work tray", harness: "claude", cwd: "/test/project", model: "opus", mode: "default", sessionId: "tray-session" }],
+        activeId: "tray-a", lastHarness: "codex",
+        tabs: [{ id: "tray-a", title: "Work tray", harness: "codex", cwd: "/test/project", model: "test-model", mode: "workspace", sessionId: "tray-session" }],
       };
       if (codexRegression) store.rkChatV2 = {
         activeId: "audit-a", lastHarness: "codex",
