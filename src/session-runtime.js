@@ -205,6 +205,13 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
       send(origin, s && origin !== s.controller ? { type: "sharedEvent", message: msg } : msg);
       return;
     }
+    if (msg.type === "backgroundPrompt") {
+      // The host's copy of the question that opened the turn, sent only while
+      // it replays its journal. Panels get it from this journal on restore.
+      const s = r.sessions.get(msg.id);
+      if (!r.restored && s?.agent === "codex") s.journal.push(msg);
+      return;
+    }
     if (["ready", "agentReady", "models", "planUsage"].includes(msg.type)) r.ready.set(msg.type + (msg.agent || ""), msg);
     const s = getSession(r, msg);
     if (s) {

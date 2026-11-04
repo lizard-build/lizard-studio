@@ -3925,7 +3925,7 @@
         // already been handled, which would find no record and render the text
         // a second time.
         if (blk.type === "text" && blk.msgId) chat.streamedText.set(blk.msgId, { node: blk.el, text: blk.buf });
-        if (blk.type === "text" && blk.shown < blk.buf.length && !document.hidden && blk.buf.length - blk.shown <= 600) {
+        if (blk.type === "text" && blk.shown < blk.buf.length && !document.hidden && !backgroundRestoring && blk.buf.length - blk.shown <= 600) {
           // Let the typewriter run out the short remaining tail (its catch-up
           // term makes that take well under half a second), then finalize.
           blk.done = true;
@@ -3939,7 +3939,9 @@
           blk.guard = setTimeout(() => finalizeStreamBlock(chat, blk), 2000);
         } else if (blk.type === "text") {
           // Huge backlog or a hidden tab (rAF is throttled there) — cut
-          // straight to the final render rather than type for seconds.
+          // straight to the final render rather than type for seconds. A
+          // reattach replays a whole turn in one burst, and a typed note would
+          // land on a later frame, under every tool card that followed it.
           finalizeStreamBlock(chat, blk);
         } else if (blk.raf) {
           cancelAnimationFrame(blk.raf);

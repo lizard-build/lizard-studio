@@ -198,7 +198,8 @@
       const auditRegression = new URLSearchParams(location.search).get("regressions") === "audit";
       const codexRegression = auditRegression || new URLSearchParams(location.search).get("regressions") === "codex";
       const backgroundRegression = new URLSearchParams(location.search).get("regressions") === "background";
-      if (historyRegression || backgroundRegression) store.rkChatV2 = {
+      const replayOrderRegression = new URLSearchParams(location.search).get("regressions") === "replay-order";
+      if (historyRegression || backgroundRegression || replayOrderRegression) store.rkChatV2 = {
         activeId: "history-a", lastHarness: "codex",
         tabs: [{ id: "history-a", title: "History", harness: "codex", model: "test-model", cwd: "/test/project", sessionId: "thread-history", mode: "workspace" }],
         history: [{ id: "history-old", title: "Old chat", harness: "claude", model: "claude-opus-5-5", cwd: "/test/project", sessionId: "session-old", mode: "default", ts: Date.now() - 86400000 }],
@@ -273,6 +274,13 @@
             script.onload = resolve; script.onerror = reject; document.body.appendChild(script);
           });
           window.__test.backgroundResult = await window.runBackgroundPanelTests();
+        }
+        if (replayOrderRegression) {
+          await new Promise((resolve, reject) => {
+            const script = document.createElement("script"); script.src = "replay-order-panel.js?t=" + stamp;
+            script.onload = resolve; script.onerror = reject; document.body.appendChild(script);
+          });
+          window.__test.replayOrderResult = await window.runReplayOrderPanelTests();
         }
         if (trayRegression) {
           await new Promise((resolve, reject) => {

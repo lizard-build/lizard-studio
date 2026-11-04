@@ -74,6 +74,23 @@ test("a new worker restores an active daemon turn before accepting panel command
   assert.ok(p.sent.some((m) => m.type === "event" && m.data?.result === "Done"));
 });
 
+test("a daemon replay keeps the question that opened the turn, ahead of its answer", () => {
+  const r = runtime({ autoRestore: false }), p = r.panel();
+  r.native[0].emit({ type: "daemonSnapshot", sessions: [{ id: "a", agent: "codex",
+    spec: { cwd: "/project" }, started: true, running: false, submitted: true,
+    sessionId: "thread-a", turnIds: ["turn-a"] }] });
+  r.native[0].emit({ type: "backgroundPrompt", id: "a", text: "Publish it" });
+  r.native[0].emit({ type: "event", id: "a", data: { type: "assistant", message: { id: "m", content: [{ type: "text", text: "Published" }] } } });
+  r.native[0].emit(result("a"));
+  r.native[0].emit({ type: "daemonRestoreDone" });
+  const replayed = p.sent.filter((m) => m.type === "backgroundReplay").map((m) => m.message);
+  assert.deepEqual(replayed.map((m) => m.type), ["backgroundPrompt", "event", "event"]);
+  assert.equal(replayed[0].text, "Publish it");
+  assert.equal(p.sent.filter((m) => m.type === "backgroundPrompt").length, 0, "the question reaches panels only through the replay");
+  const again = r.panel();
+  assert.equal(again.sent.filter((m) => m.type === "backgroundReplay" && m.message.type === "backgroundPrompt").length, 1);
+});
+
 test("results are recorded with no panel and replaying a session does not mark it read", async () => {
   const r = runtime(), p = r.panel(); r.start(p, "a");
   p.disconnect(); r.native[0].emit(result("a")); await r.settle();
