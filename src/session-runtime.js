@@ -254,7 +254,10 @@ globalThis.createStudioSessions = function ({ chrome, createBrowser, activity, p
       if (s.agent === "codex" && ["event", "error", "promptResult"].includes(msg.type)
           && !(msg.type === "event" && msg.data?.subtype === "init")) s.journal.push(msg);
       if (msg.type === "event" && msg.data?.type === "result" || msg.type === "interrupted" || msg.type === "exit") {
-        if (msg.type === "event") resultStatus(s.id, true);
+        // Before daemonRestoreDone the host is replaying each chat's journal,
+        // last answer included. Those answers were seen before; marking them
+        // would paint every chat green after each reconnect.
+        if (msg.type === "event" && r.restored) resultStatus(s.id, true);
         s.running = false;
         s.failed = !!msg.data?.is_error || msg.type === "exit" || msg.type === "interrupted";
         s.permissions.clear();

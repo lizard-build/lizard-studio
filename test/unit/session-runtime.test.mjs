@@ -91,6 +91,19 @@ test("a daemon replay keeps the question that opened the turn, ahead of its answ
   assert.equal(again.sent.filter((m) => m.type === "backgroundReplay" && m.message.type === "backgroundPrompt").length, 1);
 });
 
+test("a daemon replay does not mark old answers unread, a live answer after it does", () => {
+  const r = runtime({ autoRestore: false }), p = r.panel();
+  r.native[0].emit({ type: "daemonSnapshot", sessions: ["a", "b"].map((id) => ({ id, agent: "claude",
+    spec: { cwd: "/project" }, started: true, running: false, submitted: true, sessionId: "s-" + id, turnIds: [] })) });
+  r.native[0].emit(result("a"));
+  r.native[0].emit(result("b"));
+  r.native[0].emit({ type: "daemonRestoreDone" });
+  assert.deepEqual(r.results, [], "replayed answers stay read");
+  r.native[0].emit(result("a"));
+  assert.deepEqual(r.results, [{ id: "a", unread: true }]);
+  assert.ok(p);
+});
+
 test("results are recorded with no panel and replaying a session does not mark it read", async () => {
   const r = runtime(), p = r.panel(); r.start(p, "a");
   p.disconnect(); r.native[0].emit(result("a")); await r.settle();
