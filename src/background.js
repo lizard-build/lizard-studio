@@ -386,14 +386,25 @@ async function toggleSidePanel(tab) {
 
 // declarativeNetRequest session rule that strips framing headers from sub-frame
 // requests, so Responsive mode's iframe can load sites that set X-Frame-Options
-// or CSP frame-ancestors. Scoped to the requesting tab only — the rule must not
-// weaken CSP anywhere else in the browser. One rule per tab (id = base + tabId)
-// so several tabs can run the tool independently.
+// or CSP frame-ancestors. Scoped to the requesting tab AND to the origin of
+// the page being previewed (the iframe loads that page's own URL) — the rule
+// must not weaken CSP anywhere else, including third-party frames (ads, embeds,
+// payment widgets) inside the same tab. One rule per tab (id = base + tabId) so
+// several tabs can run the tool independently.
 const RF_RULE_BASE = 1000;
-function setResponsiveRule(on, tabId) {
+// "https://app.test:8080" -> a urlFilter matching only that origin's URLs, or
+// null for anything that isn't a plain http(s) origin (nothing to strip then).
+function responsiveUrlFilter(pageUrl) {
+  let origin;
+  try { origin = new URL(String(pageUrl || "")).origin; } catch (_) { return null; }
+  if (!/^https?:\/\/[^/*|^\s]+$/i.test(origin)) return null;
+  return "|" + origin + "/";
+}
+function setResponsiveRule(on, tabId, pageUrl) {
   if (tabId == null) return Promise.resolve();
   const ruleId = RF_RULE_BASE + tabId;
-  const addRules = on ? [{
+  const urlFilter = on ? responsiveUrlFilter(pageUrl) : null;
+  const addRules = on && urlFilter ? [{
     id: ruleId,
     priority: 1,
     action: {
@@ -404,7 +415,7 @@ function setResponsiveRule(on, tabId) {
         { header: "content-security-policy-report-only", operation: "remove" },
       ],
     },
-    condition: { resourceTypes: ["sub_frame"], tabIds: [tabId] },
+    condition: { resourceTypes: ["sub_frame"], tabIds: [tabId], urlFilter },
   }] : [];
   return chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId], addRules })
     .catch((err) => console.error("[RK] DNR updateSessionRules", err));
@@ -450,7 +461,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "RK_RESPONSIVE_ON":
       // Ack only after the DNR rule is actually live so the content script can
       // load the iframe knowing the CSP/X-Frame-Options strip is in effect.
-      setResponsiveRule(true, sender.tab && sender.tab.id).finally(() => {
+      // Only the top frame runs Responsive mode; its URL is what gets previewed.
+      setResponsiveRule(sender.frameId === 0, sender.tab && sender.tab.id, sender.url).finally(() => {
         try { sendResponse({ ok: true }); } catch (e) {}
       });
       return true; // async response — keep the message channel open

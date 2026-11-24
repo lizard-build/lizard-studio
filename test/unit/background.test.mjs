@@ -14,7 +14,7 @@ function faviconDocument() {
 
 function worker(options = {}) {
   const { writeBadge, sessionStorage, executeScript = async () => [], setPanelBehavior = async () => {}, timer = setTimeout, log = console } = typeof options === "function" ? { executeScript: options } : options;
-  const listeners = {}, tabsSent = [], opened = [], contexts = [], icons = [], titles = [], badges = [], backgrounds = [], textColors = [];
+  const listeners = {}, dnr = [], tabsSent = [], opened = [], contexts = [], icons = [], titles = [], badges = [], backgrounds = [], textColors = [];
   const event = (name) => ({ addListener(fn) { (listeners[name] ||= []).push(fn); } });
   const tabs = [{ id: 11, windowId: 101, active: true }, { id: 22, windowId: 202, active: true }];
   const chrome = {
@@ -25,11 +25,11 @@ function worker(options = {}) {
     sidePanel: { setPanelBehavior, open: async (opts) => opened.push(opts) },
     action: { onClicked: event("clicked"), setIcon: async (icon) => icons.push(icon), setTitle: async ({ title }) => titles.push(title), setBadgeText: async ({ text }) => { if (writeBadge) await writeBadge(text); badges.push(text); }, setBadgeBackgroundColor: async ({ color }) => backgrounds.push(color), setBadgeTextColor: async ({ color }) => textColors.push(color) }, commands: { onCommand: event("command") },
     windows: { WINDOW_ID_CURRENT: -2, WINDOW_ID_NONE: -1, onFocusChanged: event("focus") },
-    declarativeNetRequest: { updateSessionRules: async () => {} },
+    declarativeNetRequest: { updateSessionRules: async (update) => { dnr.push(JSON.parse(JSON.stringify(update))); } },
   };
   let nativeActivity, nativeResult;
   vm.runInNewContext(readFileSync(new URL("../../src/background.js", import.meta.url), "utf8"), {
-    chrome, console: log, setTimeout: timer, clearTimeout, importScripts() {}, createStudioBrowser() {}, StudioPrefsSync: { createStore() { return {}; } },
+    chrome, console: log, URL, setTimeout: timer, clearTimeout, importScripts() {}, createStudioBrowser() {}, StudioPrefsSync: { createStore() { return {}; } },
     createStudioSessions({ activity, resultStatus }) { nativeActivity = activity; nativeResult = resultStatus; return { connect() { return false; } }; },
   });
   const fire = (name, ...args) => (listeners[name] || []).map((fn) => fn(...args));
@@ -42,7 +42,7 @@ function worker(options = {}) {
     return { received, identify, read: (id, token) => messages.forEach(fn => fn({ type: "resultRead", id, token })), activity: (count) => messages.forEach((fn) => fn({ type: "chatActivity", count })), close: () => disconnect.forEach((fn) => fn()) };
   }
   const message = (msg, windowId) => fire("message", msg, { tab: { windowId, id: 11 } }, () => {});
-  return { result: (id, unread = true) => nativeResult(id, unread), activity: (count) => nativeActivity(count), panel, message, fire, tabsSent, opened, tabs, contexts, icons, titles, badges, backgrounds, textColors };
+  return { dnr, result: (id, unread = true) => nativeResult(id, unread), activity: (count) => nativeActivity(count), panel, message, fire, tabsSent, opened, tabs, contexts, icons, titles, badges, backgrounds, textColors };
 }
 
 test("attachments, selected elements, and close only reach the source window", () => {
@@ -478,4 +478,18 @@ test("favicon uses local activity until the worker sends the global state", () =
   assert.equal(labels.at(-1), "5", "local chats must not overwrite the total across windows");
   disconnect();
   assert.equal(labels.at(-1), "2");
+});
+
+test("Responsive mode strips framing headers only for the previewed page's origin", async () => {
+  const w = worker();
+  const on = (sender) => new Promise((resolve) => w.fire("message", { type: "RK_RESPONSIVE_ON" }, sender, resolve));
+  await on({ tab: { windowId: 101, id: 11 }, frameId: 0, url: "http://localhost:3000/app?x=1#y" });
+  const rule = w.dnr.at(-1).addRules[0];
+  assert.deepEqual(w.dnr.at(-1).removeRuleIds, [1011]);
+  assert.deepEqual(rule.condition, { resourceTypes: ["sub_frame"], tabIds: [11], urlFilter: "|http://localhost:3000/" });
+  // A sub-frame's content script, or a page without an http(s) origin, gets no rule at all.
+  await on({ tab: { windowId: 101, id: 11 }, frameId: 3, url: "https://ads.example/frame" });
+  assert.deepEqual(w.dnr.at(-1).addRules, []);
+  await on({ tab: { windowId: 101, id: 11 }, frameId: 0, url: "file:///tmp/page.html" });
+  assert.deepEqual(w.dnr.at(-1).addRules, []);
 });
