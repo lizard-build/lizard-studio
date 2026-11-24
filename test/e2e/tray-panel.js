@@ -31,7 +31,7 @@ window.runTrayPanelTests = async function () {
     await frame();
   };
 
-  t.emit({ type: "ready", ok: true, version: 41, home: "/test" });
+  t.emit({ type: "ready", ok: true, version: 42, home: "/test" });
   t.emit({ type: "agentReady", agent: "codex", ok: true, version: 12 });
   await frame();
   const request = t.posted("loadTranscript").at(-1);

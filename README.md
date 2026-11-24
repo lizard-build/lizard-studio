@@ -49,7 +49,7 @@ Both agents support streaming replies, file links, tool cards, model and reasoni
 
 Claude Code supports editing past messages and `/remote-control` for continuing a session in the Claude app. ChatGPT offers its own sign-in flow and permission modes; Remote Control and editing past messages are unavailable there. Settings provide separate files and skills for each agent. Real CLI paths, such as `~/.codex/config.toml`, retain their required names.
 
-Every session includes the [Lizard Skill](https://github.com/lizard-build/skill) bootstrap for deployment tasks.
+Every session includes the [Lizard Skill](https://github.com/lizard-build/skill) bootstrap for deployment tasks. The host ships its own copy of the skill with each release and never downloads it at runtime.
 
 ## The on-page toolkit
 

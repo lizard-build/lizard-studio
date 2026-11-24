@@ -7,7 +7,7 @@ window.runReplayOrderPanelTests = async function () {
   const id = "history-a";
   t.emit({ type: "backgroundRestoreStart", sessions: [{ id, agent: "codex", spec: { cwd: "/test/project", model: "test-model" },
     sessionId: "thread-history", started: true, running: false, submitted: true, turnIds: ["turn-new"] }] });
-  t.emit({ type: "ready", ok: true, version: 41, home: "/test" });
+  t.emit({ type: "ready", ok: true, version: 42, home: "/test" });
   t.emit({ type: "agentReady", agent: "codex", ok: true, version: 12 });
   t.emit({ type: "backgroundReplay", message: { type: "backgroundPrompt", id, text: "Post it on both sites" } });
   const replay = (data) => t.emit({ type: "backgroundReplay", message: { type: "event", id, data } });

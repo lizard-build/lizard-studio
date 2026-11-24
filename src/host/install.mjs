@@ -182,8 +182,8 @@ function install() {
   //    install must not leave a mismatched claude-host/mcp-browser pair behind.
   //    Files: the router Chrome actually launches, the two agent hosts behind
   //    it, their shared plumbing, the browser MCP relay handed to the agent,
-  //    and a bundled fallback copy of the lizard-build/skill bootstrap skill
-  //    (the host refreshes that from upstream itself — see claude-host.mjs).
+  //    and the bundled lizard-build/skill bootstrap skill (pinned to this
+  //    release; never fetched from GitHub at runtime — see claude-host.mjs).
   const HOST_FILES = [
     "router.mjs",
     "hostkit.mjs",
